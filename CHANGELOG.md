@@ -50,6 +50,34 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
 - **New JSON.** `extract` gains `data.selected`: the resolved selection as an
   array of `{index, object_ref}` in source order, or `null` when no
   `--document` was given. `schema_version` stays `1`; the field is additive.
+- **Per-document signature coverage in `verify`.** For every `es:Document` in
+  `es:Documents`, in source order, the report now says which signatures cover
+  it and how: `direct` for a document-level signature placed in that document
+  whose reference scope is complete and whose references resolve to the
+  document's `es:DocumentProfile` and payload `ds:Object`, `frame` for a
+  dossier-level signature with a complete scope covering `es:Documents`.
+  Coverage is decided by resolved references and the implemented scope rules;
+  placement alone never grants it. States: `covered`, `covered_unverified`,
+  `uncovered`, `undetermined`, and `not_modelled` for a profile-less document
+  the parser skipped, listed with the parser's own reason. An embedded dossier
+  is covered like any other payload, and the report states that its own inner
+  signatures are **not** verified by this run: there is no implied recursion.
+- **New codes** `documents_all_covered` (`passed`, or `info` when a document is
+  covered only by signatures that did not verify), `documents_uncovered`
+  (`unknown`) and `documents_coverage_undetermined` (`unknown`). The two
+  blocking ones cap the **dossier** verdict at `indeterminate`, so a dossier
+  with an unsigned sibling document can no longer be `valid` however sound its
+  other signatures are: a verdict of `valid` has to mean the whole dossier's
+  content is signed. They are `unknown`, never `failed` — an unsigned sibling
+  is missing information, not evidence against a signature that did verify —
+  and they change no signature's own checks or verdict.
+- **New JSON.** `data.documents[]` carries `index`, `object_ref` (never a
+  title), `nested_dossier`, `coverage`, `covered_by[]` with each covering
+  signature's index, route and verdict, and an optional `reason`;
+  `data.counts` gains `documents_covered`, `documents_uncovered` and
+  `documents_undetermined`. Human output gains one coverage line per document.
+  `schema_version` stays `1`: every addition is additive and no existing field
+  changed meaning.
 
 - **`--online` revocation fetching**, implemented in the CLI. The
   `openszigno-verify` crate stays network-free and structurally cannot open a
