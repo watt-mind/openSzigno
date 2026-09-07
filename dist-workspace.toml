@@ -47,6 +47,12 @@ create-release = false
 # Smoke-test the built binary on a synthetic fixture before anything is
 # published.
 global-artifacts-jobs = ["./smoke-test"]
+# Upload the assets and undraft the release in the `announce` phase instead of
+# in `host`. `announce` runs after the Homebrew, crates.io, and container jobs,
+# so the release only becomes public once every channel has published. With the
+# default ("host") a failed publish left a public, partially distributed
+# release.
+github-release = "announce"
 
 # The permissions the release workflow grants each custom publish job. A
 # reusable workflow can only narrow the token it is called with, so the
