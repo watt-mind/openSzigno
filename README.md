@@ -145,6 +145,13 @@ trusting the input.
   contaminate stdout.
 - **For people.** Without `--json` the same commands print short, readable
   terminal output that always states the verification boundary.
+- **For triage without cryptography.** `inspect` and `list` describe every
+  `ds:Signature` and container timestamp the dossier carries: placement,
+  algorithms, reference count, XAdES properties, evidence counts, and the
+  claimed signing time. It is the dossier's own account of itself, read at
+  parse time. Nothing in it is verified, every human line says so, and the
+  JSON carries `"verified": false` beside it. Use `verify` for a
+  cryptographic answer.
 - **For safety.** Untrusted input is bounded at every stage: file size, XML
   depth and node count, Base64 length, decoded payload size, ZIP member count
   and compression ratio, and aggregate extraction size. Extraction never
@@ -228,6 +235,11 @@ openszigno inspect tests/fixtures/plain-base64.es3 --json
       "documents": 1,
       "namespace": "https://www.microsec.hu/ds/e-szigno30#",
       "nested_dossiers": 0,
+      "signature_inventory": {
+        "signatures": [],
+        "timestamps": [],
+        "verified": false
+      },
       "signatures_present": 0,
       "signatures_verified": false,
       "timestamps_present": 0,
@@ -311,7 +323,7 @@ openszigno inspect tests/fixtures/doctype.es3 --json
 
 | Command | What it does | Writes files? |
 | --- | --- | --- |
-| `openszigno inspect FILE` | Identifies the dossier and reports title, category, namespace, XML encoding, document count, embedded-dossier count, signature/timestamp presence, the active limits, and capability flags. | No |
+| `openszigno inspect FILE` | Identifies the dossier and reports title, category, namespace, XML encoding, document count, embedded-dossier count, signature/timestamp presence, the unverified signature inventory, the active limits, and capability flags. | No |
 | `openszigno list FILE` | Lists document records in source XML order with title, creation date, MIME type, declared source size (`null`/`?` when the dossier omits it), `OBJREF`, transform chain, and whether the document embeds a dossier. | No |
 | `openszigno validate-structure FILE` | Applies the strict structural rules and reports `valid_structure`, `conformance_warnings`, plus `cryptographic_verification_performed: false`. | No |
 | `openszigno extract FILE --output DIR` | Decodes supported payloads into `DIR`, expanding embedded dossiers into `<file>.d` subdirectories, deduplicating repeated titles, never overwriting an existing file. Restrict it to named documents with `--document`. | Yes |

@@ -105,6 +105,7 @@ pub enum StructuralWarningCode {
     DocumentWithoutProfile,
     SourceSizeMissing,
     CreationDateMissing,
+    SignatureInventoryTruncated,
 }
 
 impl StructuralWarningCode {
@@ -114,6 +115,7 @@ impl StructuralWarningCode {
             Self::DocumentWithoutProfile => "document_without_profile",
             Self::SourceSizeMissing => "source_size_missing",
             Self::CreationDateMissing => "creation_date_missing",
+            Self::SignatureInventoryTruncated => "signature_inventory_truncated",
         }
     }
 }
@@ -157,6 +159,142 @@ pub struct Document {
     pub(crate) payload: String,
 }
 
+/// The largest number of `ds:Signature` elements the inventory describes.
+/// Beyond it the inventory is truncated and `signature_inventory_truncated`
+/// is reported; `signatures_present` still counts every signature.
+pub const MAX_INVENTORIED_SIGNATURES: usize = 64;
+/// The largest number of `es:TimeStamp` elements the inventory describes.
+pub const MAX_INVENTORIED_TIMESTAMPS: usize = 64;
+/// The largest number of `ds:Reference` URIs listed for one signature.
+pub const MAX_INVENTORIED_REFERENCE_URIS: usize = 16;
+/// The largest number of XAdES qualifying-property names listed for one
+/// signature.
+pub const MAX_INVENTORIED_XADES_PROPERTIES: usize = 32;
+/// The largest number of distinct digest algorithms listed for one signature.
+pub const MAX_INVENTORIED_DIGEST_METHODS: usize = 16;
+
+/// Where a `ds:Signature` sits in the dossier.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SignaturePlacement {
+    /// Inside one `es:Document`; `document_index` names it.
+    Document,
+    /// A direct child of the root `es:Dossier`.
+    Dossier,
+    /// Inside another `ds:Signature`, a countersignature in practice.
+    NestedInSignature,
+    /// Anywhere else. The format does not say what such a signature covers.
+    Other,
+}
+
+impl SignaturePlacement {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Document => "document",
+            Self::Dossier => "dossier",
+            Self::NestedInSignature => "nested_in_signature",
+            Self::Other => "other",
+        }
+    }
+}
+
+/// Where an `es:TimeStamp` sits in the dossier.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TimestampPlacement {
+    /// A direct child of the root `es:Dossier`.
+    Dossier,
+    /// A direct child of one `es:Document`; `document_index` names it.
+    Document,
+    /// Anywhere else.
+    Other,
+}
+
+impl TimestampPlacement {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Dossier => "dossier",
+            Self::Document => "document",
+            Self::Other => "other",
+        }
+    }
+}
+
+/// How many evidence elements one signature carries. These are **element
+/// counts only**: nothing inside a certificate, CRL, OCSP response, or
+/// timestamp token is decoded, and carrying evidence says nothing about
+/// whether it is valid or even parsable.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
+pub struct SignatureEvidence {
+    /// `xades:EncapsulatedX509Certificate` elements.
+    pub certificates: usize,
+    /// `xades:EncapsulatedCRLValue` elements.
+    pub crls: usize,
+    /// `xades:EncapsulatedOCSPValue` elements.
+    pub ocsp_responses: usize,
+    /// `xades:SignatureTimeStamp` elements.
+    pub signature_timestamps: usize,
+    /// `xades:ArchiveTimeStamp` elements.
+    pub archive_timestamps: usize,
+}
+
+/// One `ds:Signature`, as the XML claims it.
+///
+/// Every field is unverified claimed metadata read at parse time. No
+/// cryptography is performed, no certificate is decoded, and no reference is
+/// resolved or dereferenced. A dossier can claim anything here.
+#[derive(Clone, Debug, Serialize)]
+pub struct SignatureSummary {
+    /// The `Id` attribute, when it is present and looks like an ID.
+    pub id: Option<String>,
+    pub placement: SignaturePlacement,
+    /// The index of the enclosing document, for `document` placement.
+    pub document_index: Option<usize>,
+    /// The `Id` of the enclosing signature, for `nested_in_signature`.
+    pub parent_signature_id: Option<String>,
+    /// `ds:CanonicalizationMethod/@Algorithm`, as declared.
+    pub canonicalization_method: Option<String>,
+    /// `ds:SignatureMethod/@Algorithm`, as declared.
+    pub signature_method: Option<String>,
+    /// The distinct `ds:DigestMethod/@Algorithm` values of the references, in
+    /// document order.
+    pub digest_methods: Vec<String>,
+    /// Every `ds:Reference` in `ds:SignedInfo` is counted.
+    pub reference_count: usize,
+    /// Same-document reference URIs only, bounded to
+    /// [`MAX_INVENTORIED_REFERENCE_URIS`]. Nothing is ever resolved or read.
+    pub reference_uris: Vec<String>,
+    /// The namespace of the `xades:QualifyingProperties` element, when the
+    /// signature carries one in a recognised XAdES namespace.
+    pub xades_namespace: Option<String>,
+    /// The local names of the signed and unsigned qualifying properties that
+    /// are present, in document order and bounded to
+    /// [`MAX_INVENTORIED_XADES_PROPERTIES`]. Presence only: a property is
+    /// never validated, and its content is not read.
+    pub xades_properties: Vec<String>,
+    pub evidence: SignatureEvidence,
+    /// The `xades:SigningTime` text, trimmed and otherwise unparsed. It is
+    /// what the signature claims, not when anything happened.
+    pub claimed_signing_time: Option<String>,
+    /// `ds:X509Certificate` elements under `ds:KeyInfo`. A count; no
+    /// certificate is decoded.
+    pub key_info_certificates: usize,
+}
+
+/// One container `es:TimeStamp`, as the XML claims it. Unverified, like every
+/// other part of the inventory.
+#[derive(Clone, Debug, Serialize)]
+pub struct TimestampSummary {
+    pub placement: TimestampPlacement,
+    /// The index of the enclosing document, for `document` placement.
+    pub document_index: Option<usize>,
+    /// `xades:Include` children, counted. None is ever resolved.
+    pub include_count: usize,
+    /// Whether a non-empty `xades:EncapsulatedTimeStamp` is present. The token
+    /// is neither decoded nor verified.
+    pub has_token: bool,
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct Dossier {
     pub title: String,
@@ -169,6 +307,12 @@ pub struct Dossier {
     pub documents: Vec<Document>,
     pub signatures_present: usize,
     pub timestamps_present: usize,
+    /// The bounded, unverified inventory of every `ds:Signature`, in document
+    /// order. Claimed metadata only; see [`SignatureSummary`].
+    pub signatures: Vec<SignatureSummary>,
+    /// The bounded, unverified inventory of every container `es:TimeStamp`, in
+    /// document order. Claimed metadata only; see [`TimestampSummary`].
+    pub timestamps: Vec<TimestampSummary>,
     /// Non-fatal deviations from the default profile, in source order.
     pub warnings: Vec<StructuralWarning>,
 }
