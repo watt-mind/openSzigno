@@ -13,3 +13,7 @@ updates:
     schedule:
       interval: weekly
     target-branch: develop
+    ignore:
+      # The MSRV job pins dtolnay/rust-toolchain to Cargo.toml's
+      # rust-version on purpose; bump it together with rust-version.
+      - dependency-name: dtolnay/rust-toolchain
