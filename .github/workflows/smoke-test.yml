@@ -19,26 +19,67 @@ jobs:
   smoke-test:
     name: Smoke-test the Linux binary
     runs-on: ubuntu-22.04
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Fetch the built archives
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           pattern: artifacts-build-local-*
           path: archives
           merge-multiple: true
       - name: Unpack the x86_64 musl archive
         run: |
+          set -euo pipefail
           archive=archives/openszigno-cli-x86_64-unknown-linux-musl.tar.gz
           test -f "$archive"
           mkdir -p smoke
           tar -C smoke -xzf "$archive"
           echo "BIN=$PWD/smoke/openszigno-cli-x86_64-unknown-linux-musl/openszigno" >> "$GITHUB_ENV"
-      - name: Inspect a synthetic fixture
+      # Everything below runs the *packaged* binary, the same bytes the
+      # release will hand a user, against the synthetic fixtures in this
+      # repository. Every subcommand a user is documented to run is
+      # exercised, not just `inspect`.
+      - name: Inspect the fixtures
         run: |
+          set -euo pipefail
           "$BIN" --version
-          "$BIN" inspect tests/fixtures/plain-base64.es3 --json | tee inspect.json
-          test "$(jq -r .ok inspect.json)" = "true"
-          test "$(jq -r .input.format inspect.json)" = "microsec-es3"
+          for f in plain-base64 zip-base64; do
+            "$BIN" inspect "tests/fixtures/${f}.es3" --json | tee "inspect-${f}.json"
+            test "$(jq -r .ok "inspect-${f}.json")" = "true"
+            test "$(jq -r .input.format "inspect-${f}.json")" = "microsec-es3"
+          done
+      - name: List the documents
+        run: |
+          set -euo pipefail
+          "$BIN" list tests/fixtures/plain-base64.es3 --json | tee list.json
+          test "$(jq -r .ok list.json)" = "true"
+          test "$(jq -r '.data.documents | length' list.json)" = "1"
+          test "$(jq -r '.data.documents[0].title' list.json)" = "hello.txt"
+      - name: Validate the structure
+        run: |
+          set -euo pipefail
+          for f in plain-base64 zip-base64; do
+            "$BIN" validate-structure "tests/fixtures/${f}.es3" --json \
+              | tee "validate-${f}.json"
+            test "$(jq -r .ok "validate-${f}.json")" = "true"
+          done
+      - name: Extract and byte-check the payloads
+        run: |
+          set -euo pipefail
+          "$BIN" extract tests/fixtures/plain-base64.es3 --output smoke-out/plain --json
+          "$BIN" extract tests/fixtures/zip-base64.es3 --output smoke-out/zip --json
+          test "$(cat smoke-out/plain/hello.txt)" = "Hello from openSzigno synthetic fixture."
+          test "$(cat smoke-out/zip/zipped.txt)" = "Zipped openSzigno synthetic fixture."
+      - name: Verify an unsigned fixture (expects exit 7)
+        run: |
+          set -euo pipefail
+          # An unsigned dossier can never be reported valid, so `verify`
+          # exits 7 (indeterminate). Anything else, 0 included, is a bug.
+          status=0
+          "$BIN" verify tests/fixtures/plain-base64.es3 --json > verify.json || status=$?
+          cat verify.json
+          test "$status" = "7"
+          test "$(jq -r .data.verdict verify.json)" = "indeterminate"
