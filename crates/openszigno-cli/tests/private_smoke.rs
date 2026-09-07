@@ -6,9 +6,20 @@ use std::process::Command;
 use std::sync::Mutex;
 
 use openszigno_core::{DecodeOutcome, ErrorCode, Limits, UnsupportedReason};
-use tempfile::tempdir;
 
 static PANIC_HOOK_LOCK: Mutex<()> = Mutex::new(());
+
+/// A temporary directory under a fully resolved base path.
+///
+/// The extractor refuses an output path that contains a symlink, and the
+/// platform temporary directory is itself a symlink on some systems (macOS
+/// resolves `/var` to `/private/var`), so the base is canonicalized first.
+fn scratch() -> tempfile::TempDir {
+    let base = std::env::temp_dir()
+        .canonicalize()
+        .expect("the temporary directory must resolve");
+    tempfile::tempdir_in(base).expect("a temporary directory must be available")
+}
 
 #[derive(Default)]
 struct CorpusAggregate {
@@ -79,13 +90,7 @@ fn opt_in_private_fixture_smoke() {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
 
-    // Resolve symlinks (e.g. macOS /var -> /private/var in TMPDIR): the tool
-    // rejects symlinked output components by design. Aggregate-only handling.
-    let _output_directory = tempdir().expect("temporary output directory must be available");
-    let output_directory = _output_directory
-        .path()
-        .canonicalize()
-        .expect("temporary output path resolves");
+    let output_directory = scratch();
     let commands = ["inspect", "list", "validate-structure"];
     for command in commands {
         let output = Command::new(env!("CARGO_BIN_EXE_openszigno"))
@@ -105,7 +110,7 @@ fn opt_in_private_fixture_smoke() {
         .arg("extract")
         .arg(&fixture)
         .arg("--output")
-        .arg(&output_directory)
+        .arg(output_directory.path())
         .arg("--json")
         .output()
         .expect("private extraction smoke must start");
@@ -123,7 +128,7 @@ fn opt_in_private_fixture_smoke() {
         extracted > 0,
         "private fixture had no extractable documents"
     );
-    let files_written = std::fs::read_dir(&output_directory)
+    let files_written = std::fs::read_dir(output_directory.path())
         .expect("private temporary output must be readable")
         .filter(|entry| {
             entry

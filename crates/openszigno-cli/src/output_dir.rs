@@ -34,6 +34,14 @@ fn reject_link_components(path: &Path) -> Result<(), OpenError> {
     let mut current = std::path::PathBuf::new();
     for component in path.components() {
         current.push(component);
+        // A drive or UNC prefix and the root directory cannot be links and
+        // cannot always be inspected on their own (for example `\\?\C:`).
+        if matches!(
+            component,
+            std::path::Component::Prefix(_) | std::path::Component::RootDir
+        ) {
+            continue;
+        }
         match std::fs::symlink_metadata(&current) {
             Ok(metadata) if metadata.file_type().is_symlink() => {
                 return Err(OpenError::Unsafe(
@@ -223,6 +231,15 @@ mod imp {
     impl OutputDir {
         pub fn open(path: &Path) -> Result<Self, OpenError> {
             reject_link_components(path)?;
+            // Match the Unix walk, which reports an existing non-directory as
+            // unsafe rather than as a creation failure.
+            if let Ok(existing) = std::fs::symlink_metadata(path)
+                && !existing.file_type().is_dir()
+            {
+                return Err(OpenError::Unsafe(
+                    "output must be a real directory, not a symlink",
+                ));
+            }
             create_directory(path)?;
             reject_link_components(path)?;
 

@@ -71,6 +71,31 @@ Until this ships, an encrypted document is reported with
 `encrypted_document_unsupported` and skipped by `extract` with
 `document_skipped_encrypted`.
 
+## Field observations from the private corpus
+
+Aggregate findings from the maintainers' private corpus (see the policy
+below), recorded here because they shape priorities. No individual dossier is
+identified.
+
+- Roughly four in five dossiers use the default Microsec namespace; the rest
+  are company-court (e-cégeljárás) dossiers in four namespace generations
+  (2007, 2009, 2012, 2014). Those carry many more documents per dossier
+  (up to a dozen or more), all `base64` without `zip`, and some embed a
+  nested dossier declared as `application/nldossier2` whose payload is itself
+  a default-namespace `Dossier`. Milestone M1 must handle nested dossiers.
+- Payloads are overwhelmingly PDF and small HTML notices, with a few XML
+  documents (including a Microsec `Acknowledge` receipt). About half of the
+  PDFs have no text layer and are image-only scans, so text extraction from
+  payloads is out of scope for this tool and belongs to the calling agent.
+- Declared MIME types are not reliable: `application/octet-stream` payloads
+  turned out to be PDF and HTML, and a `text/xml` payload was HTML. A
+  content-sniffing hint alongside the declared type would help agents choose
+  a reader without opening the file blind.
+- Every parsed dossier carried signature material and a minority carried
+  timestamps, which is why `verify` is the next milestone after M1.
+- Inputs with the `.es3` suffix that are not XML at all occur in practice
+  (tiny Base64-like text fragments); the `invalid_xml` rejection is correct.
+
 ## Engineering items
 
 These are not format milestones; they can land in any order.
