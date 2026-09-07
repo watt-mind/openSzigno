@@ -57,18 +57,6 @@ pub enum CoverageState {
     NotModelled,
 }
 
-impl CoverageState {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Covered => "covered",
-            Self::CoveredUnverified => "covered_unverified",
-            Self::Uncovered => "uncovered",
-            Self::Undetermined => "undetermined",
-            Self::NotModelled => "not_modelled",
-        }
-    }
-}
-
 /// How a signature reaches a document.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]

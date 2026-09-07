@@ -1098,8 +1098,8 @@ fn resolve_reference<'a, 'input>(
 /// it is not.
 pub struct SignatureCoverage {
     /// Every node a `ds:Reference` resolved to. An element is covered when it
-    /// is one of these or a descendant of one, which is the same rule
-    /// [`reference_scope_check`] applies.
+    /// is one of these or a descendant of one, which is the same rule the
+    /// reference-scope check applies.
     pub resolved: Vec<NodeId>,
     /// Whether `reference_scope_complete` passed. A signature whose mandated
     /// set is incomplete covers nothing: the container's own rule for what it
