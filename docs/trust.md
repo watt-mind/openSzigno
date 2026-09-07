@@ -308,6 +308,26 @@ silently.
 All of them are `unknown`, never `failed`: unusable data means the tool could
 not answer, which is a different statement from "this certificate was revoked".
 
+### A revocation dated after the signature
+
+Certificates are routinely superseded or withdrawn *after* a signature was
+made, and a CRL you fetch today records that. Whether it counts depends on
+whether the validation time is proven:
+
+- If the signature carries a **fully verified** `xades:SignatureTimeStamp`, the
+  validation time is that token's `genTime` and the signature demonstrably
+  existed then. A revocation dated afterwards is reported as
+  `cert_revoked_after_validation_time` with status `info`, and the signature can
+  still be `valid`. This is the ETSI EN 319 102-1 best-signature-time rule and
+  it is why long-term signatures carry timestamps.
+- If you pass `--at`, or let the clock decide, the time is *asserted* rather
+  than proven — a caller can pass any `--at` — so the same finding stays
+  `unknown` and blocks.
+
+Either way the revocation is reported in full, with its time and reason, and
+the certificate's own `status` in the chain entry reads
+`revoked_after_validation_time`. Nothing is hidden.
+
 ## Online fetching
 
 Not implemented. `--online` fetching of CRL distribution points and OCSP from

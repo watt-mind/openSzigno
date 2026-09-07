@@ -383,7 +383,9 @@ fn an_unprocessed_property_is_named() {
     let xml = build(&dossier, &[("doc", &pki.signer_key)]);
     let report = run(&xml, vec![pki.root_der.clone()]);
 
-    assert_check(&report, CheckCode::XadesNotValidated, CheckStatus::Skipped);
+    // Informational: an unsigned property this build does not validate lives
+    // outside the signature and cannot change what it says.
+    assert_check(&report, CheckCode::XadesNotValidated, CheckStatus::Info);
     assert_eq!(
         report.signatures[0].xades.unvalidated_properties,
         vec!["CompleteCertificateRefs".to_owned()]
@@ -404,10 +406,13 @@ fn an_archive_timestamp_is_reported_as_out_of_scope() {
     let xml = build(&dossier, &[("doc", &pki.signer_key)]);
     let report = run(&xml, vec![pki.root_der.clone()]);
 
+    // Informational: not validating an archive timestamp means no claim is made
+    // about long-term re-validation. It does not make the evidence already
+    // checked worth less.
     assert_check(
         &report,
         CheckCode::ArchiveTimestampPresent,
-        CheckStatus::Skipped,
+        CheckStatus::Info,
     );
     assert_eq!(report.signatures[0].xades.archive_timestamps, 1);
 }
@@ -468,12 +473,21 @@ fn a_dossier_level_timestamp_is_reported_as_unvalidated() {
     let xml = build(&spec, &[("doc", &pki.signer_key)]);
     let report = run(&xml, vec![pki.root_der.clone()]);
 
+    // Informational, and at the dossier level: an `es:TimeStamp` is a statement
+    // about the container, not about any one signature, so it must not decide
+    // whether the signatures inside it are valid.
     assert_check(
         &report,
         CheckCode::DossierTimestampNotValidated,
-        CheckStatus::Skipped,
+        CheckStatus::Info,
     );
-    assert_ne!(report.verdict, Verdict::Valid);
+    assert!(
+        report
+            .checks
+            .iter()
+            .any(|check| check.code == CheckCode::DossierTimestampNotValidated),
+        "the dossier-level timestamp is reported at the dossier level"
+    );
 }
 
 /// A certificate the property names but that is not a CA is still only a

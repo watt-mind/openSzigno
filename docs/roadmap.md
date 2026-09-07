@@ -211,8 +211,14 @@ today. What remains for M3 is the dossier-level `es:TimeStamp`, whose imprint
 is taken over the elements it *references* rather than over a
 `ds:SignatureValue`, so it needs the reference-resolution and canonicalization
 step a signature already has. Until then such an element is counted and
-reported as `dossier_timestamp_not_validated` (`skipped`), and
-`timestamps_present` stays presence-only in `inspect` and `list`.
+reported as `dossier_timestamp_not_validated` (`info`, at the dossier level),
+and `timestamps_present` stays presence-only in `inspect` and `list`.
+
+`xades:ArchiveTimeStamp` belongs to the same milestone. It is reported as
+`archive_timestamp_present` (`info`) and not verified, so this release makes no
+claim about long-term (B-LTA) re-validation: a `valid` verdict says the
+signature's own evidence checks out at the stated validation time, not that its
+archival chain does.
 
 The other M3 item is the revocation residual M2 phase 3 left: `--online`
 fetching of CRLs from a certificate's distribution points and of OCSP from its

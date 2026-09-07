@@ -686,9 +686,13 @@ fn stage_c_presence(properties: &XadesProperties<'_, '_>) -> StageC {
             "XAdES qualifying properties are present",
         ));
     } else {
+        // Blocking, and the one XAdES `skipped` that stays so: with no
+        // qualifying properties there is no *signed* statement of which
+        // certificate signed, so the `SigningCertificate` binding the policy
+        // requires was not performed. That is what `skipped` means.
         checks.push(Check::skipped(
             CheckCode::XadesAbsent,
-            "no XAdES qualifying properties were found for this signature",
+            "no XAdES qualifying properties were found for this signature, so nothing signed says which certificate signed it",
         ));
     }
 
@@ -710,19 +714,35 @@ fn stage_c_presence(properties: &XadesProperties<'_, '_>) -> StageC {
         None => {}
     }
 
+    // Informational, and emitted only when there is something to name.
+    //
+    // Everything counted here lives under `xades:UnsignedProperties`, which is
+    // not covered by the signature and cannot change what the signature says.
+    // ETSI EN 319 102-1 decides validity from the signed properties, the
+    // timestamps, and revocation; the remaining unsigned properties are
+    // evidence containers, and the ones that carry evidence this build uses —
+    // `CertificateValues`, `RevocationValues`, `TimeStampValidationData` — are
+    // already consumed and are not counted here. Blocking on the rest would
+    // cap a signature at `indeterminate` for carrying *more* evidence than the
+    // minimum, which is precisely backwards.
     if !properties.unprocessed_properties.is_empty() {
-        checks.push(Check::skipped(
+        checks.push(Check::info(
             CheckCode::XadesNotValidated,
             format!(
-                "qualifying properties this build does not validate are present: {}",
+                "unsigned qualifying properties this build does not validate are present and are named rather than ignored: {}",
                 properties.unprocessed_properties.join(", ")
             ),
         ));
     }
     if properties.archive_timestamps > 0 {
-        checks.push(Check::skipped(
+        // Informational: an archive timestamp is additional long-term evidence
+        // laid on top of a signature. Not validating it means this build makes
+        // no claim about the signature's validity *beyond* the point its other
+        // evidence reaches; it does not make the evidence already checked worth
+        // less. LTA re-validation is M3.
+        checks.push(Check::info(
             CheckCode::ArchiveTimestampPresent,
-            "an xades:ArchiveTimeStamp is present; archive timestamps are out of scope for this release",
+            "an xades:ArchiveTimeStamp is present and is not validated; this release makes no claim about long-term (B-LTA) re-validation",
         ));
     }
 

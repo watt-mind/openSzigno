@@ -386,14 +386,20 @@ pub fn verify_token(input: &TokenInput<'_>) -> TokenOutcome {
         // it spoke.
         let mut chain = path.chain;
         if !path.path.is_empty() {
-            let outcome = crate::revocation::check_path(
-                &path.path,
-                &candidates,
-                &input.revocation,
-                gen_time,
-                input.revocation_policy,
-                input.limits,
-            );
+            let outcome = crate::revocation::check_path(&crate::revocation::PathRevocationInput {
+                path: &path.path,
+                candidates: &candidates,
+                data: &input.revocation,
+                time: gen_time,
+                // The instant a TSA's own chain is validated at is the
+                // `genTime` the token asserts, so it cannot also be the proof
+                // that dismisses a revocation dated after it. A TSA
+                // certificate revoked after its own genTime stays `unknown`.
+                time_is_proven: false,
+                policy: input.revocation_policy,
+                role: crate::revocation::ChainRole::TimestampAuthority,
+                limits: input.limits,
+            });
             for (entry, status) in chain.iter_mut().zip(outcome.per_certificate) {
                 entry.revocation = Some(status);
             }

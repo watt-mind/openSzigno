@@ -387,14 +387,20 @@ pub fn verify(bytes: &[u8], options: &VerifyOptions<'_>) -> Result<VerifyReport,
                     ),
                 });
             } else {
-                let outcome = revocation::check_path(
-                    &path.path,
-                    &candidates,
-                    &revocation_data,
-                    signature_time,
-                    revocation_policy,
-                    &options.limits,
-                );
+                let outcome = revocation::check_path(&revocation::PathRevocationInput {
+                    path: &path.path,
+                    candidates: &candidates,
+                    data: &revocation_data,
+                    time: signature_time,
+                    // Only a fully verified signature timestamp *proves* the
+                    // validation time; `--at` and the clock merely assert it.
+                    // That difference decides whether a revocation dated after
+                    // it may be dismissed.
+                    time_is_proven: source == ValidationTimeSource::Timestamp,
+                    policy: revocation_policy,
+                    role: revocation::ChainRole::Signer,
+                    limits: &options.limits,
+                });
                 for (entry, status) in chain.iter_mut().zip(outcome.per_certificate) {
                     entry.revocation = Some(status);
                 }
@@ -417,7 +423,13 @@ pub fn verify(bytes: &[u8], options: &VerifyOptions<'_>) -> Result<VerifyReport,
         // so verifying one needs the reference machinery M3 adds. Reporting it
         // as unchecked is the honest answer; guessing at what it covers and
         // then reporting a match would not be.
-        dossier_checks.push(Check::skipped(
+        //
+        // Informational, and at the dossier level only: an `es:TimeStamp` is a
+        // statement about the container, not about any one signature, so it
+        // must not decide whether the signatures inside it are valid. A
+        // consumer that needs the container's own time attested reads this
+        // check; a consumer asking whether a signature verified does not.
+        dossier_checks.push(Check::info(
             CheckCode::DossierTimestampNotValidated,
             format!(
                 "{} dossier-level es:TimeStamp element(s) are present and are not validated in this release",

@@ -129,6 +129,9 @@ pub enum RevocationStatus {
     Good,
     /// The certificate was revoked at or before the validation time.
     Revoked,
+    /// The certificate was revoked, but *after* the validation time, so the
+    /// revocation did not apply at the instant being asked about.
+    RevokedAfterValidationTime,
     /// Nothing usable was found, or what was found does not answer the
     /// question that was asked.
     Unknown,
@@ -206,6 +209,45 @@ impl RevocationData<'_> {
     }
 }
 
+/// Which chain is being asked about.
+///
+/// A signature carries at least two — its signer's and each timestamp
+/// authority's — and both report through the same code, so the message has to
+/// say which one it is about or the duplicate is unreadable.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ChainRole {
+    Signer,
+    TimestampAuthority,
+}
+
+impl ChainRole {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Signer => "the signing certificate's chain",
+            Self::TimestampAuthority => "the timestamp authority's chain",
+        }
+    }
+}
+
+/// Everything one path's revocation check needs.
+pub struct PathRevocationInput<'a> {
+    /// The validated path, end-entity first and trust anchor last.
+    pub path: &'a [ParsedCertificate],
+    /// Untrusted certificates offered as CRL signers and OCSP responders.
+    pub candidates: &'a [ParsedCertificate],
+    pub data: &'a RevocationData<'a>,
+    pub time: UnixTime,
+    /// Whether the validation time is *proven* — that is, whether it came from
+    /// a fully verified timestamp token rather than from `--at` or the clock.
+    ///
+    /// It decides only one thing: whether a revocation dated after that time
+    /// may be dismissed. See [`check_path`].
+    pub time_is_proven: bool,
+    pub policy: RevocationPolicy,
+    pub role: ChainRole,
+    pub limits: &'a VerifyLimits,
+}
+
 /// The revocation outcome for a whole path.
 pub struct PathRevocation {
     /// One entry per certificate in the path, in the same order.
@@ -235,14 +277,19 @@ pub fn policy_check(policy: RevocationPolicy) -> Check {
 /// The anchor is skipped on purpose: its revocation is not something the PKI
 /// it roots can answer, and asking would invite a self-signed CRL to speak for
 /// itself.
-pub fn check_path(
-    path: &[ParsedCertificate],
-    candidates: &[ParsedCertificate],
-    data: &RevocationData<'_>,
-    time: UnixTime,
-    policy: RevocationPolicy,
-    limits: &VerifyLimits,
-) -> PathRevocation {
+pub fn check_path(input: &PathRevocationInput<'_>) -> PathRevocation {
+    let PathRevocationInput {
+        path,
+        candidates,
+        data,
+        time,
+        // `summarise` reads it from the input; destructuring it here would
+        // only shadow that.
+        time_is_proven: _,
+        policy,
+        role,
+        limits,
+    } = *input;
     if policy == RevocationPolicy::NotChecked {
         return PathRevocation {
             per_certificate: path
@@ -258,7 +305,10 @@ pub fn check_path(
                 .collect(),
             check: Check::skipped(
                 CheckCode::RevocationNotChecked,
-                "revocation checking was switched off by the caller, so no signature can be reported as valid",
+                format!(
+                    "revocation checking was switched off by the caller, so no signature can be reported as valid ({})",
+                    role.as_str()
+                ),
             ),
         };
     }
@@ -276,7 +326,10 @@ pub fn check_path(
                 .collect(),
             check: Check::unknown(
                 CheckCode::RevocationStatusUnknown,
-                "no validated certification path was available, so revocation could not be checked",
+                format!(
+                    "no validated certification path was available, so revocation could not be checked for {}",
+                    role.as_str()
+                ),
             ),
         };
     }
@@ -289,7 +342,7 @@ pub fn check_path(
     }
     per_certificate.push(CertificateRevocation::trust_anchor());
 
-    let check = summarise(path, &per_certificate, data);
+    let check = summarise(path, &per_certificate, input);
     PathRevocation {
         per_certificate,
         check,
@@ -356,11 +409,31 @@ fn crl_hint(certificate: &ParsedCertificate) -> String {
 /// certificate publishes when it has one. Without that, a caller reading "no
 /// usable revocation data" cannot tell whether to fetch a CA's CRL or the
 /// end-entity's, which is the difference between a fixable run and a dead end.
+/// It also names *which chain* it is about, because a signature reports one of
+/// these for its signer and one for each timestamp authority.
+///
+/// # Revocation after a proven validation time
+///
+/// ETSI EN 319 102-1 compares a revocation date against the best-signature-time.
+/// When the validation time came from a **fully verified signature timestamp**,
+/// that instant is proven: the signature demonstrably existed then, so a
+/// revocation dated afterwards says the certificate was withdrawn later and
+/// says nothing against the signature. That is reported as `info` and does not
+/// block.
+///
+/// When the validation time is `--at` or the current clock it is *asserted*,
+/// not proven — a caller can pass any `--at` they like — so the same finding
+/// stays `unknown` and blocks. The difference between those two cases is the
+/// whole reason a signature timestamp is worth having.
+///
+/// Either way it is never `passed`: the certificate really was revoked, and a
+/// reader deserves to be told so.
 fn summarise(
     path: &[ParsedCertificate],
     entries: &[CertificateRevocation],
-    data: &RevocationData<'_>,
+    input: &PathRevocationInput<'_>,
 ) -> Check {
+    let chain = input.role.as_str();
     let checked = entries
         .iter()
         .filter(|entry| entry.status != RevocationStatus::TrustAnchor)
@@ -377,16 +450,17 @@ fn summarise(
         return Check::failed(
             CheckCode::CertRevoked,
             format!(
-                "{} was revoked at {when} ({}), at or before the validation time",
+                "in {chain}, {} was revoked at {when} ({}), at or before the validation time",
                 describe(path, index),
                 entry.reason.unwrap_or("no reason given")
             ),
         );
     }
     // The worst remaining answer decides, and its own code is kept so the
-    // caller learns *why* the tool could not conclude.
+    // caller learns *why* the tool could not conclude. A revocation after a
+    // proven validation time is considered last, because it does not block and
+    // must not mask a finding that does.
     for code in [
-        CheckCode::CertRevokedAfterValidationTime,
         CheckCode::RevocationDataInvalid,
         CheckCode::RevocationDataStale,
         CheckCode::RevocationStatusUnknown,
@@ -396,13 +470,40 @@ fn summarise(
             .enumerate()
             .find(|(_, entry)| entry.code == code.as_str())
         {
-            return Check::unknown(code, message_for(code, path, index, data));
+            return Check::unknown(code, message_for(code, path, index, input));
         }
+    }
+    if let Some((index, entry)) = entries
+        .iter()
+        .enumerate()
+        .find(|(_, entry)| entry.status == RevocationStatus::RevokedAfterValidationTime)
+    {
+        let when = entry
+            .revocation_time
+            .as_deref()
+            .unwrap_or("an unstated time");
+        let reason = entry.reason.unwrap_or("no reason given");
+        let what = describe(path, index);
+        return if input.time_is_proven {
+            Check::info(
+                CheckCode::CertRevokedAfterValidationTime,
+                format!(
+                    "in {chain}, {what} was revoked at {when} ({reason}), after the validation time a verified timestamp proves; the revocation does not apply at the instant being validated"
+                ),
+            )
+        } else {
+            Check::unknown(
+                CheckCode::CertRevokedAfterValidationTime,
+                format!(
+                    "in {chain}, {what} was revoked at {when} ({reason}), after the validation time — but that time is asserted rather than proven by a verified timestamp, so the tool declines to dismiss the revocation"
+                ),
+            )
+        };
     }
     Check::passed(
         CheckCode::RevocationOk,
         format!(
-            "fresh, verified revocation data covers all {checked} non-anchor certificates in the path"
+            "in {chain}, fresh, verified revocation data covers all {checked} non-anchor certificates"
         ),
     )
 }
@@ -411,28 +512,26 @@ fn message_for(
     code: CheckCode,
     path: &[ParsedCertificate],
     index: usize,
-    data: &RevocationData<'_>,
+    input: &PathRevocationInput<'_>,
 ) -> String {
     let what = describe(path, index);
+    let chain = input.role.as_str();
     match code {
-        CheckCode::CertRevokedAfterValidationTime => format!(
-            "{what} was revoked after the validation time; that revocation does not apply at the instant being validated, and the tool declines to call the result good"
-        ),
         CheckCode::RevocationDataInvalid => format!(
-            "the revocation data for {what} could not be used: it was not signed by an authorised issuer, or it uses a form this build refuses"
+            "in {chain}, the revocation data for {what} could not be used: it was not signed by an authorised issuer, or it uses a form this build refuses"
         ),
         CheckCode::RevocationDataStale => format!(
-            "the revocation data for {what} had expired before the validation time{}",
+            "in {chain}, the revocation data for {what} had expired before the validation time{}",
             crl_hint(&path[index])
         ),
         _ => {
-            let source = if data.is_empty() {
+            let source = if input.data.is_empty() {
                 "the signature embeds none and no --revocation-store was given"
             } else {
                 "neither the signature's own RevocationValues nor the revocation store covers it"
             };
             format!(
-                "no usable revocation data covers {what}: {source}{}",
+                "in {chain}, no usable revocation data covers {what}: {source}{}",
                 crl_hint(&path[index])
             )
         }
@@ -545,7 +644,7 @@ fn check_certificate(
                         (RevocationStatus::Revoked, CheckCode::CertRevoked)
                     } else {
                         (
-                            RevocationStatus::Unknown,
+                            RevocationStatus::RevokedAfterValidationTime,
                             CheckCode::CertRevokedAfterValidationTime,
                         )
                     };

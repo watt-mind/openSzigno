@@ -1139,9 +1139,29 @@ the validation time.
 **Time of revocation.** A revocation counts only when its `revocationTime` is
 at or before the validation time. A certificate revoked *after* the instant
 being validated was not revoked then, so it yields the distinct
-`cert_revoked_after_validation_time` (`unknown`) rather than `cert_revoked` —
-`unknown` and not `passed`, because a later revocation is a reason to look
-harder, not a clean bill of health.
+`cert_revoked_after_validation_time` rather than `cert_revoked`.
+
+Whether that blocks depends on how the validation time was arrived at, which is
+the distinction ETSI EN 319 102-1 draws around the best-signature-time:
+
+- **Proven** — the time came from a fully verified `xades:SignatureTimeStamp`.
+  The signature demonstrably existed then, so a revocation dated afterwards
+  says the certificate was withdrawn later and says nothing against the
+  signature. Reported as `info`, with the revocation time and reason, and does
+  not block.
+- **Asserted** — the time came from `--at` or the clock. A caller can pass any
+  `--at` they like, so an unproven time cannot be used to dismiss a real
+  revocation. Reported as `unknown`, and blocks.
+
+It is never `passed` either way: the certificate really was revoked, and the
+message says when and why. A timestamp authority's own chain is always treated
+as asserted, because the instant it is validated at is the `genTime` the token
+itself claims, and that cannot also be the proof that dismisses a revocation
+dated after it.
+
+**Two chains, two answers.** A signature reports one revocation summary for its
+signer's chain and one for each timestamp authority's, both under the same
+code. Each message names which chain it is about.
 
 **Per certificate**, each chain entry carries a `revocation` object with
 `status` (`good`, `revoked`, `unknown`, `not_checked`, `trust_anchor`), the
@@ -1372,9 +1392,11 @@ Notes on the shape:
   entry and `null` on every other entry, so a consumer can tell an anchor a
   human dropped into a directory from one an EU trusted list vouches for.
 - `chain[].revocation` carries this certificate's own revocation answer with
-  the source it came from. The anchor's entry is always `status:
-  "trust_anchor"`, because the anchor is never asked about. It is `null` only
-  when no path was built at all.
+  the source it came from. `status` is one of `good`, `revoked`,
+  `revoked_after_validation_time`, `unknown`, `not_checked`, or
+  `trust_anchor`. The anchor's entry is always `trust_anchor`, because the
+  anchor is never asked about; the whole object is `null` only when no path was
+  built at all.
 - `qualified`, `qualified_signature_device` and `qualified_service` sit on the
   signature, and `qualified` is mirrored onto
   `signing_certificate.qualified`. `qualified_service` names the trusted-list
@@ -1419,9 +1441,23 @@ Notes on the shape:
 ### Verify check codes
 
 `status` is one of `passed`, `failed`, `skipped`, `unknown`, or `info`.
-`unknown` means the tool could not determine the answer and is never a
-substitute for `failed`. `info` is the only non-blocking status; everything
-else that is not `passed` keeps the verdict below `valid`.
+
+- `unknown` means the tool could not determine the answer, and is never a
+  substitute for `failed`.
+- **`skipped` means a check the policy requires was not performed**, and only
+  that. It is not a place to file observations. A property this build reads but
+  does not act on, or evidence it declines to re-verify, is `info`: it did not
+  fail to answer a required question, so it must not block. Emitting `skipped`
+  for such a thing caps a signature at `indeterminate` for carrying *more*
+  evidence than the minimum, which is precisely backwards.
+- `info` is the only non-blocking status; everything else that is not `passed`
+  keeps the verdict below `valid`.
+
+The three checks that are still `skipped`, and why each is a required check
+that was not performed: `xades_absent` (no signed statement of which
+certificate signed, so the `SigningCertificate` binding could not be checked),
+`timestamp_not_checked` (a timestamp is present in a form this build cannot
+verify), and `revocation_not_checked` (the caller switched revocation off).
 
 | Code | Status when emitted | Meaning |
 | --- | --- | --- |
@@ -1454,8 +1490,8 @@ else that is not `passed` keeps the verdict below `valid`.
 | `signature_value_ok` | `passed` | `ds:SignatureValue` verified over the canonical `ds:SignedInfo`. |
 | `signature_value_invalid` | `failed` | It did not verify, or is not canonical Base64. |
 | `xades_present` | `passed` | `xades:QualifyingProperties` was found for this signature. |
-| `xades_absent` | `skipped` | None was found; this is a bare XMLDSig signature. |
-| `xades_not_validated` | `skipped` | Qualifying properties this build does not validate are present; the message and `xades.unvalidated_properties` name them. |
+| `xades_absent` | `skipped` | None was found; this is a bare XMLDSig signature, so nothing signed says which certificate signed it and the `SigningCertificate` binding could not be checked. Blocking. |
+| `xades_not_validated` | `info` | Unsigned qualifying properties this build does not validate are present; the message and `xades.unvalidated_properties` name them. Informational: they live outside the signature and cannot change what it says, and the ones that carry evidence this build *does* use — `CertificateValues`, `RevocationValues`, `TimeStampValidationData` — are consumed and not counted here. Omitted entirely when nothing is left to name. |
 | `xades_signing_certificate_bound` | `passed` | The signing certificate matches the digest the signed `SigningCertificate` / `SigningCertificateV2` property names. |
 | `xades_signing_certificate_mismatch` | `failed` | It does not: no offered certificate answers to the digest, an issuer and serial contradict it, the declared digest algorithm is outside the allowlist, or the certificate whose key verified the signature is not the digested one. The certificate-substitution check. |
 | `xades_signing_certificate_absent` | `unknown` | The signature carries no such property, so nothing signed says which certificate signed it. |
@@ -1481,9 +1517,9 @@ else that is not `passed` keeps the verdict below `valid`.
 | `cert_unsupported_critical_extension` | `failed` | A certificate carries a critical extension this validator does not understand. |
 | `revocation_policy` | `info` | Reports the revocation policy actually applied: `offline` or, with `--no-revocation`, off. Always emitted, so the policy is visible even when no data was found. |
 | `revocation_not_checked` | `skipped` | Emitted **only** when the caller passed `--no-revocation`. Blocking, so switching the check off is documented as producing at most `indeterminate`. |
-| `revocation_ok` | `passed` | Every certificate in the path except the trust anchor has fresh, verified, non-revoked status. |
+| `revocation_ok` | `passed` | Every certificate in the path except the trust anchor has fresh, verified, non-revoked status. Emitted once per chain — the signer's and each timestamp authority's — and the message names which. |
 | `cert_revoked` | `failed` | A certificate in the path was revoked at or before the validation time. `certificateHold` counts. |
-| `cert_revoked_after_validation_time` | `unknown` | A certificate was revoked *after* the instant being validated, so that revocation did not apply then. Not a failure, and not a pass. |
+| `cert_revoked_after_validation_time` | `info` / `unknown` | A certificate was revoked *after* the instant being validated, so that revocation did not apply then. `info` when the validation time was **proven** by a fully verified signature timestamp, `unknown` when it was merely asserted by `--at` or the clock. Never `passed`: the certificate really was revoked, and the message gives the time and reason. |
 | `revocation_status_unknown` | `unknown` | No usable revocation data covers a certificate in the path, or no path was built to ask about. |
 | `revocation_data_stale` | `unknown` | The data's `nextUpdate` had passed at the validation time, or it carries none and its `thisUpdate` precedes it. Also the OCSP `unknown` status. |
 | `revocation_data_invalid` | `unknown` | Data was found but could not be used: signed by someone unauthorised, a delta or indirect CRL, an unimplemented `issuingDistributionPoint` form, a critical CRL extension this build does not implement, or an OCSP response whose status is not `successful`. `unknown`, not `failed`: unusable data means the tool could not answer. |
@@ -1509,8 +1545,8 @@ else that is not `passed` keeps the verdict below `valid`.
 | `timestamp_tsa_path_unknown` | `unknown` | No trust anchors were configured. |
 | `timestamp_before_signing_time` | `unknown` | The token's `genTime` precedes the claimed `xades:SigningTime` by more than the declared accuracy. Reported, never a failure: the claim is unauthenticated. |
 | `timestamp_verified` | `passed` / `unknown` | Summarises one token in the signature's own check list, **excluding** its revocation checks, which are folded into the signature's verdict separately so they are counted once. `passed` only when every other check on that token passed or was informational; `unknown` for every other outcome, including a token that failed. Never `failed`: see [Verdicts](#verdicts). |
-| `archive_timestamp_present` | `skipped` | An `xades:ArchiveTimeStamp` is present and is out of scope for this release. |
-| `dossier_timestamp_not_validated` | `skipped` | Dossier-level `es:TimeStamp` elements are present; validating them is M3. |
+| `archive_timestamp_present` | `info` | An `xades:ArchiveTimeStamp` is present and is not validated; this release makes no claim about long-term (B-LTA) re-validation, which is M3. Informational: an archive timestamp is evidence laid *on top of* a signature, so declining to re-verify it does not make the evidence already checked worth less. Omitted when none is present. |
+| `dossier_timestamp_not_validated` | `info` | Dossier-level `es:TimeStamp` elements are present; validating them is M3. Emitted at the **dossier** level only, and informational: an `es:TimeStamp` is a statement about the container, not about any one signature, so it must not decide whether the signatures inside it are valid. |
 
 ### Verdicts
 
@@ -1529,6 +1565,13 @@ anchor at the validation time, a fully verified `xades:SignatureTimeStamp`
 (without one, `signature_timestamp_absent` is `unknown` and blocks — nothing
 proves when the signature existed), and fresh non-revoked status for every
 non-anchor certificate on both the signer's and the TSA's chains.
+
+It does **not** need the dossier to carry nothing else. Evidence a signature
+carries beyond that minimum — unsigned qualifying properties this build does
+not validate, an `xades:ArchiveTimeStamp`, a dossier-level `es:TimeStamp` — is
+reported as `info` and does not block, because none of it can make what was
+checked worth less. Nor does a revocation dated after a validation time a
+verified timestamp proves.
 
 **Only checks about the signature itself can make it `invalid`:** the
 reference digests, the signature value, the algorithm policy, the reference

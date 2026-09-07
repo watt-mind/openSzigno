@@ -97,13 +97,37 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
 
 - **New check status `info`**, for checks that report rather than decide. It is
   the only non-blocking status, which makes "`unknown` always blocks" true
-  without exception. `signing_time_present`, `cert_key_usage_advisory`,
-  `signature_timestamp_present`, `xades_signature_policy_implied` and
-  `xades_signature_policy_explicit` moved from `unknown` to `info`; a declared
-  signature policy describes how a signature was made and says nothing about
-  whether it is sound, so blocking on it capped every policy-bearing signature
-  at `indeterminate` for no gain. Consumers must treat an unrecognised code as
-  blocking unless its status is `passed` or `info`.
+  without exception. Consumers must treat an unrecognised code as blocking
+  unless its status is `passed` or `info`. Moved from `unknown` or `skipped` to
+  `info`: `signing_time_present`, `cert_key_usage_advisory`,
+  `signature_timestamp_present`, `xades_signature_policy_implied`,
+  `xades_signature_policy_explicit`, `xades_not_validated`,
+  `archive_timestamp_present` and `dossier_timestamp_not_validated`.
+- **`skipped` now means only "a check the policy requires was not performed"**,
+  and nothing else is filed under it. A property this build reads but does not
+  act on, and evidence it declines to re-verify, are `info`: they did not fail
+  to answer a required question. Blocking on them capped a signature at
+  `indeterminate` for carrying *more* evidence than the minimum, which is
+  precisely backwards — an unsigned qualifying property cannot change what a
+  signature says, an archive timestamp is laid on top of one, and a
+  dossier-level `es:TimeStamp` is a statement about the container rather than
+  about any signature in it. The three remaining `skipped` emitters are
+  `xades_absent`, `timestamp_not_checked` and `revocation_not_checked`.
+  `xades_not_validated` and `archive_timestamp_present` are omitted entirely
+  when there is nothing to report.
+- `cert_revoked_after_validation_time` is `info` when the validation time was
+  **proven** by a fully verified `xades:SignatureTimeStamp`, and `unknown` when
+  it was merely asserted by `--at` or the clock. This is the ETSI EN 319 102-1
+  best-signature-time rule: a signature that demonstrably existed at an instant
+  is not undone by a certificate being withdrawn afterwards, whereas a caller
+  can pass any `--at` they like. Never `passed` either way; the time and reason
+  are always reported, and the chain entry's own status reads
+  `revoked_after_validation_time`. A timestamp authority's chain is always
+  treated as asserted, because the instant it is validated at is the `genTime`
+  the token itself claims.
+- Revocation summary messages now name **which chain** they are about — the
+  signer's or a timestamp authority's — since a signature emits one per chain
+  under the same code.
 - Embedded validation data is now harvested from
   `xades141:TimeStampValidationData` as well as from a plain
   `xades:RevocationValues` / `xades:CertificateValues`, for both CRLs, OCSP

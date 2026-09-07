@@ -1513,3 +1513,227 @@ fn the_coverage_message_never_names_the_signer() {
         "the signer's own subject must never appear in a message; got {message}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// What a `skipped` check may and may not block
+// ---------------------------------------------------------------------------
+
+/// Unsigned qualifying properties this build does not validate, and an archive
+/// timestamp it does not verify, are evidence *added* to a signature. Blocking
+/// on them would cap a signature at `indeterminate` for carrying more than the
+/// minimum, which is precisely backwards.
+#[test]
+fn unvalidated_unsigned_properties_do_not_block_a_valid_verdict() {
+    let pki = pki();
+    let mut signature = signature(&pki);
+    signature.extra_unsigned_property = Some("CompleteCertificateRefs".to_owned());
+    signature.archive_timestamp = true;
+    let xml = dossier(signature, &pki.signer_key);
+    let report = run(
+        &xml,
+        vec![pki.root_der.clone()],
+        vec![clean_crl(&pki)],
+        Vec::new(),
+    );
+
+    assert_check(&report, CheckCode::XadesNotValidated, CheckStatus::Info);
+    assert_check(
+        &report,
+        CheckCode::ArchiveTimestampPresent,
+        CheckStatus::Info,
+    );
+    assert_eq!(report.signatures[0].verdict, Verdict::Valid);
+    assert_eq!(report.verdict, Verdict::Valid);
+}
+
+/// A dossier-level `es:TimeStamp` is a statement about the container, not about
+/// any one signature, so it must not decide whether the signatures inside it
+/// are valid.
+#[test]
+fn a_dossier_timestamp_does_not_block_a_signature() {
+    let pki = pki();
+    let spec = DossierSpec {
+        document_signature: Some(signature(&pki)),
+        dossier_timestamp: true,
+        ..Default::default()
+    };
+    let xml = build(&spec, &[("doc", &pki.signer_key)]);
+    let report = run(
+        &xml,
+        vec![pki.root_der.clone()],
+        vec![clean_crl(&pki)],
+        Vec::new(),
+    );
+
+    assert_check(
+        &report,
+        CheckCode::DossierTimestampNotValidated,
+        CheckStatus::Info,
+    );
+    assert_eq!(report.signatures[0].verdict, Verdict::Valid);
+    assert_eq!(report.verdict, Verdict::Valid);
+}
+
+// ---------------------------------------------------------------------------
+// Revocation after a proven validation time
+// ---------------------------------------------------------------------------
+
+/// Verify with no `--at`, so a fully verified timestamp is what fixes the
+/// validation time. That is the only way this crate treats a time as *proven*.
+fn run_at_timestamp(xml: &str, anchors: Vec<Vec<u8>>, crls: Vec<Vec<u8>>) -> VerifyReport {
+    let trust = MemoryTrustStore::new(anchors, Vec::new());
+    let revocation = MemoryRevocationStore::new(crls, Vec::new());
+    let backend = RoxmltreeC14n;
+    let clock = openszigno_verify::SystemClock;
+    let options = VerifyOptions::new(&clock, &trust, &revocation, &backend);
+    verify(xml.as_bytes(), &options).expect("the dossier parses structurally")
+}
+
+/// A CRL revoking the signer after the timestamp's `genTime`.
+fn revoked_after_gen_time(pki: &Pki) -> Vec<u8> {
+    build_crl(
+        &CrlSpec::new(pki.root_der.clone(), rsa_key(keys::ROOT_RSA2048))
+            .revoking(RevokedSpec::new(&pki.signer_der, "2020-06-15T00:00:00Z").with_reason(4)),
+    )
+}
+
+/// ETSI EN 319 102-1 compares a revocation date against the best-signature-time.
+/// When a fully verified signature timestamp proves that time, a revocation
+/// dated afterwards says the certificate was withdrawn later and says nothing
+/// against the signature: it is reported, and does not block.
+#[test]
+fn a_revocation_after_a_proven_time_does_not_block() {
+    let pki = pki();
+    let xml = dossier(signature(&pki), &pki.signer_key);
+    let report = run_at_timestamp(
+        &xml,
+        vec![pki.root_der.clone()],
+        vec![revoked_after_gen_time(&pki)],
+    );
+
+    assert_eq!(
+        report.signatures[0].validation_time_source,
+        openszigno_verify::report::ValidationTimeSource::Timestamp
+    );
+    assert_check(
+        &report,
+        CheckCode::CertRevokedAfterValidationTime,
+        CheckStatus::Info,
+    );
+    // The revocation is still reported in full: it happened, and a reader
+    // deserves to be told so.
+    let entry = report.signatures[0].chain[0]
+        .revocation
+        .as_ref()
+        .expect("the leaf carries an answer");
+    assert_eq!(entry.status, RevocationStatus::RevokedAfterValidationTime);
+    assert_eq!(
+        entry.revocation_time.as_deref(),
+        Some("2020-06-15T00:00:00Z")
+    );
+    assert_eq!(entry.reason, Some("superseded"));
+    assert_eq!(report.signatures[0].verdict, Verdict::Valid);
+}
+
+/// The same dossier and the same CRL, with the validation time asserted by
+/// `--at` instead of proven by a timestamp: the finding blocks. A caller can
+/// pass any `--at` they like, so an unproven time cannot dismiss a revocation.
+#[test]
+fn a_revocation_after_an_asserted_time_still_blocks() {
+    let pki = pki();
+    let xml = dossier(signature(&pki), &pki.signer_key);
+    let report = run(
+        &xml,
+        vec![pki.root_der.clone()],
+        vec![revoked_after_gen_time(&pki)],
+        Vec::new(),
+    );
+
+    assert_eq!(
+        report.signatures[0].validation_time_source,
+        openszigno_verify::report::ValidationTimeSource::AtFlag
+    );
+    assert_check(
+        &report,
+        CheckCode::CertRevokedAfterValidationTime,
+        CheckStatus::Unknown,
+    );
+    assert_eq!(report.verdict, Verdict::Indeterminate);
+}
+
+/// A revocation *before* the proven time is still a failure, however the time
+/// was arrived at. Nothing here relaxes that.
+#[test]
+fn a_revocation_before_a_proven_time_still_fails() {
+    let pki = pki();
+    let crl = build_crl(
+        &CrlSpec::new(pki.root_der.clone(), rsa_key(keys::ROOT_RSA2048))
+            .revoking(RevokedSpec::new(&pki.signer_der, "2020-05-10T00:00:00Z")),
+    );
+    let xml = dossier(signature(&pki), &pki.signer_key);
+    let report = run_at_timestamp(&xml, vec![pki.root_der.clone()], vec![crl]);
+
+    assert_check(&report, CheckCode::CertRevoked, CheckStatus::Failed);
+    assert_eq!(report.verdict, Verdict::Invalid);
+}
+
+/// A finding that blocks is never masked by one that does not: a stale answer
+/// for one certificate outranks a dismissible revocation on another.
+#[test]
+fn a_blocking_finding_outranks_a_dismissible_revocation() {
+    let pki = pki();
+    let xml = dossier(signature(&pki), &pki.signer_key);
+    let report = run_at_timestamp(
+        &xml,
+        vec![pki.root_der.clone()],
+        vec![revoked_after_gen_time(&pki)],
+    );
+    // Sanity: with data for both chains the run is valid.
+    assert_eq!(report.signatures[0].verdict, Verdict::Valid);
+
+    // Now a CRL scoped to CA certificates only, so neither end-entity chain has
+    // a usable answer and the blocking finding must surface instead.
+    let mut scoped = CrlSpec::new(pki.root_der.clone(), rsa_key(keys::ROOT_RSA2048));
+    scoped.issuing_distribution_point = Some((false, true, false, None));
+    let report = run_at_timestamp(&xml, vec![pki.root_der.clone()], vec![build_crl(&scoped)]);
+    assert_ne!(report.signatures[0].verdict, Verdict::Valid);
+}
+
+// ---------------------------------------------------------------------------
+// Two chains, two answers
+// ---------------------------------------------------------------------------
+
+/// A signature reports one revocation summary for its signer's chain and one
+/// for each timestamp authority's. Both share a code, so each message has to
+/// say which chain it is about or the duplicate is unreadable.
+#[test]
+fn each_chain_names_itself_in_its_revocation_message() {
+    let pki = pki();
+    let xml = dossier(signature(&pki), &pki.signer_key);
+    let report = run(
+        &xml,
+        vec![pki.root_der.clone()],
+        vec![clean_crl(&pki)],
+        Vec::new(),
+    );
+
+    let messages: Vec<String> = report.signatures[0]
+        .checks
+        .iter()
+        .filter(|check| check.code == CheckCode::RevocationOk)
+        .map(|check| check.message.clone())
+        .collect();
+    assert_eq!(messages.len(), 2, "one summary per chain; got {messages:?}");
+    assert!(
+        messages
+            .iter()
+            .any(|message| message.contains("the signing certificate's chain")),
+        "got {messages:?}"
+    );
+    assert!(
+        messages
+            .iter()
+            .any(|message| message.contains("the timestamp authority's chain")),
+        "got {messages:?}"
+    );
+}
