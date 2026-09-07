@@ -176,7 +176,13 @@ fn document_signature_passes_every_implemented_check() {
     );
     assert_check(&report, CheckCode::CertPathOk, CheckStatus::Passed);
     assert_check(&report, CheckCode::XadesPresent, CheckStatus::Passed);
-    assert_check(&report, CheckCode::XadesNotValidated, CheckStatus::Skipped);
+    // Nothing signed says which certificate signed it, and that is reported
+    // rather than assumed away.
+    assert_check(
+        &report,
+        CheckCode::XadesSigningCertificateAbsent,
+        CheckStatus::Unknown,
+    );
     assert_check(
         &report,
         CheckCode::RevocationNotChecked,
@@ -184,8 +190,8 @@ fn document_signature_passes_every_implemented_check() {
     );
     assert_check(
         &report,
-        CheckCode::TimestampNotChecked,
-        CheckStatus::Skipped,
+        CheckCode::SignatureTimestampAbsent,
+        CheckStatus::Unknown,
     );
 
     assert_eq!(report.verdict, Verdict::Indeterminate);

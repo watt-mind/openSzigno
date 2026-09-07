@@ -2,14 +2,16 @@
 //!
 //! # What this phase can and cannot say
 //!
-//! This is phase 1 of the `verify` milestone. It validates the XMLDSig core
+//! This is phase 2 of the `verify` milestone. It validates the XMLDSig core
 //! (canonicalization, reference digests, the signature value), enforces the
-//! e-dossier reference-scope rules, and validates the certification path
-//! against a caller-supplied trust store. Revocation and timestamps are
-//! reported as `skipped`, which caps every verdict at `indeterminate`:
-//! **this crate cannot return `valid`**, by construction, and a caller that
-//! sees `indeterminate` has learned that nothing failed, not that anything is
-//! trustworthy.
+//! e-dossier reference-scope rules, binds the signing certificate through the
+//! signed XAdES `SigningCertificate` property, verifies RFC 3161 signature
+//! timestamps, and validates the certification path against a caller-supplied
+//! trust store at a validation time a verified timestamp may move. Revocation
+//! is still reported as `skipped`, which caps every verdict at
+//! `indeterminate`: **this crate cannot return `valid`**, by construction, and
+//! a caller that sees `indeterminate` has learned that nothing failed, not
+//! that anything is trustworthy.
 //!
 //! # Structure
 //!
@@ -31,21 +33,28 @@ pub mod dsig;
 pub mod policy;
 pub mod report;
 pub mod trust;
+pub mod tsa;
+pub mod xades;
 
 use openszigno_core::{Error as CoreError, Limits, ParseOptions, XmlSource, id_map};
 
 pub use c14n::{C14nAlgorithm, C14nBackend, C14nError, NodeSet, RoxmltreeC14n};
 pub use codes::{Check, CheckCode, CheckStatus, Verdict};
 pub use policy::{PolicyReport, VerifyLimits};
-pub use report::{SignatureReport, SignatureScope, VerifyReport};
+pub use report::{
+    SignatureReport, SignatureScope, SigningCertificateBinding, ValidationTimeSource, VerifyReport,
+    XadesReport,
+};
 pub use trust::{
     Clock, FixedClock, MemoryTrustStore, NoRevocation, NoTrust, RevocationSource, SystemClock,
     TrustSource, format_rfc3339, parse_rfc3339,
 };
+pub use tsa::{TimestampKind, TimestampReport};
 
-use crate::certs::{CertificateSource, ParsedCertificate, dedup, validate_path};
+use crate::certs::{CertificateSource, ParsedCertificate, PathPurpose, dedup, validate_path};
 use crate::report::{Counts, VerificationTime};
 use crate::trust::TimeSource;
+use crate::tsa::{TokenInput, verify_token};
 
 /// How one dossier is verified.
 pub struct VerifyOptions<'a> {
@@ -170,6 +179,78 @@ pub fn verify(bytes: &[u8], options: &VerifyOptions<'_>) -> Result<VerifyReport,
         let outcome = dsig::verify_signature(&context, *node, index);
         let mut report = outcome.report;
 
+        // --- Stage F: signature timestamps ----------------------------------
+        // Timestamps are verified before the signer's own path, because a
+        // verified token is what may move the validation time that path uses.
+        //
+        // A TSA's issuing CA is often carried in the enclosing signature's
+        // `xades:CertificateValues` rather than inside the token, so the
+        // token's own certificate set, the signature's candidates, and the
+        // trust store's intermediates are offered together. All three are
+        // untrusted path candidates; only the trust store supplies anchors.
+        let mut timestamp_candidates = outcome.extra_certificates.clone();
+        timestamp_candidates.extend(store_intermediates.iter().cloned());
+        let timestamp_candidates = dedup(timestamp_candidates);
+        let mut verified_gen_times: Vec<crate::trust::UnixTime> = Vec::new();
+        for source in &outcome.timestamps {
+            if let Some(reason) = &source.unsupported {
+                let check = Check::skipped(CheckCode::TimestampNotChecked, reason.clone());
+                report.checks.push(check.clone());
+                report.timestamps.push(tsa::TimestampReport {
+                    kind: source.kind,
+                    gen_time: None,
+                    accuracy_seconds: None,
+                    serial_hex: None,
+                    imprint_algorithm: None,
+                    tsa_certificate: None,
+                    chain: Vec::new(),
+                    verified: false,
+                    checks: vec![check],
+                });
+                continue;
+            }
+            let token = verify_token(&TokenInput {
+                kind: source.kind,
+                token: source.token.clone(),
+                imprint_input: source.imprint_input.clone(),
+                anchors: &anchors,
+                extra_certificates: &timestamp_candidates,
+                limits: &options.limits,
+                allow_legacy_algorithms: options.allow_legacy_algorithms,
+                claimed_signing_time: outcome.claimed_signing_time,
+            });
+            report.checks.push(tsa::summary_check(&token.report.checks));
+            if token.report.verified
+                && let Some(gen_time) = token.gen_time
+            {
+                verified_gen_times.push(gen_time);
+            }
+            report.timestamps.push(token.report);
+        }
+        if report.timestamps.is_empty() {
+            report.checks.push(Check::unknown(
+                CheckCode::SignatureTimestampAbsent,
+                "the signature carries no xades:SignatureTimeStamp, so nothing proves when it existed",
+            ));
+        } else {
+            report.checks.push(Check::unknown(
+                CheckCode::SignatureTimestampPresent,
+                "the signature carries at least one xades:SignatureTimeStamp; a timestamp proves existence, not validity",
+            ));
+        }
+
+        // --- The validation time for this signature -------------------------
+        // Precedence: an explicit `--at` always wins, then the earliest fully
+        // verified timestamp's genTime, then the clock.
+        let (signature_time, source) =
+            match (&options.requested_time, verified_gen_times.iter().min()) {
+                (Some(_), _) => (time, ValidationTimeSource::AtFlag),
+                (None, Some(gen_time)) => (*gen_time, ValidationTimeSource::Timestamp),
+                (None, None) => (time, ValidationTimeSource::CurrentTime),
+            };
+        report.validation_time = format_rfc3339(signature_time);
+        report.validation_time_source = source;
+
         // --- Stage D: certificate path -------------------------------------
         if let Some(signer) = &outcome.signer {
             // Candidates: the signature's own certificates (ds:KeyInfo and the
@@ -177,11 +258,23 @@ pub fn verify(bytes: &[u8], options: &VerifyOptions<'_>) -> Result<VerifyReport,
             let mut candidates = outcome.extra_certificates.clone();
             candidates.extend(store_intermediates.iter().cloned());
             let candidates = dedup(candidates);
-            let path = validate_path(signer, &candidates, &anchors, time, &options.limits);
+            let path = validate_path(
+                signer,
+                &candidates,
+                &anchors,
+                signature_time,
+                &options.limits,
+                PathPurpose::Signing,
+            );
             report.chain = path.chain;
+            report.checks.extend(path.advisories);
             let status = match path.code {
                 CheckCode::CertPathOk => CheckStatus::Passed,
-                CheckCode::CertPathUnknown => CheckStatus::Unknown,
+                // Giving up is not a finding: an exhausted search means the
+                // tool stopped looking, not that no path exists.
+                CheckCode::CertPathUnknown | CheckCode::CertPathSearchExhausted => {
+                    CheckStatus::Unknown
+                }
                 _ => CheckStatus::Failed,
             };
             report
@@ -189,18 +282,28 @@ pub fn verify(bytes: &[u8], options: &VerifyOptions<'_>) -> Result<VerifyReport,
                 .push(Check::new(path.code, status, path.message));
         }
 
-        // --- Stages E and F: reported, never silently omitted ---------------
+        // --- Stage E: reported, never silently omitted ----------------------
         report.checks.push(Check::skipped(
             CheckCode::RevocationNotChecked,
             "revocation status is not checked in this phase",
         ));
-        report.checks.push(Check::skipped(
-            CheckCode::TimestampNotChecked,
-            "timestamps are not verified in this phase",
-        ));
 
         report.verdict = dsig::signature_verdict(&report.checks);
         signatures.push(report);
+    }
+
+    if dossier.timestamps_present > 0 {
+        // A dossier-level `es:TimeStamp` protects the elements it references,
+        // so verifying one needs the reference machinery M3 adds. Reporting it
+        // as unchecked is the honest answer; guessing at what it covers and
+        // then reporting a match would not be.
+        dossier_checks.push(Check::skipped(
+            CheckCode::DossierTimestampNotValidated,
+            format!(
+                "{} dossier-level es:TimeStamp element(s) are present and are not validated in this release",
+                dossier.timestamps_present
+            ),
+        ));
     }
 
     if signatures.is_empty() {

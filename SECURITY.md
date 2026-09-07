@@ -6,13 +6,13 @@
 good.**
 
 `openszigno verify` checks XMLDSig canonicalization, reference digests,
-signature values, the e-dossier reference-scope rules, and certificate paths
-against a trust store you supply. A verdict of `invalid` is a real
-cryptographic finding and should be taken seriously. But revocation,
-timestamps, and the XAdES signing-certificate binding are not implemented, so
-the best verdict this release can reach is `indeterminate`, which means
-"nothing that was checked failed" — not "this is authentic". No openSzigno
-output ever says `valid`.
+signature values, the e-dossier reference-scope rules, the XAdES signed
+`SigningCertificate` binding, RFC 3161 signature timestamps, and certificate
+paths against a trust store you supply. A verdict of `invalid` is a real
+cryptographic finding and should be taken seriously. But revocation is not
+checked and qualified status is not determined, so the best verdict this
+release can reach is `indeterminate`, which means "nothing that was checked
+failed" — not "this is authentic". No openSzigno output ever says `valid`.
 
 **Extraction is not verification.** `inspect`, `list`, `extract`, and
 `validate-structure` check nothing cryptographic at all; `signatures_verified`

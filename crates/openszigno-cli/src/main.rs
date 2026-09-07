@@ -89,7 +89,9 @@ struct VerifyArgs {
     /// check is `unknown`.
     #[arg(long = "trust-store", value_name = "DIR")]
     trust_store: Option<PathBuf>,
-    /// Validation time as an RFC 3339 timestamp. Defaults to now.
+    /// Validation time as an RFC 3339 timestamp. Overrides everything: without
+    /// it, a signature whose timestamp fully verified is validated at that
+    /// token's genTime, and otherwise at the current time.
     #[arg(long, value_name = "TIME", value_parser = parse_validation_time)]
     at: Option<ValidationTime>,
     /// Admit SHA-1 digests and RSA-SHA1 signature methods for diagnosis only.
@@ -449,8 +451,8 @@ fn validate_structure(path: &Path, options: &ParseOptions) -> CliResult {
 /// A structural failure still exits 4, so a caller can tell "this is not a
 /// dossier" apart from "this dossier's signatures do not verify". A completed
 /// run exits 6 when any signature is `invalid` and 7 when the overall verdict
-/// is `indeterminate`; phase 1 cannot reach exit 0 for a dossier that holds
-/// signatures, because revocation and timestamps are not checked.
+/// is `indeterminate`; this phase cannot reach exit 0 for a dossier that holds
+/// signatures, because revocation is not checked.
 fn verify_command(args: &VerifyArgs) -> CliResult {
     let options = args.parse_options();
     let (bytes, dossier) = load(&args.file, &options)?;
@@ -1389,6 +1391,33 @@ fn write_human_success(command: &str, response: &Response) -> io::Result<()> {
                     display_json_string(&signature["scope"]),
                     display_json_string(&signature["verdict"])
                 )?;
+                writeln!(
+                    out,
+                    "  validation time: {} (source: {})",
+                    display_json_string(&signature["validation_time"]),
+                    display_json_string(&signature["validation_time_source"])
+                )?;
+                for timestamp in signature["timestamps"].as_array().into_iter().flatten() {
+                    writeln!(
+                        out,
+                        "  {} at {}: {}",
+                        display_json_string(&timestamp["kind"]),
+                        display_json_string(&timestamp["gen_time"]),
+                        if timestamp["verified"] == Value::Bool(true) {
+                            "verified"
+                        } else {
+                            "not verified"
+                        }
+                    )?;
+                    for check in timestamp["checks"].as_array().into_iter().flatten() {
+                        writeln!(
+                            out,
+                            "    {}: {}",
+                            display_json_string(&check["code"]),
+                            display_json_string(&check["status"])
+                        )?;
+                    }
+                }
                 for check in signature["checks"].as_array().into_iter().flatten() {
                     writeln!(
                         out,
@@ -1398,12 +1427,11 @@ fn write_human_success(command: &str, response: &Response) -> io::Result<()> {
                     )?;
                 }
             }
-            // The boundary, restated on every run: this phase checks neither
-            // revocation nor timestamps, so it can never conclude more than
-            // "nothing failed".
+            // The boundary, restated on every run: this phase does not check
+            // revocation, so it can never conclude more than "nothing failed".
             writeln!(
                 out,
-                "Revocation and timestamps are not checked in this release, so no signature can be reported as valid."
+                "Revocation is not checked in this release, so no signature can be reported as valid."
             )?;
         }
         "validate-structure" => {

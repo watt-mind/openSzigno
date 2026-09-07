@@ -18,7 +18,9 @@ use crate::c14n::{C14nAlgorithm, C14nBackend, EXC_C14N_NAMESPACE, NodeSet};
 use crate::certs::{CertificateSource, ParsedCertificate, dedup};
 use crate::codes::{Check, CheckCode, CheckStatus, Verdict, verdict_of};
 use crate::policy::{Digest, SignatureScheme, Transform, VerifyLimits};
-use crate::report::{ReferenceReport, SignatureReport, SignatureScope};
+use crate::report::{ReferenceReport, SignatureReport, SignatureScope, XadesReport};
+use crate::tsa::TimestampKind;
+use crate::xades::{self, BindingFailure, SignaturePolicy, XadesProperties};
 
 /// The XAdES namespaces seen in e-dossiers: 1.3.2 in current material, 1.2.2
 /// and 1.1.1 in legacy material, 1.4.1 for the archival extensions.
@@ -73,6 +75,43 @@ pub struct SignatureOutcome {
     pub report: SignatureReport,
     pub signer: Option<ParsedCertificate>,
     pub extra_certificates: Vec<ParsedCertificate>,
+    /// The timestamp tokens this signature carries, with the octets each one
+    /// must be checked against already canonicalized.
+    pub timestamps: Vec<TimestampSource>,
+    /// The claimed `xades:SigningTime` in Unix seconds, for the ordering check
+    /// against a token's `genTime`.
+    pub claimed_signing_time: Option<crate::trust::UnixTime>,
+}
+
+/// One timestamp token found in a signature, and the data it covers.
+pub struct TimestampSource {
+    pub kind: TimestampKind,
+    pub token: Vec<u8>,
+    /// The canonicalized octets the token's message imprint must match.
+    pub imprint_input: Vec<u8>,
+    /// Set when the timestamp uses a form this build does not implement, in
+    /// which case it is reported as unchecked rather than verified.
+    pub unsupported: Option<String>,
+}
+
+/// The identity of one signature, carried through every early return.
+#[derive(Clone)]
+struct Header {
+    index: usize,
+    scope: SignatureScope,
+    document_index: Option<usize>,
+    signature_id: Option<String>,
+    /// The claimed `xades:SigningTime`, RFC 3339 UTC.
+    signing_time: Option<String>,
+}
+
+/// The outcome of stage C, gathered before the report is assembled.
+struct StageC {
+    checks: Vec<Check>,
+    report: XadesReport,
+    /// The `ds:KeyInfo` candidate the signed `SigningCertificate` designates,
+    /// which overrides the key-based selection when the two disagree.
+    signer_override: Option<usize>,
 }
 
 /// Run stages A, B, and C over one `ds:Signature`.
@@ -87,10 +126,18 @@ pub fn verify_signature(
     let mut references_report: Vec<ReferenceReport> = Vec::new();
 
     let scope = placement_of(context, signature);
-    let document_index = document_index_of(context, signature);
-    let signature_id = id_of(signature).map(str::to_owned);
-    let xades = find_xades(signature);
-    let claimed_signing_time = signing_time(signature);
+    let properties = xades::parse(signature);
+    let header = Header {
+        index,
+        scope,
+        document_index: document_index_of(context, signature),
+        signature_id: id_of(signature).map(str::to_owned),
+        signing_time: properties.signing_time.clone(),
+    };
+    let claimed_signing_time = properties
+        .signing_time
+        .as_deref()
+        .and_then(crate::trust::parse_rfc3339);
 
     // --- Stage A1: structure ------------------------------------------------
     let signed_info = direct_child(signature, XMLDSIG_NAMESPACE, "SignedInfo");
@@ -102,16 +149,14 @@ pub fn verify_signature(
             "the signature is missing ds:SignedInfo or ds:SignatureValue",
         ));
         return finish(
-            index,
-            scope,
-            document_index,
-            signature_id,
-            xades,
+            header,
+            stage_c_presence(&properties),
             checks,
             references_report,
             None,
             Vec::new(),
             None,
+            Vec::new(),
             claimed_signing_time,
         );
     };
@@ -125,16 +170,14 @@ pub fn verify_signature(
             "ds:SignedInfo is missing its canonicalization or signature method",
         ));
         return finish(
-            index,
-            scope,
-            document_index,
-            signature_id,
-            xades,
+            header,
+            stage_c_presence(&properties),
             checks,
             references_report,
             None,
             Vec::new(),
             None,
+            Vec::new(),
             claimed_signing_time,
         );
     };
@@ -144,16 +187,14 @@ pub fn verify_signature(
             "ds:SignedInfo contains no ds:Reference",
         ));
         return finish(
-            index,
-            scope,
-            document_index,
-            signature_id,
-            xades,
+            header,
+            stage_c_presence(&properties),
             checks,
             references_report,
             None,
             Vec::new(),
             None,
+            Vec::new(),
             claimed_signing_time,
         );
     }
@@ -166,16 +207,14 @@ pub fn verify_signature(
             ),
         ));
         return finish(
-            index,
-            scope,
-            document_index,
-            signature_id,
-            xades,
+            header,
+            stage_c_presence(&properties),
             checks,
             references_report,
             None,
             Vec::new(),
             None,
+            Vec::new(),
             claimed_signing_time,
         );
     }
@@ -368,7 +407,7 @@ pub fn verify_signature(
         context,
         signature,
         scope,
-        xades,
+        properties.qualifying_properties,
         &references,
         &resolved,
     ));
@@ -381,6 +420,9 @@ pub fn verify_signature(
     let mut signer = None;
     let mut signer_index = None;
     let mut extra_certificates = Vec::new();
+    let mut key_info_candidates: Vec<ParsedCertificate> = Vec::new();
+    let mut reached_stage_b = false;
+    let mut timestamps: Vec<TimestampSource> = Vec::new();
     if policy_failed {
         // The resolution stage already knows what every URI pointed at, and a
         // caller needs to see that even when the run stopped before any digest
@@ -441,7 +483,10 @@ pub fn verify_signature(
                     CheckCode::SignedInfoCanonicalization,
                     "ds:SignedInfo canonicalized without error",
                 ));
+                reached_stage_b = true;
                 let candidates = dedup(key_info_certificates(signature));
+                key_info_candidates = candidates.clone();
+                timestamps = collect_timestamps(context, signature, &properties);
                 extra_certificates = candidates.clone();
                 extra_certificates.extend(encapsulated_certificates(
                     signature,
@@ -531,37 +576,104 @@ pub fn verify_signature(
         }
     }
 
+    let stage_c = if reached_stage_b {
+        stage_c_binding(
+            &properties,
+            &key_info_candidates,
+            signer_index,
+            context.allow_legacy_algorithms,
+            timestamps.len(),
+        )
+    } else {
+        stage_c_presence(&properties)
+    };
+    // The *signed* SigningCertificate decides which certificate the signature
+    // claims, so a disagreement with the key-based selection moves the signer
+    // as well as failing the check: the path is then validated for the
+    // certificate the signature actually designates.
+    if let Some(position) = stage_c.signer_override
+        && let Some(certificate) = key_info_candidates.get(position)
+    {
+        signer = Some(certificate.clone());
+        signer_index = Some(position);
+    }
+
     finish(
-        index,
-        scope,
-        document_index,
-        signature_id,
-        xades,
+        header,
+        stage_c,
         checks,
         references_report,
         signer,
         extra_certificates,
         signer_index,
+        timestamps,
         claimed_signing_time,
     )
 }
 
 #[allow(clippy::too_many_arguments)]
 fn finish(
-    index: usize,
-    scope: SignatureScope,
-    document_index: Option<usize>,
-    signature_id: Option<String>,
-    xades: Option<Node<'_, '_>>,
+    header: Header,
+    stage_c: StageC,
     mut checks: Vec<Check>,
     references: Vec<ReferenceReport>,
     signer: Option<ParsedCertificate>,
     extra_certificates: Vec<ParsedCertificate>,
     signer_index: Option<usize>,
-    signing_time: Option<String>,
+    timestamps: Vec<TimestampSource>,
+    claimed_signing_time: Option<crate::trust::UnixTime>,
 ) -> SignatureOutcome {
-    // Stage C: XAdES is detected, never validated, in phase 1.
-    if xades.is_some() {
+    checks.extend(stage_c.checks);
+    // The claimed signing time is read and reported, never believed: it is a
+    // claim until a verified timestamp token orders it, and it never becomes a
+    // validation time.
+    match &header.signing_time {
+        Some(_) => checks.push(Check::unknown(
+            CheckCode::SigningTimePresent,
+            "a claimed xades:SigningTime was read; it is unauthenticated and is never used as a validation time",
+        )),
+        None => checks.push(Check::unknown(
+            CheckCode::SigningTimePresent,
+            "no usable xades:SigningTime was found",
+        )),
+    }
+
+    SignatureOutcome {
+        report: SignatureReport {
+            index: header.index,
+            scope: header.scope,
+            document_index: header.document_index,
+            signature_id: header.signature_id,
+            verdict: Verdict::Indeterminate,
+            xades_level: stage_c.report.present.then_some("detected"),
+            signing_time: header.signing_time,
+            signing_certificate_index: signer_index,
+            signing_certificate: signer.as_ref().map(ParsedCertificate::summary),
+            chain: Vec::new(),
+            references,
+            xades: stage_c.report,
+            timestamps: Vec::new(),
+            validation_time: String::new(),
+            validation_time_source: crate::report::ValidationTimeSource::CurrentTime,
+            checks,
+        },
+        signer,
+        extra_certificates,
+        timestamps,
+        claimed_signing_time,
+    }
+}
+
+/// The part of stage C that needs no cryptography: what the properties are,
+/// and what this build did not process.
+///
+/// Used on its own when the signature failed an earlier stage, because the
+/// signing-certificate binding cannot be evaluated against a signature whose
+/// references were never resolved.
+fn stage_c_presence(properties: &XadesProperties<'_, '_>) -> StageC {
+    let mut checks = Vec::new();
+    let present = properties.qualifying_properties.is_some();
+    if present {
         checks.push(Check::passed(
             CheckCode::XadesPresent,
             "XAdES qualifying properties are present",
@@ -572,42 +684,286 @@ fn finish(
             "no XAdES qualifying properties were found for this signature",
         ));
     }
-    checks.push(Check::skipped(
-        CheckCode::XadesNotValidated,
-        "XAdES qualifying properties are not validated in this phase",
-    ));
-    // The claimed signing time is read and reported, never believed: nothing
-    // authenticates it until a timestamp token binds it in phase 2.
-    match &signing_time {
-        Some(_) => checks.push(Check::unknown(
-            CheckCode::SigningTimePresent,
-            "a claimed xades:SigningTime was read; it is unauthenticated until a timestamp binds it",
+
+    // A signature policy is reported by identifier only: no policy document is
+    // fetched, parsed, or applied, so neither form can contribute a `passed`.
+    match properties.signature_policy {
+        Some(SignaturePolicy::Implied) => checks.push(Check::unknown(
+            CheckCode::XadesSignaturePolicyImplied,
+            "the signature declares an implied signature policy; no policy is processed",
         )),
-        None => checks.push(Check::unknown(
-            CheckCode::SigningTimePresent,
-            "no usable xades:SigningTime was found",
+        Some(SignaturePolicy::Explicit) => checks.push(Check::unknown(
+            CheckCode::XadesSignaturePolicyExplicit,
+            "the signature declares an explicit signature policy; its identifier is reported and no policy is processed",
         )),
+        None => {}
     }
 
-    SignatureOutcome {
-        report: SignatureReport {
-            index,
-            scope,
-            document_index,
-            signature_id,
-            verdict: Verdict::Indeterminate,
-            xades_level: xades.map(|_| "detected"),
-            signing_time,
-            signing_certificate_index: signer_index,
-            signing_certificate: signer.as_ref().map(ParsedCertificate::summary),
-            chain: Vec::new(),
-            references,
-            timestamps: Vec::new(),
-            checks,
-        },
-        signer,
-        extra_certificates,
+    if !properties.unprocessed_properties.is_empty() {
+        checks.push(Check::skipped(
+            CheckCode::XadesNotValidated,
+            format!(
+                "qualifying properties this build does not validate are present: {}",
+                properties.unprocessed_properties.join(", ")
+            ),
+        ));
     }
+    if properties.archive_timestamps > 0 {
+        checks.push(Check::skipped(
+            CheckCode::ArchiveTimestampPresent,
+            "an xades:ArchiveTimeStamp is present; archive timestamps are out of scope for this release",
+        ));
+    }
+
+    StageC {
+        checks,
+        report: XadesReport {
+            present,
+            signing_time: properties.signing_time.clone(),
+            signing_certificate: None,
+            signature_policy: properties.signature_policy,
+            signature_policy_id: properties.signature_policy_id.clone(),
+            signature_timestamps: properties.signature_timestamps.len(),
+            archive_timestamps: properties.archive_timestamps,
+            unvalidated_properties: properties.unprocessed_properties.clone(),
+        },
+        signer_override: None,
+    }
+}
+
+/// Stage C in full: the signed `SigningCertificate` binding on top of the
+/// presence reporting.
+///
+/// This is the substitution check. `ds:KeyInfo` is unsigned unless a reference
+/// covers it, so the certificate the signature *claims* is the one the signed
+/// `CertDigest` names. When the certificate whose key verified the signature is
+/// not that one, the check fails: someone swapped the certificate.
+fn stage_c_binding(
+    properties: &XadesProperties<'_, '_>,
+    candidates: &[ParsedCertificate],
+    key_signer_index: Option<usize>,
+    allow_legacy_algorithms: bool,
+    signature_timestamps: usize,
+) -> StageC {
+    let mut stage = stage_c_presence(properties);
+    let _ = signature_timestamps;
+    if properties.certificate_references.is_empty() {
+        stage.checks.push(Check::unknown(
+            CheckCode::XadesSigningCertificateAbsent,
+            "the signature carries no xades:SigningCertificate, so nothing signed says which certificate signed it",
+        ));
+        return stage;
+    }
+    let form = properties.signing_certificate_form;
+    match xades::match_certificate(
+        &properties.certificate_references,
+        candidates,
+        allow_legacy_algorithms,
+    ) {
+        Ok(position) => {
+            let bound = key_signer_index.is_none_or(|index| index == position);
+            if bound {
+                stage.checks.push(Check::passed(
+                    CheckCode::XadesSigningCertificateBound,
+                    "the signing certificate matches the digest the signed SigningCertificate property names",
+                ));
+            } else {
+                stage.checks.push(Check::failed(
+                    CheckCode::XadesSigningCertificateMismatch,
+                    "the certificate whose key verified the signature is not the one the signed SigningCertificate property names",
+                ));
+            }
+            stage.signer_override = Some(position);
+            stage.report.signing_certificate = Some(crate::report::SigningCertificateBinding {
+                form,
+                digest_algorithm: properties
+                    .certificate_references
+                    .first()
+                    .and_then(|reference| {
+                        Digest::from_digest_uri(&reference.digest_uri).map(Digest::as_str)
+                    }),
+                issuer_serial_present: properties.certificate_references.iter().any(|reference| {
+                    reference.issuer_serial.is_some() || reference.issuer_serial_v2.is_some()
+                }),
+                matched: true,
+            });
+        }
+        Err(failure) => {
+            let message = match failure {
+                BindingFailure::DigestAlgorithm => {
+                    "the SigningCertificate property names no digest algorithm inside the pinned allowlist"
+                }
+                BindingFailure::IssuerSerial => {
+                    "a certificate digests to the SigningCertificate property but its issuer and serial do not match"
+                }
+                BindingFailure::NoMatch => {
+                    "no offered certificate digests to the certificate the signed SigningCertificate property names"
+                }
+            };
+            stage.checks.push(Check::failed(
+                CheckCode::XadesSigningCertificateMismatch,
+                message,
+            ));
+            stage.report.signing_certificate = Some(crate::report::SigningCertificateBinding {
+                form,
+                digest_algorithm: properties
+                    .certificate_references
+                    .first()
+                    .and_then(|reference| {
+                        Digest::from_digest_uri(&reference.digest_uri).map(Digest::as_str)
+                    }),
+                issuer_serial_present: properties.certificate_references.iter().any(|reference| {
+                    reference.issuer_serial.is_some() || reference.issuer_serial_v2.is_some()
+                }),
+                matched: false,
+            });
+        }
+    }
+    stage
+}
+
+/// Collect the signature timestamps and canonicalize what each one covers.
+///
+/// A `xades:SignatureTimeStamp` covers the canonicalized `ds:SignatureValue`
+/// **element**, not the Base64 text and not its digest. The canonicalization
+/// algorithm is the one the timestamp element names, defaulting to inclusive
+/// C14N as XAdES prescribes. The `Include` and `ReferenceInfo` forms select
+/// other data and are not implemented, so a timestamp that uses one is
+/// reported as unchecked rather than verified against the wrong bytes.
+/// Whether a `xades:SignatureTimeStamp` selects data this build cannot compute
+/// the imprint over, and why.
+///
+/// The implicit form — no data-selection child at all — covers the
+/// `ds:SignatureValue` element, which is what XAdES prescribes for a signature
+/// timestamp. The explicit `xades:Include` form (EN 319 132-1, XAdES 1.3.2 and
+/// 1.4.1) is accepted for exactly the case where it says the same thing: every
+/// `Include` is a same-document `#id` reference resolving, through the
+/// validated ID space, to *this signature's own* `ds:SignatureValue`. The
+/// `referencedData` attribute is not consulted, because for this target it
+/// cannot change what is digested.
+///
+/// Any other target set — another element, a URI that does not resolve, an
+/// external reference, or the `ReferenceInfo`, `HashDataInfo` and
+/// `XMLTimeStamp` forms — is refused by name rather than digested over the
+/// wrong bytes.
+fn unsupported_form(
+    context: &Context<'_, '_, '_>,
+    timestamp: Node<'_, '_>,
+    signature_value: Node<'_, '_>,
+) -> Option<String> {
+    for child in timestamp.children().filter(Node::is_element) {
+        match child.tag_name().name() {
+            "ReferenceInfo" | "HashDataInfo" | "XMLTimeStamp" => {
+                return Some(
+                    "the timestamp selects its data with a form this build does not implement"
+                        .to_owned(),
+                );
+            }
+            "Include" => {
+                let uri = attribute(child, "URI").unwrap_or_default();
+                let Some(id) = uri.strip_prefix('#').filter(|id| !id.is_empty()) else {
+                    return Some(
+                        "the timestamp includes a URI that is not a same-document reference"
+                            .to_owned(),
+                    );
+                };
+                match context.ids.get(id) {
+                    Some(node) if node.id() == signature_value.id() => {}
+                    _ => {
+                        return Some(
+                            "the timestamp includes data other than this signature's ds:SignatureValue"
+                                .to_owned(),
+                        );
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn collect_timestamps(
+    context: &Context<'_, '_, '_>,
+    signature: Node<'_, '_>,
+    properties: &XadesProperties<'_, '_>,
+) -> Vec<TimestampSource> {
+    let Some(signature_value) = direct_child(signature, XMLDSIG_NAMESPACE, "SignatureValue") else {
+        return Vec::new();
+    };
+    let mut sources = Vec::new();
+    for node in properties
+        .signature_timestamps
+        .iter()
+        .take(context.limits.max_timestamps_per_signature)
+    {
+        let unsupported = unsupported_form(context, *node, signature_value);
+
+        let tokens: Vec<Vec<u8>> = xades::xades_children(*node, "EncapsulatedTimeStamp")
+            .filter_map(|element| decode_base64(&text_of(element)))
+            .take(2)
+            .collect();
+        let (token, unsupported) = match (tokens.len(), unsupported) {
+            (_, Some(reason)) => (tokens.first().cloned().unwrap_or_default(), Some(reason)),
+            (1, None) => (tokens[0].clone(), None),
+            (0, None) => (
+                Vec::new(),
+                Some("the timestamp carries no decodable xades:EncapsulatedTimeStamp".to_owned()),
+            ),
+            (_, None) => (
+                tokens[0].clone(),
+                Some(
+                    "the timestamp carries more than one token, which this build does not process"
+                        .to_owned(),
+                ),
+            ),
+        };
+
+        let algorithm = xades::ds_child(*node, "CanonicalizationMethod")
+            .and_then(|method| {
+                attribute(method, "Algorithm").map(|uri| (method, C14nAlgorithm::from_uri(uri)))
+            })
+            .map_or(
+                Some((C14nAlgorithm::Inclusive { comments: false }, Vec::new())),
+                |(method, algorithm)| {
+                    algorithm.map(|algorithm| (algorithm, inclusive_prefixes(method)))
+                },
+            );
+        let (imprint_input, unsupported) = match algorithm {
+            Some((algorithm, prefixes)) => {
+                match context.backend.canonicalize(
+                    context.source,
+                    &NodeSet::subtree(signature_value),
+                    algorithm,
+                    &prefixes,
+                ) {
+                    Ok(octets) => (octets, unsupported),
+                    Err(_) => (
+                        Vec::new(),
+                        unsupported.or(Some(
+                            "the ds:SignatureValue could not be canonicalized for the timestamp"
+                                .to_owned(),
+                        )),
+                    ),
+                }
+            }
+            None => (
+                Vec::new(),
+                unsupported.or(Some(
+                    "the timestamp names a canonicalization algorithm this build does not implement"
+                        .to_owned(),
+                )),
+            ),
+        };
+
+        sources.push(TimestampSource {
+            kind: TimestampKind::SignatureTimestamp,
+            token,
+            imprint_input,
+            unsupported,
+        });
+    }
+    sources
 }
 
 /// Recompute one reference digest.
@@ -1008,17 +1364,6 @@ fn document_index_of(context: &Context<'_, '_, '_>, signature: Node<'_, '_>) -> 
     )
 }
 
-fn find_xades<'a, 'input>(signature: Node<'a, 'input>) -> Option<Node<'a, 'input>> {
-    signature.descendants().find(|node| {
-        node.is_element()
-            && node.tag_name().name() == "QualifyingProperties"
-            && node
-                .tag_name()
-                .namespace()
-                .is_some_and(|namespace| XADES_NAMESPACES.contains(&namespace))
-    })
-}
-
 /// The certificates `ds:KeyInfo` offers, in document order.
 ///
 /// Bounded, because `ds:KeyInfo` is attacker-controlled and every one of these
@@ -1064,24 +1409,6 @@ fn encapsulated_certificates(signature: Node<'_, '_>, limit: usize) -> Vec<Parse
         .filter_map(|der| ParsedCertificate::from_der(&der, CertificateSource::CertificateValues))
         .take(limit)
         .collect()
-}
-
-/// The claimed `xades:SigningTime`, normalised to RFC 3339 UTC.
-///
-/// The value is attacker-controlled, so it is parsed and re-formatted rather
-/// than echoed: anything that is not a timestamp is reported as absent. It is
-/// a *claim*, never a validation time; only a verified timestamp token could
-/// move the validation time, and that is phase 2.
-fn signing_time(signature: Node<'_, '_>) -> Option<String> {
-    let node = signature.descendants().find(|node| {
-        node.is_element()
-            && node.tag_name().name() == "SigningTime"
-            && node
-                .tag_name()
-                .namespace()
-                .is_some_and(|namespace| XADES_NAMESPACES.contains(&namespace))
-    })?;
-    crate::trust::parse_rfc3339(text_of(node).trim()).map(crate::trust::format_rfc3339)
 }
 
 /// Choose the signing certificate: the candidate whose public key actually

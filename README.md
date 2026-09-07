@@ -8,14 +8,14 @@ validating, and extracting Hungarian Microsec e-Szignó e-dossiers (`.es3`).
 [![MSRV](https://img.shields.io/badge/rustc-1.88%2B-orange.svg)](rust-toolchain.toml)
 
 > **Security boundary:** `openszigno verify` checks XMLDSig canonicalization,
-> reference digests, signature values, the e-dossier reference-scope rules, and
+> reference digests, signature values, the e-dossier reference-scope rules, the
+> XAdES signed `SigningCertificate` binding, RFC 3161 signature timestamps, and
 > certificate paths against a trust store you supply. It does **not** yet check
-> revocation, timestamps, or XAdES qualifying properties, so **it can never
-> report a signature as valid** — the best verdict it can reach is
-> `indeterminate`, meaning "nothing failed", not "this is trustworthy". It can
-> report a signature `invalid`, and that finding is meaningful. Successfully
-> parsing or extracting a dossier is never evidence that it is authentic,
-> signed, or legally valid.
+> revocation or qualified status, so **it can never report a signature as
+> valid** — the best verdict it can reach is `indeterminate`, meaning "nothing
+> failed", not "this is trustworthy". It can report a signature `invalid`, and
+> that finding is meaningful. Successfully parsing or extracting a dossier is
+> never evidence that it is authentic, signed, or legally valid.
 
 ## Installation
 
@@ -297,7 +297,7 @@ openszigno inspect tests/fixtures/doctype.es3 --json
 | `openszigno list FILE` | Lists document records in source XML order with title, creation date, MIME type, declared source size (`null`/`?` when the dossier omits it), `OBJREF`, transform chain, and whether the document embeds a dossier. | No |
 | `openszigno validate-structure FILE` | Applies the strict structural rules and reports `valid_structure`, `conformance_warnings`, plus `cryptographic_verification_performed: false`. | No |
 | `openszigno extract FILE --output DIR` | Decodes supported payloads into `DIR`, expanding embedded dossiers into `<file>.d` subdirectories, deduplicating repeated titles, never overwriting an existing file. | Yes |
-| `openszigno verify FILE` | Verifies every `ds:Signature`: canonicalization, reference digests, the signature value, the mandated e-dossier reference scope, and the certificate path. Reports a per-signature verdict of `invalid` or `indeterminate`; **never `valid`** in this release. | No |
+| `openszigno verify FILE` | Verifies every `ds:Signature`: canonicalization, reference digests, the signature value, the mandated e-dossier reference scope, the XAdES signed `SigningCertificate` binding, RFC 3161 signature timestamps, and the certificate path. Reports a per-signature verdict of `invalid` or `indeterminate`; **never `valid`** in this release. | No |
 
 Flags:
 
@@ -309,7 +309,7 @@ Flags:
 | `--no-recursive` | `extract` | Write an embedded dossier as a payload file instead of expanding it. |
 | `--max-depth N` | `extract` | Nesting levels of embedded dossiers to expand (default 3); values above the hard cap of 8 are clamped. |
 | `--trust-store DIR` | `verify` | Directory of trust anchors (`anchors/*`, PEM or DER) and optional extra CA certificates (`intermediates/*`). A directory of certificates with no `anchors` subdirectory is read as anchors. Without it, every chain check is `unknown`. |
-| `--at TIME` | `verify` | Validation time as an RFC 3339 timestamp; defaults to now. Use it to ask "was this chain valid on the day it was signed" and to get reproducible results. |
+| `--at TIME` | `verify` | Validation time as an RFC 3339 timestamp. It overrides everything: without it, a signature whose timestamp verified completely is validated at that token's `genTime`, and otherwise at the current time. Use it to ask "was this chain valid on that day" and to get reproducible results. |
 | `--allow-legacy-algorithms` | `verify` | Admit SHA-1 digests and RSA-SHA1 signature methods **for diagnosis only**: they emit `algorithm_legacy_allowed` instead of a passed check, the verdict stays capped at `indeterminate`, and no failed check can become a passed one. MD5, HMAC, DSA, and RSA keys below 2048 bits stay refused. |
 | `-h`, `--help` | all commands | Print help as plain text. |
 | `-V`, `--version` | top level | Print the version as plain text. |

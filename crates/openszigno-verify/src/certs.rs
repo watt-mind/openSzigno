@@ -20,7 +20,7 @@ use x509_cert::ext::pkix::name::GeneralName;
 use x509_cert::ext::pkix::{BasicConstraints, KeyUsage, NameConstraints, SubjectAltName};
 use x509_cert::name::Name;
 
-use crate::codes::CheckCode;
+use crate::codes::{Check, CheckCode};
 use crate::policy::{Digest as PolicyDigest, MIN_RSA_BITS, SignatureScheme, VerifyLimits};
 use crate::trust::{UnixTime, format_rfc3339};
 
@@ -38,6 +38,19 @@ const OID_ECDSA_SHA384: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840
 
 const OID_EXT_KEY_USAGE: ObjectIdentifier = ObjectIdentifier::new_unwrap("2.5.29.37");
 const OID_ANY_EXTENDED_KEY_USAGE: ObjectIdentifier = ObjectIdentifier::new_unwrap("2.5.29.37.0");
+/// `id-kp-timeStamping`, RFC 3161 section 2.3.
+pub const OID_KP_TIME_STAMPING: ObjectIdentifier =
+    ObjectIdentifier::new_unwrap("1.3.6.1.5.5.7.3.8");
+/// `id-kp-documentSigning`, RFC 9336. The purpose that exists precisely for
+/// signing documents, rather than for authenticating a host or a mailbox.
+pub const OID_KP_DOCUMENT_SIGNING: ObjectIdentifier =
+    ObjectIdentifier::new_unwrap("1.3.6.1.5.5.7.3.36");
+/// `szOID_KP_DOCUMENT_SIGNING`, Microsoft's "Document Signing" extended key
+/// usage from its private arc (`1.3.6.1.4.1.311.10.3.12`). It predates RFC
+/// 9336 by two decades and is what qualified-signature CAs actually put in
+/// signing certificates, so it is accepted for the same purpose.
+pub const OID_MS_DOCUMENT_SIGNING: ObjectIdentifier =
+    ObjectIdentifier::new_unwrap("1.3.6.1.4.1.311.10.3.12");
 
 /// Critical extensions whose semantics this validator actually implements.
 ///
@@ -100,6 +113,22 @@ pub enum CertificateSource {
     CertificateValues,
     /// A file in the `--trust-store` directory.
     TrustStore,
+    /// The `certificates` set of an RFC 3161 timestamp token.
+    TimestampToken,
+}
+
+/// What a built path is being validated *for*.
+///
+/// The purpose decides which critical `extendedKeyUsage` a certificate in the
+/// path may carry. It never relaxes anything else: every other rule in
+/// `check_path` applies identically.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PathPurpose {
+    /// A signing certificate for a `ds:Signature`.
+    Signing,
+    /// A timestamp authority certificate, which RFC 3161 requires to carry a
+    /// critical `extendedKeyUsage` of exactly `id-kp-timeStamping`.
+    TimeStamping,
 }
 
 /// One link of a reported chain.
@@ -219,7 +248,7 @@ impl ParsedCertificate {
             .map_err(|_| ())
     }
 
-    fn is_critical(&self, oid: ObjectIdentifier) -> bool {
+    pub(crate) fn is_critical(&self, oid: ObjectIdentifier) -> bool {
         self.certificate
             .tbs_certificate
             .extensions
@@ -244,7 +273,7 @@ impl ParsedCertificate {
     }
 
     /// The extended key usages, if the extension is present.
-    fn extended_key_usages(&self) -> Result<Option<Vec<ObjectIdentifier>>, ()> {
+    pub(crate) fn extended_key_usages(&self) -> Result<Option<Vec<ObjectIdentifier>>, ()> {
         let Some(extensions) = self.certificate.tbs_certificate.extensions.as_ref() else {
             return Ok(None);
         };
@@ -305,6 +334,10 @@ pub struct PathOutcome {
     pub code: CheckCode,
     pub message: String,
     pub chain: Vec<ChainEntry>,
+    /// Non-blocking observations about the path the caller must still report:
+    /// checks that are `unknown` rather than `failed`, so they cap the verdict
+    /// without condemning the signature.
+    pub advisories: Vec<Check>,
 }
 
 /// Build a path from `leaf` to one of `anchors` and validate it.
@@ -324,6 +357,7 @@ pub fn validate_path(
     anchors: &[ParsedCertificate],
     time: UnixTime,
     limits: &VerifyLimits,
+    purpose: PathPurpose,
 ) -> PathOutcome {
     let leaf_only = vec![leaf.chain_entry(false)];
     if anchors.is_empty() {
@@ -332,6 +366,7 @@ pub fn validate_path(
             message: "no trust anchors were configured, so the chain could not be checked"
                 .to_owned(),
             chain: leaf_only,
+            advisories: Vec::new(),
         };
     }
 
@@ -364,6 +399,7 @@ pub fn validate_path(
                     "path building gave up after {MAX_PATH_EXPANSIONS} expansions over {considered} candidate certificates"
                 ),
                 chain: leaf_only,
+                advisories: Vec::new(),
             };
         }
         // CA names are public information a caller needs in order to fix a
@@ -379,6 +415,7 @@ pub fn validate_path(
                 "no path from the signing certificate to a configured trust anchor was found after considering {considered} candidate certificates{named}"
             ),
             chain: leaf_only,
+            advisories: Vec::new(),
         };
     }
 
@@ -394,8 +431,8 @@ pub fn validate_path(
                 certificate.chain_entry(position + 1 == certificates.len())
             })
             .collect();
-        match check_path(&certificates, time) {
-            Ok(()) => {
+        match check_path(&certificates, time, purpose) {
+            Ok(advisories) => {
                 return PathOutcome {
                     code: CheckCode::CertPathOk,
                     message: format!(
@@ -403,6 +440,7 @@ pub fn validate_path(
                         certificates.len()
                     ),
                     chain: entries,
+                    advisories,
                 };
             }
             Err((code, message)) => {
@@ -411,6 +449,7 @@ pub fn validate_path(
                         code,
                         message,
                         chain: entries,
+                        advisories: Vec::new(),
                     });
                 }
             }
@@ -420,6 +459,7 @@ pub fn validate_path(
         code: CheckCode::CertPathUntrusted,
         message: "no acceptable path to a configured trust anchor was found".to_owned(),
         chain: leaf_only,
+        advisories: Vec::new(),
     })
 }
 
@@ -436,15 +476,21 @@ fn build_paths(
     limits: &VerifyLimits,
     expansions: &mut usize,
 ) -> bool {
-    if paths.len() >= limits.max_paths || chain.len() >= limits.max_chain_length {
+    if paths.len() >= limits.max_paths {
         return false;
     }
     let current = chain
         .last()
         .and_then(|index| (*index != usize::MAX).then(|| pool[*index].0))
         .unwrap_or(leaf);
+    // Completion is checked *before* the length bound, so a chain of exactly
+    // `max_chain_length` certificates that ends at an anchor is a path rather
+    // than one the search refused to look at: a limit of 8 admits 8, not 7.
     if chain.len() > 1 && pool[*chain.last().expect("chain is not empty")].1 {
         paths.push(chain.clone());
+        return false;
+    }
+    if chain.len() >= limits.max_chain_length {
         return false;
     }
     let issuer_der = current.issuer_der();
@@ -502,7 +548,11 @@ fn dangling_issuer(
 ///
 /// `path[0]` is the end-entity certificate and the last element is the trust
 /// anchor. Every rule is explicit and every unimplemented case fails closed.
-fn check_path(path: &[&ParsedCertificate], time: UnixTime) -> Result<(), (CheckCode, String)> {
+fn check_path(
+    path: &[&ParsedCertificate],
+    time: UnixTime,
+    purpose: PathPurpose,
+) -> Result<Vec<Check>, (CheckCode, String)> {
     let malformed = || {
         (
             CheckCode::CertMalformed,
@@ -531,22 +581,93 @@ fn check_path(path: &[&ParsedCertificate], time: UnixTime) -> Result<(), (CheckC
                 "a certificate in the path had expired at the validation time".to_owned(),
             ));
         }
-        // A critical extended key usage must actually permit the use. There is
-        // no standard EKU for document signing, and id-kp-emailProtection or
-        // id-kp-clientAuth do not authorise it, so the only critical EKU this
-        // tool accepts is anyExtendedKeyUsage. A non-critical EKU is a hint the
-        // issuer chose not to enforce, and is reported by neither.
-        if certificate.is_critical(OID_EXT_KEY_USAGE) {
-            let usages = certificate
-                .extended_key_usages()
-                .map_err(|()| malformed())?
-                .unwrap_or_default();
-            if !usages.contains(&OID_ANY_EXTENDED_KEY_USAGE) {
+    }
+
+    // The end-entity certificate's extended key usage, which RFC 5280 section
+    // 4.2.1.12 makes a restriction on what the key may be used for **whether or
+    // not the extension is marked critical**. An absent extension imposes no
+    // restriction and is accepted; a present one must name a purpose that
+    // covers this use:
+    //
+    // - `anyExtendedKeyUsage`, which waives the restriction;
+    // - `id-kp-documentSigning` (RFC 9336), the purpose that exists for exactly
+    //   this;
+    // - `id-kp-timeStamping`, but only when the path is being validated for a
+    //   timestamp authority, where RFC 3161 additionally requires it to be the
+    //   *only* purpose and to be critical (checked on the token's own
+    //   certificate).
+    //
+    // `id-kp-emailProtection` is not one of them: signing a message to a
+    // mailbox is not signing a document. Neither are `serverAuth`,
+    // `clientAuth`, `codeSigning` and `OCSPSigning`.
+    //
+    // An EKU naming none of the accepted purposes is not automatically a
+    // refusal, though. ETSI EN 319 412-2 makes `nonRepudiation`
+    // (`contentCommitment`) *the* key-usage signal for a signing certificate,
+    // and real qualified certificates pair it with an EKU that says
+    // `emailProtection` and nothing else. Calling those signatures invalid
+    // over a purpose field the issuer filled in loosely would be wrong. So:
+    // with `nonRepudiation` asserted, an unrelated EKU downgrades to
+    // `cert_key_usage_advisory` (`unknown`), which caps the verdict at
+    // indeterminate and names what was found. Without `nonRepudiation` there
+    // is no such signal, and the certificate is refused.
+    let mut advisories: Vec<Check> = Vec::new();
+    if let Some(usages) = path[0].extended_key_usages().map_err(|()| malformed())? {
+        let permitted = usages.contains(&OID_ANY_EXTENDED_KEY_USAGE)
+            || match purpose {
+                PathPurpose::Signing => {
+                    usages.contains(&OID_KP_DOCUMENT_SIGNING)
+                        || usages.contains(&OID_MS_DOCUMENT_SIGNING)
+                }
+                PathPurpose::TimeStamping => usages.contains(&OID_KP_TIME_STAMPING),
+            };
+        let non_repudiation = path[0]
+            .extension::<KeyUsage>()
+            .map_err(|()| malformed())?
+            .is_some_and(|usage| usage.non_repudiation());
+        if !permitted {
+            if purpose == PathPurpose::Signing && non_repudiation {
+                advisories.push(Check::unknown(
+                    CheckCode::CertKeyUsageAdvisory,
+                    format!(
+                        "the signing certificate asserts nonRepudiation but its extendedKeyUsage names only: {}",
+                        purpose_list(&usages)
+                    ),
+                ));
+            } else {
                 return Err((
                     CheckCode::CertKeyUsageInvalid,
-                    "a certificate in the path has a critical extendedKeyUsage that does not permit signing".to_owned(),
+                    "the end-entity certificate has an extendedKeyUsage that does not permit this use"
+                        .to_owned(),
                 ));
             }
+        }
+    }
+
+    // A CA's extended key usage is only enforced when it is marked critical.
+    // RFC 5280 gives no path-processing rule for EKU in a CA certificate, and
+    // real eIDAS hierarchies carry advisory sets there; refusing them would
+    // reject chains that are correct. A CA that marks the extension critical
+    // has asked to be taken at its word, and is.
+    for certificate in path.iter().skip(1) {
+        if !certificate.is_critical(OID_EXT_KEY_USAGE) {
+            continue;
+        }
+        let usages = certificate
+            .extended_key_usages()
+            .map_err(|()| malformed())?
+            .unwrap_or_default();
+        let permitted = usages.contains(&OID_ANY_EXTENDED_KEY_USAGE)
+            || match purpose {
+                PathPurpose::Signing => usages.contains(&OID_KP_DOCUMENT_SIGNING),
+                PathPurpose::TimeStamping => usages.contains(&OID_KP_TIME_STAMPING),
+            };
+        if !permitted {
+            return Err((
+                CheckCode::CertKeyUsageInvalid,
+                "a CA in the path has a critical extendedKeyUsage that does not permit this use"
+                    .to_owned(),
+            ));
         }
     }
 
@@ -614,7 +735,7 @@ fn check_path(path: &[&ParsedCertificate], time: UnixTime) -> Result<(), (CheckC
             check_name_constraints(subordinate, &constraints)?;
         }
     }
-    Ok(())
+    Ok(advisories)
 }
 
 fn verify_certificate_signature(
@@ -1108,6 +1229,23 @@ fn sanitize(text: &str) -> String {
         .filter(|character| !character.is_control())
         .take(128)
         .collect()
+}
+
+/// The extended key usages found, as dotted OIDs.
+///
+/// Object identifiers are public constants, not signer data, so naming them is
+/// what lets a caller see why a certificate was accepted only with a caveat.
+/// The list is bounded, because the extension is attacker-controlled.
+fn purpose_list(usages: &[ObjectIdentifier]) -> String {
+    let mut names: Vec<String> = usages
+        .iter()
+        .take(8)
+        .map(ObjectIdentifier::to_string)
+        .collect();
+    if usages.len() > names.len() {
+        names.push("...".to_owned());
+    }
+    names.join(", ")
 }
 
 fn hex(bytes: &[u8]) -> String {

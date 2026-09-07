@@ -112,10 +112,15 @@ check_codes! {
     SignatureValueOk => "signature_value_ok",
     SignatureValueInvalid => "signature_value_invalid",
 
-    // Stage C: XAdES, detected only in phase 1.
+    // Stage C: XAdES qualifying properties.
     XadesPresent => "xades_present",
     XadesAbsent => "xades_absent",
     XadesNotValidated => "xades_not_validated",
+    XadesSigningCertificateBound => "xades_signing_certificate_bound",
+    XadesSigningCertificateMismatch => "xades_signing_certificate_mismatch",
+    XadesSigningCertificateAbsent => "xades_signing_certificate_absent",
+    XadesSignaturePolicyImplied => "xades_signature_policy_implied",
+    XadesSignaturePolicyExplicit => "xades_signature_policy_explicit",
 
     // Stage D: certificate path.
     SigningCertificateAvailable => "signing_certificate_available",
@@ -132,13 +137,34 @@ check_codes! {
     CertSignatureInvalid => "cert_signature_invalid",
     CertAlgorithmRejected => "cert_algorithm_rejected",
     CertKeyUsageInvalid => "cert_key_usage_invalid",
+    CertKeyUsageAdvisory => "cert_key_usage_advisory",
     CertBasicConstraintsInvalid => "cert_basic_constraints_invalid",
     CertNameConstraintViolation => "cert_name_constraint_violation",
     CertUnsupportedCriticalExtension => "cert_unsupported_critical_extension",
 
-    // Stages E and F: out of phase-1 scope, reported rather than ignored.
+    // Stage E: out of phase-2 scope, reported rather than ignored.
     RevocationNotChecked => "revocation_not_checked",
+
+    // Stage F: RFC 3161 signature timestamps.
+    SignatureTimestampPresent => "signature_timestamp_present",
+    SignatureTimestampAbsent => "signature_timestamp_absent",
     TimestampNotChecked => "timestamp_not_checked",
+    TimestampTokenParsed => "timestamp_token_parsed",
+    TimestampImprintOk => "timestamp_imprint_ok",
+    TimestampImprintMismatch => "timestamp_imprint_mismatch",
+    TimestampSignatureOk => "timestamp_signature_ok",
+    TimestampSignatureInvalid => "timestamp_signature_invalid",
+    TimestampTsaCertificateOk => "timestamp_tsa_certificate_ok",
+    TimestampTsaCertificateInvalid => "timestamp_tsa_certificate_invalid",
+    TimestampTsaPathOk => "timestamp_tsa_path_ok",
+    TimestampTsaPathUntrusted => "timestamp_tsa_path_untrusted",
+    TimestampTsaPathUnknown => "timestamp_tsa_path_unknown",
+    TimestampBeforeSigningTime => "timestamp_before_signing_time",
+    TimestampVerified => "timestamp_verified",
+    ArchiveTimestampPresent => "archive_timestamp_present",
+
+    // Dossier-level `es:TimeStamp`, which M3 completes.
+    DossierTimestampNotValidated => "dossier_timestamp_not_validated",
 }
 
 impl From<CheckCode> for &'static str {

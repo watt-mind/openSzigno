@@ -10,6 +10,145 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
 
 ## [Unreleased]
 
+### Added (M2 phase 2: XAdES signed properties and RFC 3161 timestamps)
+
+- `crates/openszigno-verify/tests/vectors.rs` and
+  `tests/fixtures/xmldsig/`: verification vectors this project did not
+  produce. Canonical forms transcribed from Canonical XML 1.0 (sections 3.2,
+  3.4, 3.6) and Exclusive XML Canonicalization 1.0 (section 2.2) with the
+  section cited at each, plus a complete signed dossier whose reference
+  digests and `ds:SignatureValue` were computed by OpenSSL and Python over
+  canonical octets written out by hand. The in-tests signer shares the
+  canonicalizer under test, so a shared mistake cancels out there; here it
+  cannot. The generator and its exact commands are committed; the private keys
+  are not.
+
+- XAdES `SigningCertificate` and `SigningCertificateV2` binding, in every
+  recognised namespace (1.1.1, 1.2.2, 1.3.2, 1.4.1). The certificate the
+  *signed* `CertDigest` names is the certificate the signature claims, so a
+  signature whose key-verifying certificate is not the digested one now fails
+  with `xades_signing_certificate_mismatch`. `IssuerSerialV2` is compared by
+  DER; the older `IssuerSerial` contributes its serial number only. New codes:
+  `xades_signing_certificate_bound`, `xades_signing_certificate_mismatch`,
+  `xades_signing_certificate_absent`.
+- `SignaturePolicyIdentifier` reported as `xades_signature_policy_implied` or
+  `xades_signature_policy_explicit`, both `unknown`. No policy document is
+  fetched, parsed, or enforced.
+- RFC 3161 signature timestamps: every `xades:SignatureTimeStamp` token is
+  parsed as CMS `SignedData` over a `TSTInfo`, its imprint recomputed over the
+  canonicalized `ds:SignatureValue` element, the TSA `SignerInfo` signature
+  verified over its signed attributes, the TSA certificate required to carry a
+  critical `extendedKeyUsage` of exactly `id-kp-timeStamping`, and its path
+  validated to a configured anchor at the token's `genTime`. New codes:
+  `timestamp_token_parsed`, `timestamp_imprint_ok`/`_mismatch`,
+  `timestamp_signature_ok`/`_invalid`,
+  `timestamp_tsa_certificate_ok`/`_invalid`,
+  `timestamp_tsa_path_ok`/`_untrusted`/`_unknown`,
+  `timestamp_before_signing_time`, `timestamp_verified`, and per signature
+  `signature_timestamp_present`/`_absent`.
+- Proof of existence: with no `--at`, a signature whose timestamp verified
+  completely is path-validated at the earliest such `genTime` instead of at
+  the current time, which is what lets a historical dossier chain under a
+  signing certificate that has since expired. `--at` always overrides, and a
+  token that did not fully verify moves nothing. Reported per signature as
+  `validation_time` and `validation_time_source`
+  (`timestamp` | `at_flag` | `current_time`).
+- Additive `verify --json` fields on each signature: `xades` (presence, the
+  binding, the policy, the counts, and the properties this build does not
+  validate), `timestamps[]` (one entry per token, each with its own `checks`,
+  `gen_time`, `accuracy_seconds`, TSA certificate and chain, and `verified`),
+  `validation_time`, and `validation_time_source`. `chain[].source` gains
+  `timestamp_token`. `schema_version` stays `1`: no existing field changed its
+  contract.
+- Out-of-scope material is named rather than ignored:
+  `archive_timestamp_present` (`skipped`) for `xades:ArchiveTimeStamp`,
+  `dossier_timestamp_not_validated` (`skipped`) for dossier-level
+  `es:TimeStamp`, and `timestamp_not_checked` (`skipped`) for a timestamp that
+  uses an `Include`-style data selection, carries no decodable token or more
+  than one, or names a canonicalization algorithm this build does not
+  implement.
+- New verification limit `max_timestamps_per_signature` (8), a fixed cap of 16
+  `xades:Cert` entries, and a fixed 512 KiB cap on one timestamp token.
+
+### Changed (M2 phase 2)
+
+- Signing certificates are accepted when their `extendedKeyUsage` names
+  Microsoft's `szOID_KP_DOCUMENT_SIGNING` (`1.3.6.1.4.1.311.10.3.12`), the
+  private-arc purpose that predates RFC 9336 and that qualified-signature CAs
+  actually issue.
+- New `cert_key_usage_advisory` (`unknown`): when a signing certificate
+  asserts `nonRepudiation` — the ETSI EN 319 412-2 signal for a signing
+  certificate — but its `extendedKeyUsage` names only unrelated purposes, the
+  path passes with a caveat naming the OIDs found instead of failing.
+  `cert_key_usage_invalid` is kept for a `keyUsage` that permits neither
+  `digitalSignature` nor `nonRepudiation`, and for an unrelated
+  `extendedKeyUsage` without `nonRepudiation`. There is no advisory downgrade
+  for a CA or a TSA certificate.
+- An `xades:EncapsulatedTimeStamp` may carry a whole RFC 3161 `TimeStampResp`
+  rather than the bare `TimeStampToken`, as XAdES 1.2.2-era producers emitted.
+  The response is unwrapped only when its `PKIStatus` is `granted` or
+  `grantedWithMods`; any other status, or a response with no token, stays
+  `timestamp_token_parsed` (`failed`) with the status named. DER that is
+  neither shape now names the outermost tag it saw.
+
+- **A timestamp that does not verify no longer makes a signature `invalid`.**
+  Following ETSI EN 319 102-1, a token that fails for any reason — malformed,
+  wrong imprint, bad TSA signature, TSA certificate problem, untrusted or
+  unknown TSA path — supplies no proof of existence, which is missing
+  information rather than evidence against the signature. The token keeps its
+  own `failed` checks and `verified: false`; the signature-level
+  `timestamp_verified` is now `unknown` and never `failed`, the validation
+  time falls back to `--at` or the clock, and the verdict is capped at
+  `indeterminate`. Only checks about the signature itself — digests, signature
+  value, algorithm policy, reference scope, the `SigningCertificate` binding,
+  and the signer's own chain — can still make it `invalid`.
+- The TSA certificate path is built from the union of the token's own
+  `SignedData` certificates, the enclosing signature's `ds:KeyInfo` and
+  `xades:CertificateValues` candidates, and the trust store's intermediates.
+  Real dossiers carry the TSA's issuing CA in the signature's
+  `CertificateValues` and put only the TSA leaf in the token, so the previous
+  token-only search reported chain breaks that were not there. Anchors still
+  come from the trust store alone.
+- The explicit `xades:Include` data-selection form is implemented for the case
+  where every `Include` resolves, same-document and by ID, to this signature's
+  own `ds:SignatureValue`; `referencedData` is not consulted, because for that
+  target it cannot change what is digested. Any other target set, and the
+  `ReferenceInfo`, `HashDataInfo` and `XMLTimeStamp` forms, stay
+  `timestamp_not_checked`.
+- `extendedKeyUsage` on the signing certificate is now enforced whether or not
+  it is marked critical, as RFC 5280 section 4.2.1.12 requires, and
+  `id-kp-documentSigning` (RFC 9336) is accepted alongside
+  `anyExtendedKeyUsage`. A certificate whose EKU names only unrelated purposes
+  — `emailProtection`, `serverAuth`, `clientAuth`, `codeSigning`,
+  `OCSPSigning` — now fails `cert_key_usage_invalid` even when the extension
+  is advisory. A CA's EKU is still enforced only when critical.
+- `cert_path_search_exhausted` is reported as `unknown` rather than `failed`:
+  hitting the expansion budget means the tool stopped looking, not that no
+  path exists, so it no longer makes a signature `invalid`.
+- Path building checks whether a chain has reached an anchor *before* refusing
+  to expand further, so `max_chain_length` is inclusive: a limit of 8 admits a
+  path of 8 certificates, where it previously admitted only 7.
+
+- `xades_not_validated` now means "qualifying properties this build does not
+  validate are present", and names them in the message and in
+  `xades.unvalidated_properties`. It is no longer emitted for every signature.
+- `timestamp_not_checked` no longer means "timestamps are out of scope"; it is
+  emitted only for a timestamp whose form this build does not process. A
+  signature carrying no timestamp reports `signature_timestamp_absent`
+  instead.
+- `verify` human output prints each signature's validation time and source and
+  each token's outcome, and its closing line now says that revocation alone is
+  what keeps a signature from being reported as valid.
+- New dependency `cms` 0.2 (Apache-2.0 OR MIT), version-coherent with
+  `x509-cert` 0.2 and `der` 0.7. `TSTInfo` itself is hand-declared on `der` so
+  the ASN.1 this build accepts is visible in one place. No license allowlist
+  change was needed.
+- The Conventional Commits scope allowlist gains `verify`, in
+  `CONTRIBUTING.md` and `scripts/commit-msg.sh`.
+
+`valid` remains unreachable: `revocation_not_checked` is still emitted as a
+blocking `skipped` check on every signature, and a test asserts it.
+
 ### Changed
 
 - The GitHub release is now uploaded and undrafted in the `announce` job
