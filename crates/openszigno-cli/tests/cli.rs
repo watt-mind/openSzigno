@@ -371,13 +371,14 @@ fn a_closed_stdout_is_an_io_failure_not_a_panic() {
         .collect();
     let input = write_dossier(directory.path(), &titles);
 
-    let mut child = Command::new(env!("CARGO_BIN_EXE_openszigno"))
+    let (reader, writer) = std::io::pipe().expect("pipe is available");
+    drop(reader);
+    let child = Command::new(env!("CARGO_BIN_EXE_openszigno"))
         .args(["list", input.to_str().unwrap(), "--json"])
-        .stdout(Stdio::piped())
+        .stdout(Stdio::from(writer))
         .stderr(Stdio::piped())
         .spawn()
         .expect("CLI must start");
-    drop(child.stdout.take());
     let output = child.wait_with_output().expect("CLI must terminate");
 
     assert_eq!(
@@ -1357,13 +1358,16 @@ fn a_closed_stdout_is_an_io_failure_for_failures_and_usage_errors_too() {
         ],
         vec!["explode", "--json"],
     ] {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_openszigno"))
+        // Close the read end before the child starts, so even a tiny
+        // response cannot slip into the pipe buffer before the reader goes.
+        let (reader, writer) = std::io::pipe().expect("pipe is available");
+        drop(reader);
+        let child = Command::new(env!("CARGO_BIN_EXE_openszigno"))
             .args(&arguments)
-            .stdout(Stdio::piped())
+            .stdout(Stdio::from(writer))
             .stderr(Stdio::piped())
             .spawn()
             .expect("CLI must start");
-        drop(child.stdout.take());
         let output = child.wait_with_output().expect("CLI must terminate");
 
         assert_eq!(
