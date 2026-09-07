@@ -1,0 +1,21 @@
+[package]
+name = "openszigno-cli"
+description = "Agent-friendly CLI for inspecting and extracting Microsec e-Szigno dossiers"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "openszigno"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+openszigno-core = { path = "../openszigno-core" }
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
