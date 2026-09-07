@@ -101,9 +101,13 @@ fn decode_zip(archive_bytes: &[u8], limits: &Limits) -> Result<Vec<u8>, Error> {
         ));
     }
 
-    let member = archive
-        .by_index(0)
-        .map_err(|_| Error::new(ErrorCode::InvalidZip, "cannot read ZIP member"))?;
+    let member = archive.by_index(0).map_err(|error| match error {
+        zip::result::ZipError::UnsupportedArchive(_) => Error::new(
+            ErrorCode::UnsupportedZipMember,
+            "ZIP member uses encryption or an unsupported compression method",
+        ),
+        _ => Error::new(ErrorCode::InvalidZip, "cannot read ZIP member"),
+    })?;
     let enclosed = member
         .enclosed_name()
         .ok_or_else(|| Error::new(ErrorCode::UnsafeZipMember, "ZIP member has an unsafe path"))?;
@@ -128,11 +132,11 @@ fn decode_zip(archive_bytes: &[u8], limits: &Limits) -> Result<Vec<u8>, Error> {
             "ZIP member exceeds the expanded-size limit",
         ));
     }
-    let compressed_size = member.compressed_size();
-    if expanded_size > 0
-        && (compressed_size == 0
-            || expanded_size > compressed_size.saturating_mul(limits.max_zip_compression_ratio))
-    {
+    // Header sizes are attacker-controlled. This check is only a cheap
+    // pre-filter; the authoritative ratio check below uses the actual
+    // decoded length against the actual archive length.
+    let compressed_size = member.compressed_size().min(archive_bytes.len() as u64);
+    if exceeds_ratio(expanded_size, compressed_size, limits) {
         return Err(Error::new(
             ErrorCode::ZipRatioLimit,
             "ZIP member exceeds the compression-ratio limit",
@@ -154,5 +158,17 @@ fn decode_zip(archive_bytes: &[u8], limits: &Limits) -> Result<Vec<u8>, Error> {
             "ZIP member exceeded the expanded-size limit while reading",
         ));
     }
+    if exceeds_ratio(decoded.len() as u64, compressed_size, limits) {
+        return Err(Error::new(
+            ErrorCode::ZipRatioLimit,
+            "ZIP member exceeded the compression-ratio limit while reading",
+        ));
+    }
     Ok(decoded)
+}
+
+fn exceeds_ratio(expanded: u64, compressed: u64, limits: &Limits) -> bool {
+    expanded > 0
+        && (compressed == 0
+            || expanded > compressed.saturating_mul(limits.max_zip_compression_ratio))
 }

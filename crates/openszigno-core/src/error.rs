@@ -24,6 +24,7 @@ pub enum ErrorCode {
     ZipSizeLimit,
     ZipRatioLimit,
     UnsafeZipMember,
+    UnsupportedZipMember,
 }
 
 impl ErrorCode {
@@ -48,6 +49,7 @@ impl ErrorCode {
             Self::ZipSizeLimit => "zip_size_limit",
             Self::ZipRatioLimit => "zip_ratio_limit",
             Self::UnsafeZipMember => "unsafe_zip_member",
+            Self::UnsupportedZipMember => "unsupported_zip_member",
         }
     }
 }

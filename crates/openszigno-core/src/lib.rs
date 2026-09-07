@@ -7,6 +7,7 @@ mod decode;
 mod error;
 mod model;
 mod parse;
+mod scan;
 
 pub use decode::{DecodeOutcome, DecodedDocument, UnsupportedReason};
 pub use error::{Error, ErrorCode};
