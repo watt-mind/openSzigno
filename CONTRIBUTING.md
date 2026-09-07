@@ -82,6 +82,38 @@ cargo build --release --locked
 Coverage is reported by CI; to reproduce it locally see
 [docs/testing.md](docs/testing.md#coverage).
 
+## Documentation
+
+Documentation is part of the product: agents and people read it before they
+run anything. Every change that alters behaviour updates the documentation in
+the same pull request, and CI lints the Markdown and checks relative links.
+
+- **Where things live.** `README.md` is the front door and stays short.
+  `docs/architecture.md` is the canonical contract (envelope, stable codes,
+  limits, exit statuses); `docs/roadmap.md` holds plans and residual risks;
+  `docs/testing.md` explains the test layout; `docs/references.md` indexes
+  the specifications. Every file under `docs/` is listed in `docs/index.md`.
+- **Style.** Plain, precise English in the present tense. Sentence-case
+  headings. Wrap prose at 80 columns (tables, code, and URLs may run longer).
+  No em-dashes. Use tables for parallel facts and fenced blocks for every
+  command, path, and JSON example. Real output over invented output: capture
+  it from the binary and keep it current.
+- **Stable names.** A code, flag, field, or exit status appears in the docs
+  in the same pull request that adds it, and `CHANGELOG.md` gets an entry
+  under Unreleased in Keep a Changelog form.
+- **Never claim validity.** No sentence may state or imply that a signature,
+  timestamp, certificate, or dossier is valid unless the code that proves it
+  exists and is tested.
+- **Privacy.** No real dossier names, titles, hashes, or signer data, not
+  even as examples.
+
+Check locally before pushing:
+
+```sh
+npx --yes markdownlint-cli2@0.18.1 "**/*.md" "#target" "#refs" "#tmp" "#samples"
+python3 scripts/check-doc-links.py
+```
+
 ## Local hooks
 
 One-time install (requires the [lefthook](https://lefthook.dev) binary):

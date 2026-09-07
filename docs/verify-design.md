@@ -466,7 +466,7 @@ codes with the existing exit statuses.
 
 Then, per `ds:Signature` in document order:
 
-**Stage A: structure and policy (no crypto)**
+### Stage A: structure and policy (no crypto)
 
 | # | Check code | Fails when |
 | --- | --- | --- |
@@ -485,7 +485,7 @@ Any Stage A failure means the signature's verdict is `invalid` and later
 stages are `skipped`. There is no point digesting a reference chain the
 policy already refused.
 
-**Stage B: XMLDSig cryptographic core**
+### Stage B: XMLDSig cryptographic core
 
 | # | Check code | Meaning |
 | --- | --- | --- |
@@ -493,7 +493,7 @@ policy already refused.
 | B2 | `signedinfo_canonicalization` | `ds:SignedInfo` canonicalized without error |
 | B3 | `signature_value` | `ds:SignatureValue` verifies over canonical `ds:SignedInfo` under the signing public key |
 
-**Stage C: XAdES qualifying properties**
+### Stage C: XAdES qualifying properties
 
 | # | Check code | Meaning |
 | --- | --- | --- |
@@ -505,7 +505,7 @@ policy already refused.
 | C6 | `xades_level` | Detected level reported (`B-B`, `B-T`, `B-LT`, `B-LTA`, `unknown`); informational |
 | C7 | `xades_unsupported_property` | An unsupported qualifying property marked as required is present (for example `ArchiveTimeStamp` in M2): `skipped` with the property named |
 
-**Stage D: certificate path**
+### Stage D: certificate path
 
 | # | Check code | Meaning |
 | --- | --- | --- |
@@ -519,7 +519,7 @@ policy already refused.
 `unknown` (not `failed`) when no trust store is configured: the tool does
 not know, and saying "invalid" would be as wrong as saying "valid".
 
-**Stage E: revocation**
+### Stage E: revocation
 
 | # | Check code | Meaning |
 | --- | --- | --- |
@@ -538,7 +538,7 @@ a size cap, no redirects across schemes, http and https only, and the
 fetched URLs recorded in the output. `--require-revocation` promotes an
 `unknown` to a `failed`.
 
-**Stage F: timestamps (M2 partial, M3 completes)**
+### Stage F: timestamps (M2 partial, M3 completes)
 
 | # | Check code | Meaning |
 | --- | --- | --- |

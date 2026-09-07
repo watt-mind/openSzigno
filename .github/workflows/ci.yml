@@ -33,6 +33,16 @@ jobs:
         env:
           RUSTDOCFLAGS: -D warnings
 
+  docs:
+    name: Documentation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Lint Markdown
+        run: npx --yes markdownlint-cli2@0.18.1 "**/*.md" "#target" "#refs" "#tmp" "#samples" "#node_modules"
+      - name: Check relative links and anchors
+        run: python3 scripts/check-doc-links.py
+
   test:
     name: Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}

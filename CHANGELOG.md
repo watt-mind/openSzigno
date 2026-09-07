@@ -14,7 +14,7 @@ Nothing yet.
 
 ## [0.1.0] - 2026-09-07
 
-### Fixed
+### Fixed (M1)
 
 - CI hygiene: `retention-days: 1` on all artifact uploads, and the baseline
   `concurrency` pattern in `ci.yml` so stale PR commits cancel.
