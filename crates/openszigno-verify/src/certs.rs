@@ -121,7 +121,7 @@ pub enum CertificateSource {
 ///
 /// The purpose decides which critical `extendedKeyUsage` a certificate in the
 /// path may carry. It never relaxes anything else: every other rule in
-/// [`check_path`] applies identically.
+/// `check_path` applies identically.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PathPurpose {
     /// A signing certificate for a `ds:Signature`.
