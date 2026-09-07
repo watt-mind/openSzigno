@@ -16,6 +16,10 @@ clap.workspace = true
 openszigno-core = { path = "../openszigno-core" }
 serde.workspace = true
 serde_json.workspace = true
+unicode-normalization.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+rustix.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

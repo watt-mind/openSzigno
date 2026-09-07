@@ -69,15 +69,23 @@ fn render_buckets(buckets: &BTreeMap<&'static str, u64>) -> String {
 
 #[test]
 fn opt_in_private_fixture_smoke() {
-    let Ok(fixture) = std::env::var("ES3_TEST_FIXTURE") else {
+    let Some(fixture) = std::env::var_os("ES3_TEST_FIXTURE") else {
         return;
     };
+
+    // Held for the whole test: the corpus test replaces the process-wide panic
+    // hook, and a panic here must not be swallowed by it (or leak a path).
+    let _panic_hook_guard = PANIC_HOOK_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
 
     let output_directory = tempdir().expect("temporary output directory must be available");
     let commands = ["inspect", "list", "validate-structure"];
     for command in commands {
         let output = Command::new(env!("CARGO_BIN_EXE_openszigno"))
-            .args([command, fixture.as_str(), "--json"])
+            .arg(command)
+            .arg(&fixture)
+            .arg("--json")
             .output()
             .expect("private smoke command must start");
         assert!(output.status.success(), "private aggregate command failed");
@@ -111,6 +119,13 @@ fn opt_in_private_fixture_smoke() {
     );
     let files_written = std::fs::read_dir(output_directory.path())
         .expect("private temporary output must be readable")
+        .filter(|entry| {
+            entry
+                .as_ref()
+                .ok()
+                .and_then(|entry| entry.file_type().ok())
+                .is_some_and(|file_type| file_type.is_file())
+        })
         .count() as u64;
     assert_eq!(
         files_written, extracted,

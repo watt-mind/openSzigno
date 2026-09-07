@@ -1,6 +1,8 @@
+mod output_dir;
+
 use std::collections::HashSet;
-use std::fs::{self, OpenOptions};
-use std::io::{Read, Write};
+use std::fs;
+use std::io::{self, Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::ExitCode;
 
@@ -8,6 +10,9 @@ use clap::{Args, Parser, Subcommand};
 use openszigno_core::{DecodeOutcome, Dossier, Error as CoreError, Limits, UnsupportedReason};
 use serde::Serialize;
 use serde_json::{Value, json};
+use unicode_normalization::UnicodeNormalization;
+
+use crate::output_dir::{OpenError, OutputDir};
 
 const SCHEMA_VERSION: u32 = 1;
 
@@ -128,8 +133,20 @@ impl CliError {
     }
 }
 
+impl From<OpenError> for CliError {
+    fn from(error: OpenError) -> Self {
+        match error {
+            OpenError::Unsafe(message) => Self::unsafe_output("unsafe_output_directory", message),
+            OpenError::Io(message) => Self::io(message),
+        }
+    }
+}
+
 fn main() -> ExitCode {
-    let cli = Cli::parse();
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(error) => return usage_failure(error),
+    };
     let (command, json_mode, result) = match cli.command {
         Command::Inspect(args) => {
             let result = inspect(&args.file);
@@ -160,12 +177,15 @@ fn main() -> ExitCode {
                 warnings: success.warnings,
                 errors: Vec::new(),
             };
-            if json_mode {
-                write_json(&response);
+            let written = if json_mode {
+                write_json(&response)
             } else {
-                write_human_success(command, &response);
+                write_human_success(command, &response)
+            };
+            match written {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(_) => ExitCode::from(3),
             }
-            ExitCode::SUCCESS
         }
         Err(failure) => {
             let response = Response {
@@ -180,13 +200,58 @@ fn main() -> ExitCode {
                     message: failure.error.message.clone(),
                 }],
             };
-            if json_mode {
-                write_json(&response);
+            let written = if json_mode {
+                write_json(&response)
             } else {
-                eprintln!("error [{}]: {}", failure.error.code, failure.error.message);
+                write_diagnostic(&format!(
+                    "error [{}]: {}",
+                    failure.error.code, failure.error.message
+                ));
+                Ok(())
+            };
+            match written {
+                Ok(()) => ExitCode::from(failure.error.exit),
+                Err(_) => ExitCode::from(3),
             }
-            ExitCode::from(failure.error.exit)
         }
+    }
+}
+
+/// Report a `clap` parse failure.
+///
+/// In JSON mode the caller still gets exactly one envelope on stdout. The
+/// message is deliberately static: `clap`'s own text can quote argument
+/// values, which may be private paths.
+fn usage_failure(error: clap::Error) -> ExitCode {
+    use clap::error::ErrorKind;
+
+    if matches!(
+        error.kind(),
+        ErrorKind::DisplayHelp | ErrorKind::DisplayVersion
+    ) {
+        error.exit();
+    }
+    if !std::env::args_os().any(|argument| argument == "--json") {
+        error.exit();
+    }
+    let response = Response {
+        schema_version: SCHEMA_VERSION,
+        ok: false,
+        command: "usage",
+        input: InputInfo {
+            format: None,
+            bytes: None,
+        },
+        data: Value::Null,
+        warnings: Vec::new(),
+        errors: vec![Notice {
+            code: "usage_error".to_owned(),
+            message: "invalid command-line usage".to_owned(),
+        }],
+    };
+    match write_json(&response) {
+        Ok(()) => ExitCode::from(2),
+        Err(_) => ExitCode::from(3),
     }
 }
 
@@ -289,7 +354,9 @@ fn extract(path: &Path, output: &Path) -> CliResult {
                 }
                 let name = safe_output_name(document)
                     .map_err(|error| failure(valid_input(bytes.len()), error))?;
-                if !names.insert(name.to_lowercase()) {
+                // Compare names the way a filesystem might fold them, so that
+                // two documents cannot silently target one file.
+                if !names.insert(name.nfc().collect::<String>().to_lowercase()) {
                     return Err(failure(
                         valid_input(bytes.len()),
                         CliError::unsafe_output(
@@ -319,10 +386,12 @@ fn extract(path: &Path, output: &Path) -> CliResult {
         }
     }
 
-    prepare_output_directory(output).map_err(|error| failure(valid_input(bytes.len()), error))?;
+    let directory =
+        OutputDir::open(output).map_err(|error| failure(valid_input(bytes.len()), error.into()))?;
     for (_, name, _) in &planned {
-        match fs::symlink_metadata(output.join(name)) {
-            Ok(_) => {
+        match directory.exists(name) {
+            Ok(false) => {}
+            Ok(true) => {
                 return Err(failure(
                     valid_input(bytes.len()),
                     CliError::unsafe_output(
@@ -331,7 +400,6 @@ fn extract(path: &Path, output: &Path) -> CliResult {
                     ),
                 ));
             }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(_) => {
                 return Err(failure(
                     valid_input(bytes.len()),
@@ -340,28 +408,42 @@ fn extract(path: &Path, output: &Path) -> CliResult {
             }
         }
     }
+
     let mut extracted = Vec::with_capacity(planned.len());
+    let mut created: Vec<String> = Vec::with_capacity(planned.len());
     for (index, name, contents) in planned {
-        let destination = output.join(&name);
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&destination)
-            .map_err(|_| {
-                failure(
-                    valid_input(bytes.len()),
+        let mut file = match directory.create_new_file(&name) {
+            Ok(file) => file,
+            Err(error) => {
+                let error = if error.kind() == io::ErrorKind::AlreadyExists {
                     CliError::unsafe_output(
                         "output_exists",
                         "an output file already exists or cannot be created safely",
-                    ),
-                )
-            })?;
-        file.write_all(&contents).map_err(|_| {
-            failure(
+                    )
+                } else {
+                    CliError::io("could not create an output file")
+                };
+                return Err(failure(
+                    valid_input(bytes.len()),
+                    roll_back(&directory, &created, error),
+                ));
+            }
+        };
+        created.push(name.clone());
+        if file
+            .write_all(&contents)
+            .and_then(|()| file.flush())
+            .is_err()
+        {
+            return Err(failure(
                 valid_input(bytes.len()),
-                CliError::io("could not write an extracted document"),
-            )
-        })?;
+                roll_back(
+                    &directory,
+                    &created,
+                    CliError::io("could not write an extracted document"),
+                ),
+            ));
+        }
         extracted.push(json!({
             "document_index": index,
             "filename": name,
@@ -495,13 +577,48 @@ fn capability_warnings(dossier: &Dossier) -> Vec<Notice> {
     warnings
 }
 
+/// Characters that carry no visible glyph but can reorder, hide, or spoof the
+/// rest of a filename: soft hyphen, bidi controls and isolates, zero-width
+/// characters, line/paragraph separators, byte order mark, interlinear
+/// annotation, tag characters, and the noncharacters at the end of the BMP.
+fn is_invisible_or_formatting(character: char) -> bool {
+    matches!(
+        character,
+        '\u{00AD}'
+            | '\u{061C}'
+            | '\u{180E}'
+            | '\u{200B}'..='\u{200F}'
+            | '\u{2028}'..='\u{202E}'
+            | '\u{2060}'..='\u{2064}'
+            | '\u{2066}'..='\u{2069}'
+            | '\u{FEFF}'
+            | '\u{FFF9}'..='\u{FFFB}'
+            | '\u{FFFE}'
+            | '\u{FFFF}'
+            | '\u{E0000}'..='\u{E007F}'
+    )
+}
+
+/// Private Use Area code points render differently on every system, so they
+/// cannot be shown to a user as a trustworthy filename.
+fn is_private_use(character: char) -> bool {
+    matches!(
+        character,
+        '\u{E000}'..='\u{F8FF}' | '\u{F0000}'..='\u{FFFFD}' | '\u{100000}'..='\u{10FFFD}'
+    )
+}
+
 fn safe_output_name(document: &openszigno_core::Document) -> Result<String, CliError> {
     let title = document.title.trim();
     if title.is_empty()
         || title == "."
         || title == ".."
+        || title.starts_with(['.', '-'])
         || title.chars().any(|character| {
             character.is_control()
+                || (character.is_whitespace() && character != ' ')
+                || is_invisible_or_formatting(character)
+                || is_private_use(character)
                 || matches!(
                     character,
                     '/' | '\\' | '<' | '>' | ':' | '"' | '|' | '?' | '*'
@@ -561,7 +678,9 @@ fn safe_output_name(document: &openszigno_core::Document) -> Result<String, CliE
         ));
     }
 
-    let mut name = title.to_owned();
+    // Write one canonical spelling, so that two differently composed titles
+    // cannot resolve to the same file behind our back.
+    let mut name = title.nfc().collect::<String>();
     if let Some(extension) = document.mime_type.extension.as_deref() {
         if extension.is_empty()
             || extension.len() > 16
@@ -594,43 +713,21 @@ fn safe_output_name(document: &openszigno_core::Document) -> Result<String, CliE
     Ok(name)
 }
 
-fn prepare_output_directory(output: &Path) -> Result<(), CliError> {
-    reject_symlink_components(output)?;
-    fs::create_dir_all(output)
-        .map_err(|_| CliError::io("could not create the output directory"))?;
-    reject_symlink_components(output)?;
-    let metadata = fs::symlink_metadata(output)
-        .map_err(|_| CliError::io("could not inspect the output directory"))?;
-    if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
-        return Err(CliError::unsafe_output(
-            "unsafe_output_directory",
-            "output must be a real directory, not a symlink",
-        ));
+/// Undo the files this run created, so a partial extraction is never left
+/// behind. The original error is returned, or a variant of it when the
+/// cleanup itself could not complete.
+fn roll_back(directory: &OutputDir, created: &[String], error: CliError) -> CliError {
+    let removed = created
+        .iter()
+        .all(|name| directory.remove_file(name).is_ok());
+    if removed {
+        return error;
     }
-    Ok(())
-}
-
-fn reject_symlink_components(path: &Path) -> Result<(), CliError> {
-    let mut current = PathBuf::new();
-    for component in path.components() {
-        current.push(component);
-        match fs::symlink_metadata(&current) {
-            Ok(metadata) if metadata.file_type().is_symlink() => {
-                return Err(CliError::unsafe_output(
-                    "unsafe_output_directory",
-                    "output directory path must not contain symlinks",
-                ));
-            }
-            Ok(_) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(_) => {
-                return Err(CliError::io(
-                    "could not safely inspect the output directory path",
-                ));
-            }
-        }
+    CliError {
+        code: error.code,
+        message: format!("{}; some extracted files may remain", error.message),
+        exit: error.exit,
     }
-    Ok(())
 }
 
 fn valid_input(bytes: usize) -> InputInfo {
@@ -644,33 +741,48 @@ fn failure(input: InputInfo, error: CliError) -> Failure {
     Failure { input, error }
 }
 
-fn write_json(response: &Response) {
-    serde_json::to_writer(std::io::stdout().lock(), response)
-        .expect("serializing the JSON response cannot fail");
-    println!();
+/// Write the single JSON envelope. A closed or failing stdout is an I/O
+/// failure the caller turns into exit status 3, never a panic.
+fn write_json(response: &Response) -> io::Result<()> {
+    let mut bytes = serde_json::to_vec(response).map_err(io::Error::other)?;
+    bytes.push(b'\n');
+    let stdout = io::stdout();
+    let mut stdout = stdout.lock();
+    stdout.write_all(&bytes)?;
+    stdout.flush()
 }
 
-fn write_human_success(command: &str, response: &Response) {
+/// Best-effort diagnostic on stderr; a failing stderr must not abort the run.
+fn write_diagnostic(line: &str) {
+    let _ = writeln!(io::stderr(), "{line}");
+}
+
+fn write_human_success(command: &str, response: &Response) -> io::Result<()> {
+    let stdout = io::stdout();
+    let mut out = stdout.lock();
     match command {
         "inspect" => {
             let dossier = &response.data["dossier"];
-            println!("Microsec e-Szigno dossier");
-            println!("Title: {}", display_json_string(&dossier["title"]));
-            println!("Documents: {}", dossier["documents"]);
-            println!(
+            writeln!(out, "Microsec e-Szigno dossier")?;
+            writeln!(out, "Title: {}", display_json_string(&dossier["title"]))?;
+            writeln!(out, "Documents: {}", dossier["documents"])?;
+            writeln!(
+                out,
                 "Signatures present: {} (not verified)",
                 dossier["signatures_present"]
-            );
-            println!(
+            )?;
+            writeln!(
+                out,
                 "Timestamps present: {} (not verified)",
                 dossier["timestamps_present"]
-            );
+            )?;
         }
         "list" => {
             let dossier = &response.data["dossier"];
-            println!("{}", display_json_string(&dossier["title"]));
+            writeln!(out, "{}", display_json_string(&dossier["title"]))?;
             for document in response.data["documents"].as_array().into_iter().flatten() {
-                println!(
+                writeln!(
+                    out,
                     "[{}] {} | {}/{} | {} B | {}",
                     document["index"],
                     display_json_string(&document["title"]),
@@ -678,35 +790,97 @@ fn write_human_success(command: &str, response: &Response) {
                     display_json_string(&document["mime_type"]["subtype"]),
                     document["source_size"],
                     document["transforms"]
-                );
+                )?;
             }
-            println!("Signatures/timestamps are listed by presence only; none were verified.");
+            writeln!(
+                out,
+                "Signatures/timestamps are listed by presence only; none were verified."
+            )?;
         }
         "extract" => {
-            println!(
+            writeln!(
+                out,
                 "Extracted {} document(s).",
                 response.data["extracted_count"]
-            );
+            )?;
             for item in response.data["extracted"].as_array().into_iter().flatten() {
-                println!(
+                writeln!(
+                    out,
                     "[{}] {} ({} B)",
                     item["document_index"],
                     display_json_string(&item["filename"]),
                     item["bytes"]
-                );
+                )?;
             }
+            writeln!(out, "Extraction is not proof of signature validity.")?;
         }
         "validate-structure" => {
-            println!("Structure is valid for the supported e-Szigno profile.");
-            println!("Cryptographic verification was not performed.");
+            writeln!(
+                out,
+                "Structure is valid for the supported e-Szigno profile."
+            )?;
+            writeln!(out, "Cryptographic verification was not performed.")?;
         }
-        _ => unreachable!("known command"),
+        _ => {}
     }
+    out.flush()?;
     for warning in &response.warnings {
-        eprintln!("warning [{}]: {}", warning.code, warning.message);
+        write_diagnostic(&format!("warning [{}]: {}", warning.code, warning.message));
     }
+    Ok(())
 }
 
 fn display_json_string(value: &Value) -> String {
     value.as_str().unwrap_or("<missing>").to_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A mid-run failure must not leave a half-extracted directory behind.
+    #[test]
+    fn roll_back_removes_the_files_this_run_created() {
+        let temporary = tempfile::tempdir().expect("temporary directory is available");
+        let directory = OutputDir::open(temporary.path()).expect("output directory opens");
+        for name in ["first.txt", "second.txt"] {
+            let mut file = directory.create_new_file(name).expect("file is created");
+            file.write_all(b"payload").expect("file is writable");
+        }
+
+        let created = vec!["first.txt".to_owned(), "second.txt".to_owned()];
+        let error = roll_back(
+            &directory,
+            &created,
+            CliError::io("could not write an extracted document"),
+        );
+
+        assert_eq!(error.code, "io_error");
+        assert_eq!(error.message, "could not write an extracted document");
+        assert_eq!(
+            std::fs::read_dir(temporary.path())
+                .expect("output directory is readable")
+                .count(),
+            0
+        );
+    }
+
+    /// A failed cleanup keeps the code but says so, so a caller never assumes
+    /// the destination is clean.
+    #[test]
+    fn roll_back_reports_that_files_may_remain() {
+        let temporary = tempfile::tempdir().expect("temporary directory is available");
+        let directory = OutputDir::open(temporary.path()).expect("output directory opens");
+        let created = vec!["never-created.txt".to_owned()];
+
+        let error = roll_back(
+            &directory,
+            &created,
+            CliError::io("could not write an extracted document"),
+        );
+
+        assert_eq!(error.code, "io_error");
+        assert_eq!(error.exit, 3);
+        assert!(error.message.ends_with("; some extracted files may remain"));
+    }
 }
