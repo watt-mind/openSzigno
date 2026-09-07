@@ -3,7 +3,7 @@
 mod common;
 
 use common::{PLAIN, document, dossier_with};
-use openszigno_core::{ErrorCode, Limits, parse};
+use openszigno_core::{ErrorCode, Limits, StructuralWarningCode, parse};
 
 fn error_code(xml: &str) -> ErrorCode {
     parse(xml.as_bytes(), &Limits::default())
@@ -66,12 +66,38 @@ fn a_dossier_without_a_creation_date_is_missing_an_element() {
 }
 
 #[test]
-fn a_document_without_a_document_profile_is_missing_an_element() {
-    let documents = "<es:Document><ds:Object Id=\"DocumentObject1\">eA==</ds:Object></es:Document>";
-    assert_eq!(
-        error_code(&dossier_with(documents)),
-        ErrorCode::MissingElement
+fn a_document_without_a_document_profile_is_skipped_with_a_warning() {
+    // Company-court dossiers carry empty placeholder documents. They are not
+    // conformant, so they are reported and skipped rather than counted.
+    let documents = format!(
+        "{}{}",
+        "<es:Document><ds:Object Id=\"DocumentObject1\">eA==</ds:Object></es:Document>",
+        document(2, "kept.txt", Some("txt"), 1, &["base64"], "eA=="),
     );
+    let dossier = parse(dossier_with(&documents).as_bytes(), &Limits::default())
+        .expect("a placeholder document must not fail the dossier");
+    assert_eq!(dossier.documents.len(), 1);
+    assert_eq!(dossier.documents[0].index, 0);
+    assert_eq!(dossier.documents[0].title, "kept.txt");
+    assert_eq!(dossier.warnings.len(), 1);
+    assert_eq!(
+        dossier.warnings[0].code,
+        StructuralWarningCode::DocumentWithoutProfile
+    );
+    assert!(
+        dossier.warnings[0].message.contains("position 0"),
+        "the warning names the source position"
+    );
+}
+
+#[test]
+fn two_document_profiles_in_one_document_are_invalid_xml() {
+    let profile = "<es:DocumentProfile Id=\"P\" OBJREF=\"DocumentObject1\"><es:Title>a.txt</es:Title><es:CreationDate>2026-01-01T00:00:00Z</es:CreationDate><es:Format><es:MIME-Type type=\"text\" subtype=\"plain\"/></es:Format><es:SourceSize sizeValue=\"1\" sizeUnit=\"B\"/><es:BaseTransform><es:Transform Algorithm=\"base64\"/></es:BaseTransform></es:DocumentProfile>";
+    let second = profile.replace("Id=\"P\"", "Id=\"Q\"");
+    let documents = format!(
+        "<es:Document>{profile}{second}<ds:Object Id=\"DocumentObject1\">eA==</ds:Object></es:Document>"
+    );
+    assert_eq!(error_code(&dossier_with(&documents)), ErrorCode::InvalidXml);
 }
 
 #[test]
@@ -95,11 +121,19 @@ fn a_document_without_a_mime_type_is_missing_an_element() {
 }
 
 #[test]
-fn a_document_without_a_source_size_is_missing_an_element() {
+fn a_document_without_a_source_size_is_read_with_a_warning() {
+    // `SourceSize` is optional: company-court dossiers occur without it. See
+    // `namespaces.rs` for the full behaviour.
     let documents = document(1, "hello.txt", Some("txt"), 1, &["base64"], "eA==");
     let without_size =
         dossier_with(&documents).replace("<es:SourceSize sizeValue=\"1\" sizeUnit=\"B\"/>", "");
-    assert_eq!(error_code(&without_size), ErrorCode::MissingElement);
+    let dossier = parse(without_size.as_bytes(), &Limits::default())
+        .expect("a missing SourceSize does not reject the dossier");
+    assert_eq!(dossier.documents[0].source_size, None);
+    assert_eq!(
+        dossier.warnings[0].code,
+        StructuralWarningCode::SourceSizeMissing
+    );
 }
 
 #[test]

@@ -1,6 +1,6 @@
 use serde::Serialize;
 
-use crate::{DecodeOutcome, Error};
+use crate::{DecodeOutcome, Error, KNOWN_COMPATIBLE_NAMESPACES};
 
 /// Resource limits applied while parsing and decoding a dossier.
 ///
@@ -54,6 +54,76 @@ impl Default for Limits {
     }
 }
 
+/// How a dossier is parsed: the resource limits and the namespaces whose
+/// `Dossier` root element is accepted.
+///
+/// The default accepts [`KNOWN_COMPATIBLE_NAMESPACES`] only. A caller may add
+/// further namespaces, but a dossier in an unlisted namespace stays a
+/// `wrong_root` error rather than a best-effort parse.
+#[derive(Clone, Debug)]
+pub struct ParseOptions {
+    pub limits: Limits,
+    pub allowed_namespaces: Vec<String>,
+}
+
+impl Default for ParseOptions {
+    fn default() -> Self {
+        Self {
+            limits: Limits::default(),
+            allowed_namespaces: KNOWN_COMPATIBLE_NAMESPACES
+                .iter()
+                .map(|namespace| (*namespace).to_owned())
+                .collect(),
+        }
+    }
+}
+
+impl ParseOptions {
+    /// The known-compatible namespaces with caller-chosen limits.
+    pub fn with_limits(limits: Limits) -> Self {
+        Self {
+            limits,
+            ..Self::default()
+        }
+    }
+
+    pub(crate) fn allows(&self, namespace: &str) -> bool {
+        self.allowed_namespaces
+            .iter()
+            .any(|allowed| allowed == namespace)
+    }
+}
+
+/// Stable machine-readable categories of non-fatal structural findings.
+///
+/// These describe a dossier that parsed but does not conform to the default
+/// profile. They never change an exit status by themselves.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StructuralWarningCode {
+    DanglingObjref,
+    DocumentWithoutProfile,
+    SourceSizeMissing,
+}
+
+impl StructuralWarningCode {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::DanglingObjref => "dangling_objref",
+            Self::DocumentWithoutProfile => "document_without_profile",
+            Self::SourceSizeMissing => "source_size_missing",
+        }
+    }
+}
+
+/// One non-fatal structural finding. The message never contains a title, a
+/// path, or payload content.
+#[derive(Clone, Debug, Serialize)]
+pub struct StructuralWarning {
+    pub code: StructuralWarningCode,
+    pub message: String,
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct MimeType {
     pub media_type: String,
@@ -74,9 +144,13 @@ pub struct Document {
     pub title: String,
     pub creation_date: String,
     pub mime_type: MimeType,
-    pub source_size: u64,
+    /// The declared decoded size, or `None` when the profile omits
+    /// `SourceSize`. Some company-court dossiers do.
+    pub source_size: Option<u64>,
     pub object_ref: String,
     pub transforms: Vec<String>,
+    /// The declared type marks this document as an embedded dossier.
+    pub nested_dossier: bool,
     #[serde(skip)]
     pub(crate) payload: String,
 }
@@ -91,6 +165,8 @@ pub struct Dossier {
     pub documents: Vec<Document>,
     pub signatures_present: usize,
     pub timestamps_present: usize,
+    /// Non-fatal deviations from the default profile, in source order.
+    pub warnings: Vec<StructuralWarning>,
 }
 
 impl Dossier {

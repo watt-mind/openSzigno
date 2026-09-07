@@ -45,7 +45,12 @@ pub(crate) fn decode_document(
         }
     };
 
-    if decoded.len() as u64 != document.source_size {
+    // Without a declared size there is nothing to compare against; the
+    // omission is reported as a structural warning when the dossier is parsed.
+    if document
+        .source_size
+        .is_some_and(|declared| decoded.len() as u64 != declared)
+    {
         return Err(Error::new(
             ErrorCode::SourceSizeMismatch,
             format!(

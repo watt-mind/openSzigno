@@ -14,20 +14,51 @@ timestamp, certificate, or dossier is valid.
 The milestones are ordered. Each one is expected to keep the JSON envelope
 stable, or to raise `schema_version` if it cannot.
 
-### M1: custom compatible e-dossier namespaces
+### M1: custom compatible e-dossier namespaces — done
 
-Support e-dossier profiles that use a compatible namespace other than the
-default `https://www.microsec.hu/ds/e-szigno30#`, such as the Hungarian
-company-court (e-cégeljárás) dossiers. Scope:
+Shipped. openSzigno accepts e-dossier profiles in a compatible namespace other
+than the default `https://www.microsec.hu/ds/e-szigno30#`, including the four
+Hungarian company-court (e-cégeljárás) generations. See
+[architecture.md](architecture.md#namespace-policy) for the contract. What
+landed:
 
-- an explicit allow-list of recognised namespaces, resolved namespace-aware
-  at the root element, never by file extension;
-- per-namespace structural expectations where they differ from the default
-  profile, with the Microsec prose specification as the authority;
-- `inspect` continues to report the detected `namespace` verbatim, so a caller
-  can tell which profile was applied;
-- an unknown namespace stays a `wrong_root` error rather than a best-effort
-  parse.
+- an explicit allow-list (`KNOWN_COMPATIBLE_NAMESPACES`), resolved
+  namespace-aware at the root element, never by file extension, widened per
+  invocation by the repeatable `--allow-namespace <URI>` flag;
+- every structural lookup performed in the dossier's own namespace, with an
+  unknown namespace still a `wrong_root` error rather than a best-effort
+  parse, and the URI never echoed in the message;
+- `inspect` and `list` continue to report the detected `namespace` verbatim;
+- the two real-world deviations reported as conformance warnings instead of
+  rejections: `dangling_objref` (typically a `SignatureProfile` pointing at
+  nothing) and `document_without_profile` (an empty placeholder `Document`);
+- nested dossiers (`application/nldossier2`, extension `dosszie`) detected by
+  declared type and by content sniffing, and expanded recursively by `extract`
+  into `<file>.d` subdirectories under a shared decode budget, bounded by
+  `--max-depth` (default 3, hard cap 8) and disabled by `--no-recursive`;
+- content sniffing (`sniff`/`DetectedType`) reported per extracted file as
+  `detected_type` alongside the unreliable `declared_type`, and used as a
+  last-resort filename extension.
+
+Residuals deliberately left out of M1:
+
+- **No per-namespace structural profiles.** All allowed namespaces are held to
+  the default profile's structure. If a generation genuinely differs beyond the
+  two deviations above, it will surface as a hard error rather than as a
+  profile-specific rule; the Microsec prose specification stays the authority.
+- **Nested dossiers are the only recursion.** A payload that is a dossier but
+  is neither declared nor sniffable as one (an encrypted or `zip`-wrapped
+  dossier, say) is written as a file and not expanded.
+- **Sniffing is coarse and prefix-only.** It bounds itself to the first 4096
+  bytes and answers with a category, not a media type; a caller that needs
+  certainty must still open the file.
+- **The subdirectory name is derived, not declared.** `<payload file>.d` can
+  collide with a sibling document's filename; that is reported as
+  `output_name_collision` and the run writes nothing, which is safe but means
+  such a dossier cannot be extracted without renaming.
+- **Nested extraction shares one aggregate budget but not one plan cost.**
+  Every level is decoded in memory before anything is written, so peak memory
+  grows with the size of the whole tree, not of the largest single dossier.
 
 ### M2: `verify` for XMLDSig/XAdES signatures
 
@@ -82,15 +113,15 @@ identified.
   (2007, 2009, 2012, 2014). Those carry many more documents per dossier
   (up to a dozen or more), all `base64` without `zip`, and some embed a
   nested dossier declared as `application/nldossier2` whose payload is itself
-  a default-namespace `Dossier`. Milestone M1 must handle nested dossiers.
+  a default-namespace `Dossier`. Milestone M1 handles all of this.
 - Payloads are overwhelmingly PDF and small HTML notices, with a few XML
   documents (including a Microsec `Acknowledge` receipt). About half of the
   PDFs have no text layer and are image-only scans, so text extraction from
   payloads is out of scope for this tool and belongs to the calling agent.
 - Declared MIME types are not reliable: `application/octet-stream` payloads
-  turned out to be PDF and HTML, and a `text/xml` payload was HTML. A
-  content-sniffing hint alongside the declared type would help agents choose
-  a reader without opening the file blind.
+  turned out to be PDF and HTML, and a `text/xml` payload was HTML. M1 added
+  the `detected_type` sniffing hint alongside the declared type, so an agent
+  can choose a reader without opening the file blind.
 - Every parsed dossier carried signature material and a minority carried
   timestamps, which is why `verify` is the next milestone after M1.
 - Inputs with the `.es3` suffix that are not XML at all occur in practice
@@ -118,6 +149,9 @@ These are not format milestones; they can land in any order.
   to be correct for well-formed input; anything it miscounts on malformed
   input is rejected by the tree parser afterwards. Changes to either side need
   matching regression tests.
+- **Recursive extraction breadth.** A dossier tree is decoded entirely in
+  memory before any file is written, and the `<file>.d` naming scheme can
+  collide with a sibling filename. Both are described under M1's residuals.
 - **Compatibility gaps.** Dossiers in unsupported namespaces or with
   unsupported transform chains are rejected or skipped. A rejection is not
   evidence that a dossier is malformed; it may simply be out of the currently
