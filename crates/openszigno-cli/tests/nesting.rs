@@ -910,6 +910,32 @@ fn a_name_that_still_collides_after_renaming_is_the_residual_error() {
 }
 
 #[test]
+fn a_dossier_without_a_creation_date_is_reported_by_every_command() {
+    let directory = scratch();
+    let xml = dossier(&text_document(0, "ruling.txt", "hello"));
+    let start = xml
+        .find("<es:CreationDate>")
+        .expect("the dossier profile declares a date");
+    let end = xml[start..]
+        .find("</es:CreationDate>")
+        .expect("the element is closed")
+        + start
+        + "</es:CreationDate>".len();
+    let without_date = format!("{}{}", &xml[..start], &xml[end..]);
+    let input = write_input(directory.path(), &without_date);
+
+    for command in ["inspect", "list", "validate-structure"] {
+        let output = run(&[command, input.to_str().unwrap(), "--json"]);
+        assert!(output.status.success(), "{command} must succeed");
+        let response = parse_json(&output);
+        assert_eq!(warning_codes(&response), ["creation_date_missing"]);
+        if command != "validate-structure" {
+            assert!(response["data"]["dossier"]["creation_date"].is_null());
+        }
+    }
+}
+
+#[test]
 fn a_document_without_a_source_size_is_reported_by_every_command() {
     let directory = scratch();
     let block = text_document(0, "ruling.txt", "hello");

@@ -100,9 +100,10 @@ Rules:
 
 A dossier that parses but deviates from the default profile is reported
 through structural warnings rather than being rejected, because real
-company-court dossiers routinely deviate in these two ways. The warnings carry
-the codes `dangling_objref`, `document_without_profile`, and
-`source_size_missing`, and never change an exit status by themselves.
+company-court dossiers routinely deviate in these ways. The warnings carry
+the codes `dangling_objref`, `document_without_profile`,
+`source_size_missing`, and `creation_date_missing`, and never change an exit
+status by themselves.
 
 - Every `Document` must carry a `DocumentProfile`; one holding only a
   `ds:Object` is non-conformant. Such a document is skipped, is not counted in
@@ -114,6 +115,9 @@ the codes `dangling_objref`, `document_without_profile`, and
   it (`source_size_mismatch`). When it is absent the document is still read,
   `source_size` is `null`, nothing is compared against a declaration, and
   `source_size_missing` names the document index.
+- `CreationDate` is optional in the `DossierProfile`; when absent the
+  dossier `creation_date` is `null` and `creation_date_missing` is reported.
+  A `DocumentProfile` must still carry its `CreationDate`.
 - The `DossierProfile` and every `DocumentProfile` `OBJREF` must still resolve
   exactly as before; a failure is the hard error `unresolved_objref`. Any
   other dangling `OBJREF` (a `SignatureProfile` pointing at nothing, for
@@ -309,7 +313,7 @@ Each `extracted` entry describes one written file:
 every document skipped across the tree, and `nested_dossiers_extracted` the
 embedded dossiers that were expanded.
 
-The `dossier` object carries `title`, `category` (or `null`), `creation_date`,
+The `dossier` object carries `title`, `category` (or `null`), `creation_date` (or `null`),
 `namespace`, `xml_encoding`, `documents` (a count), `nested_dossiers` (a count
 of documents that embed a dossier), `signatures_present`, `timestamps_present`,
 and `signatures_verified`, which is always `false`.
@@ -407,6 +411,7 @@ Warning codes. Warnings never change the exit status by themselves:
 | `dangling_objref` | all commands | An `OBJREF` outside the dossier and document profiles resolves to no XML ID. |
 | `document_without_profile` | all commands | A `Document` has no `DocumentProfile` and was skipped. |
 | `source_size_missing` | all commands | A `DocumentProfile` declares no `SourceSize`, so the decoded length is not checked against one. |
+| `creation_date_missing` | all commands | The `DossierProfile` declares no `CreationDate`; the dossier `creation_date` is `null`. |
 | `output_name_deduplicated` | `extract` | A document's output name was already taken in its directory, so it was renamed. |
 | `nested_dossier_depth_limit` | `extract` | An embedded dossier was kept as a file because `--max-depth` was reached. |
 | `nested_dossier_invalid` | `extract` | An embedded dossier could not be parsed; the raw payload was kept and the run continued. |

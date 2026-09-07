@@ -56,13 +56,21 @@ fn an_empty_title_is_missing_an_element() {
 }
 
 #[test]
-fn a_dossier_without_a_creation_date_is_missing_an_element() {
+fn a_dossier_without_a_creation_date_is_a_conformance_warning() {
+    // Company-court dossiers occur without a dossier-level CreationDate.
     let documents = document(1, "hello.txt", Some("txt"), 1, &["base64"], "eA==");
     let without_date = dossier_with(&documents).replace(
         "<es:CreationDate>2026-01-01T00:00:00Z</es:CreationDate></es:DossierProfile>",
         "</es:DossierProfile>",
     );
-    assert_eq!(error_code(&without_date), ErrorCode::MissingElement);
+    let dossier = parse(without_date.as_bytes(), &Limits::default()).expect("still parses");
+    assert_eq!(dossier.creation_date, None);
+    assert!(
+        dossier
+            .warnings
+            .iter()
+            .any(|warning| warning.code == StructuralWarningCode::CreationDateMissing)
+    );
 }
 
 #[test]

@@ -105,7 +105,7 @@ pub(crate) fn parse(bytes: &[u8], options: &ParseOptions) -> Result<Dossier, Err
     Ok(Dossier {
         title: required_child_text(dossier_profile, namespace, "Title")?,
         category: optional_child_text(dossier_profile, namespace, "E-category"),
-        creation_date: required_child_text(dossier_profile, namespace, "CreationDate")?,
+        creation_date: dossier_creation_date(dossier_profile, namespace, &mut warnings),
         namespace: namespace.to_owned(),
         xml_encoding: encoding,
         documents,
@@ -202,6 +202,23 @@ fn parse_document(
 /// When it is present the existing `sizeValue`/`sizeUnit` and declared-size
 /// rules apply unchanged; when it is absent the omission is reported and the
 /// decoded length is simply not checked against a declaration.
+/// The dossier-level `CreationDate` is mandatory in the default profile but
+/// missing from some company-court dossiers; its absence is a warning.
+fn dossier_creation_date(
+    profile: Node<'_, '_>,
+    namespace: &str,
+    warnings: &mut Vec<StructuralWarning>,
+) -> Option<String> {
+    let value = optional_child_text(profile, namespace, "CreationDate");
+    if value.is_none() {
+        warnings.push(StructuralWarning {
+            code: StructuralWarningCode::CreationDateMissing,
+            message: "the DossierProfile declares no CreationDate".to_owned(),
+        });
+    }
+    value
+}
+
 fn parse_source_size(
     profile: Node<'_, '_>,
     index: usize,

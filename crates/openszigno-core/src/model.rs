@@ -104,6 +104,7 @@ pub enum StructuralWarningCode {
     DanglingObjref,
     DocumentWithoutProfile,
     SourceSizeMissing,
+    CreationDateMissing,
 }
 
 impl StructuralWarningCode {
@@ -112,6 +113,7 @@ impl StructuralWarningCode {
             Self::DanglingObjref => "dangling_objref",
             Self::DocumentWithoutProfile => "document_without_profile",
             Self::SourceSizeMissing => "source_size_missing",
+            Self::CreationDateMissing => "creation_date_missing",
         }
     }
 }
@@ -159,7 +161,9 @@ pub struct Document {
 pub struct Dossier {
     pub title: String,
     pub category: Option<String>,
-    pub creation_date: String,
+    /// The declared creation date, or `None` when the `DossierProfile`
+    /// omits `CreationDate`. Some company-court dossiers do.
+    pub creation_date: Option<String>,
     pub namespace: String,
     pub xml_encoding: String,
     pub documents: Vec<Document>,

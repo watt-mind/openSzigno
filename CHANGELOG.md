@@ -75,7 +75,9 @@ This release performs no cryptographic verification of any kind.
 - Fixtures `tests/fixtures/nested-dossier.es3` and
   `tests/fixtures/compatible-namespace.es3`, both synthetic and unsigned.
 - `openszigno-core`: the structural warning `source_size_missing`, reported
-  when a `DocumentProfile` omits `SourceSize`.
+  when a `DocumentProfile` omits `SourceSize`, and `creation_date_missing`,
+  reported when the `DossierProfile` omits `CreationDate` (the dossier
+  `creation_date` is then `null`).
 - `openszigno-cli`: the warning `output_name_deduplicated`, reported for each
   output renamed because its name was already taken in its directory.
 

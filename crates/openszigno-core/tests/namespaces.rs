@@ -212,6 +212,31 @@ fn a_warning_never_echoes_an_element_name_that_is_not_a_plain_one() {
     );
 }
 
+/// Some company-court dossiers omit the dossier-level `CreationDate`; the
+/// dossier is still read and the date is reported as absent.
+#[test]
+fn a_dossier_without_a_creation_date_is_reported_but_kept() {
+    let xml = dossier_with(&document_without_source_size(1, "ruling.txt", b"payload"));
+    let start = xml
+        .find("<es:CreationDate>")
+        .expect("the dossier profile declares a date");
+    let end = xml[start..]
+        .find("</es:CreationDate>")
+        .expect("the element is closed")
+        + start
+        + "</es:CreationDate>".len();
+    let without_date = format!("{}{}", &xml[..start], &xml[end..]);
+    let dossier = parsed(&without_date);
+    assert_eq!(dossier.creation_date, None);
+    assert_eq!(dossier.documents.len(), 1);
+    assert!(
+        dossier
+            .warnings
+            .iter()
+            .any(|warning| warning.code == StructuralWarningCode::CreationDateMissing)
+    );
+}
+
 /// Some company-court dossiers omit `SourceSize`; the document is still read,
 /// and nothing is compared against a size that was never declared.
 #[test]
@@ -302,6 +327,10 @@ fn structural_warnings_serialise_with_their_stable_codes() {
         (
             StructuralWarningCode::SourceSizeMissing,
             "source_size_missing",
+        ),
+        (
+            StructuralWarningCode::CreationDateMissing,
+            "creation_date_missing",
         ),
     ] {
         assert_eq!(code.as_str(), expected);
