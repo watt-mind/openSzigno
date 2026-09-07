@@ -29,15 +29,13 @@ rustix.workspace = true
 [dev-dependencies]
 tempfile.workspace = true
 
-# Archive layout produced by the release workflow, so that
+# Archive layout produced by the dist release workflow, so that
 # `cargo binstall openszigno-cli` finds the prebuilt binaries:
-#   openszigno-v0.1.0-x86_64-unknown-linux-musl.tar.gz
-#     openszigno-v0.1.0-x86_64-unknown-linux-musl/openszigno
-# The binary name is spelled out in `pkg-url` because `{ bin }` is only
-# bound in `bin-dir` templates, not in the package URL context.
+#   openszigno-cli-x86_64-unknown-linux-musl.tar.gz
+#     openszigno-cli-x86_64-unknown-linux-musl/openszigno
 [package.metadata.binstall]
-pkg-url = "{ repo }/releases/download/v{ version }/openszigno-v{ version }-{ target }{ archive-suffix }"
-bin-dir = "{ bin }-v{ version }-{ target }/{ bin }{ binary-ext }"
+pkg-url = "{ repo }/releases/download/v{ version }/{ name }-{ target }{ archive-suffix }"
+bin-dir = "{ name }-{ target }/{ bin }{ binary-ext }"
 pkg-fmt = "tgz"
 
 [package.metadata.binstall.overrides.x86_64-pc-windows-msvc]
