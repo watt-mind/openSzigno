@@ -320,6 +320,8 @@ pub struct SigSpec {
     pub archive_timestamp: bool,
     /// An unsigned property this build does not validate, by element name.
     pub extra_unsigned_property: Option<String>,
+    /// An `Id` on `ds:SignatureValue`, so an `xades:Include` can name it.
+    pub signature_value_id: Option<String>,
 }
 
 /// How the signed `SigningCertificate` property should look.
@@ -374,8 +376,11 @@ pub struct TimestampSpec {
     pub c14n: Option<String>,
     /// Replace the token with these bytes, for the malformed cases.
     pub raw_token: Option<Vec<u8>>,
-    /// Emit an `xades:Include`, a data-selection form this build refuses.
-    pub include_element: bool,
+    /// `xades:Include` URIs to emit, which is the explicit data-selection
+    /// form. Empty means the implicit form.
+    pub includes: Vec<String>,
+    /// Emit an `xades:ReferenceInfo`, a form this build does not implement.
+    pub reference_info: bool,
     /// Emit the token twice, which this build does not process.
     pub duplicate_token: bool,
     /// Emit a token that is not decodable Base64.
@@ -393,7 +398,8 @@ impl TimestampSpec {
             wrong_imprint: false,
             c14n: None,
             raw_token: None,
-            include_element: false,
+            includes: Vec::new(),
+            reference_info: false,
             duplicate_token: false,
             undecodable_token: false,
         }
@@ -451,6 +457,7 @@ pub fn document_signature(certificates: Vec<Vec<u8>>) -> SigSpec {
         timestamp: None,
         archive_timestamp: false,
         extra_unsigned_property: None,
+        signature_value_id: None,
     }
 }
 
@@ -478,6 +485,7 @@ pub fn dossier_signature(certificates: Vec<Vec<u8>>) -> SigSpec {
         timestamp: None,
         archive_timestamp: false,
         extra_unsigned_property: None,
+        signature_value_id: None,
     }
 }
 
@@ -858,8 +866,13 @@ fn render_signature(spec: &SigSpec, tag: &str, namespace: &str) -> String {
         ));
     }
     out.push_str("</ds:SignedInfo>");
+    let signature_value_id = spec
+        .signature_value_id
+        .as_ref()
+        .map(|id| format!(" Id=\"{id}\""))
+        .unwrap_or_default();
     out.push_str(&format!(
-        "<ds:SignatureValue>@@SIGNATURE-{tag}@@</ds:SignatureValue>"
+        "<ds:SignatureValue{signature_value_id}>@@SIGNATURE-{tag}@@</ds:SignatureValue>"
     ));
     if spec.include_key_info {
         out.push_str("<ds:KeyInfo><ds:X509Data>");
@@ -903,8 +916,13 @@ fn render_signature(spec: &SigSpec, tag: &str, namespace: &str) -> String {
                 "<ds:CanonicalizationMethod Algorithm=\"{c14n}\"/>"
             ));
         }
-        if timestamp.include_element {
-            unsigned.push_str(&format!("<xades:Include URI=\"#{}\"/>", spec.id));
+        if timestamp.reference_info {
+            unsigned.push_str("<xades:ReferenceInfo URI=\"#obj0\"/>");
+        }
+        for uri in &timestamp.includes {
+            unsigned.push_str(&format!(
+                "<xades:Include URI=\"{uri}\" referencedData=\"true\"/>"
+            ));
         }
         if timestamp.undecodable_token {
             unsigned.push_str(

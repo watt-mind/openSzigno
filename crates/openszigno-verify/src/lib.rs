@@ -182,6 +182,15 @@ pub fn verify(bytes: &[u8], options: &VerifyOptions<'_>) -> Result<VerifyReport,
         // --- Stage F: signature timestamps ----------------------------------
         // Timestamps are verified before the signer's own path, because a
         // verified token is what may move the validation time that path uses.
+        //
+        // A TSA's issuing CA is often carried in the enclosing signature's
+        // `xades:CertificateValues` rather than inside the token, so the
+        // token's own certificate set, the signature's candidates, and the
+        // trust store's intermediates are offered together. All three are
+        // untrusted path candidates; only the trust store supplies anchors.
+        let mut timestamp_candidates = outcome.extra_certificates.clone();
+        timestamp_candidates.extend(store_intermediates.iter().cloned());
+        let timestamp_candidates = dedup(timestamp_candidates);
         let mut verified_gen_times: Vec<crate::trust::UnixTime> = Vec::new();
         for source in &outcome.timestamps {
             if let Some(reason) = &source.unsupported {
@@ -205,7 +214,7 @@ pub fn verify(bytes: &[u8], options: &VerifyOptions<'_>) -> Result<VerifyReport,
                 token: source.token.clone(),
                 imprint_input: source.imprint_input.clone(),
                 anchors: &anchors,
-                extra_certificates: &store_intermediates,
+                extra_certificates: &timestamp_candidates,
                 limits: &options.limits,
                 allow_legacy_algorithms: options.allow_legacy_algorithms,
                 claimed_signing_time: outcome.claimed_signing_time,
@@ -260,7 +269,11 @@ pub fn verify(bytes: &[u8], options: &VerifyOptions<'_>) -> Result<VerifyReport,
             report.chain = path.chain;
             let status = match path.code {
                 CheckCode::CertPathOk => CheckStatus::Passed,
-                CheckCode::CertPathUnknown => CheckStatus::Unknown,
+                // Giving up is not a finding: an exhausted search means the
+                // tool stopped looking, not that no path exists.
+                CheckCode::CertPathUnknown | CheckCode::CertPathSearchExhausted => {
+                    CheckStatus::Unknown
+                }
                 _ => CheckStatus::Failed,
             };
             report

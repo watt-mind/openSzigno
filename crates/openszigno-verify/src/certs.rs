@@ -41,6 +41,10 @@ const OID_ANY_EXTENDED_KEY_USAGE: ObjectIdentifier = ObjectIdentifier::new_unwra
 /// `id-kp-timeStamping`, RFC 3161 section 2.3.
 pub const OID_KP_TIME_STAMPING: ObjectIdentifier =
     ObjectIdentifier::new_unwrap("1.3.6.1.5.5.7.3.8");
+/// `id-kp-documentSigning`, RFC 9336. The purpose that exists precisely for
+/// signing documents, rather than for authenticating a host or a mailbox.
+pub const OID_KP_DOCUMENT_SIGNING: ObjectIdentifier =
+    ObjectIdentifier::new_unwrap("1.3.6.1.5.5.7.3.36");
 
 /// Critical extensions whose semantics this validator actually implements.
 ///
@@ -456,15 +460,21 @@ fn build_paths(
     limits: &VerifyLimits,
     expansions: &mut usize,
 ) -> bool {
-    if paths.len() >= limits.max_paths || chain.len() >= limits.max_chain_length {
+    if paths.len() >= limits.max_paths {
         return false;
     }
     let current = chain
         .last()
         .and_then(|index| (*index != usize::MAX).then(|| pool[*index].0))
         .unwrap_or(leaf);
+    // Completion is checked *before* the length bound, so a chain of exactly
+    // `max_chain_length` certificates that ends at an anchor is a path rather
+    // than one the search refused to look at: a limit of 8 admits 8, not 7.
     if chain.len() > 1 && pool[*chain.last().expect("chain is not empty")].1 {
         paths.push(chain.clone());
+        return false;
+    }
+    if chain.len() >= limits.max_chain_length {
         return false;
     }
     let issuer_der = current.issuer_der();
@@ -555,29 +565,65 @@ fn check_path(
                 "a certificate in the path had expired at the validation time".to_owned(),
             ));
         }
-        // A critical extended key usage must actually permit the use. There is
-        // no standard EKU for document signing, and id-kp-emailProtection or
-        // id-kp-clientAuth do not authorise it, so the only critical EKU this
-        // tool accepts is anyExtendedKeyUsage. A non-critical EKU is a hint the
-        // issuer chose not to enforce, and is reported by neither.
-        if certificate.is_critical(OID_EXT_KEY_USAGE) {
-            let usages = certificate
-                .extended_key_usages()
-                .map_err(|()| malformed())?
-                .unwrap_or_default();
-            // A timestamp authority certificate is *required* by RFC 3161 to
-            // carry a critical `id-kp-timeStamping`, so that one purpose is
-            // admitted when the path is being validated for a TSA. The
-            // stricter "and nothing else" rule is checked separately, on the
-            // token's own certificate, so a CA above it is not caught by it.
-            let permitted = usages.contains(&OID_ANY_EXTENDED_KEY_USAGE)
-                || (purpose == PathPurpose::TimeStamping && usages.contains(&OID_KP_TIME_STAMPING));
-            if !permitted {
-                return Err((
-                    CheckCode::CertKeyUsageInvalid,
-                    "a certificate in the path has a critical extendedKeyUsage that does not permit signing".to_owned(),
-                ));
-            }
+    }
+
+    // The end-entity certificate's extended key usage, which RFC 5280 section
+    // 4.2.1.12 makes a restriction on what the key may be used for **whether or
+    // not the extension is marked critical**. An absent extension imposes no
+    // restriction and is accepted; a present one must name a purpose that
+    // covers this use:
+    //
+    // - `anyExtendedKeyUsage`, which waives the restriction;
+    // - `id-kp-documentSigning` (RFC 9336), the purpose that exists for exactly
+    //   this;
+    // - `id-kp-timeStamping`, but only when the path is being validated for a
+    //   timestamp authority, where RFC 3161 additionally requires it to be the
+    //   *only* purpose and to be critical (checked on the token's own
+    //   certificate).
+    //
+    // `id-kp-emailProtection` is deliberately not accepted: signing a message
+    // to a mailbox is not signing a document, and a certificate issued for it
+    // was not issued for this. `serverAuth`, `clientAuth`, `codeSigning` and
+    // `OCSPSigning` are likewise unrelated purposes.
+    if let Some(usages) = path[0].extended_key_usages().map_err(|()| malformed())? {
+        let permitted = usages.contains(&OID_ANY_EXTENDED_KEY_USAGE)
+            || match purpose {
+                PathPurpose::Signing => usages.contains(&OID_KP_DOCUMENT_SIGNING),
+                PathPurpose::TimeStamping => usages.contains(&OID_KP_TIME_STAMPING),
+            };
+        if !permitted {
+            return Err((
+                CheckCode::CertKeyUsageInvalid,
+                "the end-entity certificate has an extendedKeyUsage that does not permit this use"
+                    .to_owned(),
+            ));
+        }
+    }
+
+    // A CA's extended key usage is only enforced when it is marked critical.
+    // RFC 5280 gives no path-processing rule for EKU in a CA certificate, and
+    // real eIDAS hierarchies carry advisory sets there; refusing them would
+    // reject chains that are correct. A CA that marks the extension critical
+    // has asked to be taken at its word, and is.
+    for certificate in path.iter().skip(1) {
+        if !certificate.is_critical(OID_EXT_KEY_USAGE) {
+            continue;
+        }
+        let usages = certificate
+            .extended_key_usages()
+            .map_err(|()| malformed())?
+            .unwrap_or_default();
+        let permitted = usages.contains(&OID_ANY_EXTENDED_KEY_USAGE)
+            || match purpose {
+                PathPurpose::Signing => usages.contains(&OID_KP_DOCUMENT_SIGNING),
+                PathPurpose::TimeStamping => usages.contains(&OID_KP_TIME_STAMPING),
+            };
+        if !permitted {
+            return Err((
+                CheckCode::CertKeyUsageInvalid,
+                "a CA in the path has a critical extendedKeyUsage that does not permit this use"
+                    .to_owned(),
+            ));
         }
     }
 

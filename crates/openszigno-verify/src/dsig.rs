@@ -830,6 +830,59 @@ fn stage_c_binding(
 /// C14N as XAdES prescribes. The `Include` and `ReferenceInfo` forms select
 /// other data and are not implemented, so a timestamp that uses one is
 /// reported as unchecked rather than verified against the wrong bytes.
+/// Whether a `xades:SignatureTimeStamp` selects data this build cannot compute
+/// the imprint over, and why.
+///
+/// The implicit form — no data-selection child at all — covers the
+/// `ds:SignatureValue` element, which is what XAdES prescribes for a signature
+/// timestamp. The explicit `xades:Include` form (EN 319 132-1, XAdES 1.3.2 and
+/// 1.4.1) is accepted for exactly the case where it says the same thing: every
+/// `Include` is a same-document `#id` reference resolving, through the
+/// validated ID space, to *this signature's own* `ds:SignatureValue`. The
+/// `referencedData` attribute is not consulted, because for this target it
+/// cannot change what is digested.
+///
+/// Any other target set — another element, a URI that does not resolve, an
+/// external reference, or the `ReferenceInfo`, `HashDataInfo` and
+/// `XMLTimeStamp` forms — is refused by name rather than digested over the
+/// wrong bytes.
+fn unsupported_form(
+    context: &Context<'_, '_, '_>,
+    timestamp: Node<'_, '_>,
+    signature_value: Node<'_, '_>,
+) -> Option<String> {
+    for child in timestamp.children().filter(Node::is_element) {
+        match child.tag_name().name() {
+            "ReferenceInfo" | "HashDataInfo" | "XMLTimeStamp" => {
+                return Some(
+                    "the timestamp selects its data with a form this build does not implement"
+                        .to_owned(),
+                );
+            }
+            "Include" => {
+                let uri = attribute(child, "URI").unwrap_or_default();
+                let Some(id) = uri.strip_prefix('#').filter(|id| !id.is_empty()) else {
+                    return Some(
+                        "the timestamp includes a URI that is not a same-document reference"
+                            .to_owned(),
+                    );
+                };
+                match context.ids.get(id) {
+                    Some(node) if node.id() == signature_value.id() => {}
+                    _ => {
+                        return Some(
+                            "the timestamp includes data other than this signature's ds:SignatureValue"
+                                .to_owned(),
+                        );
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 fn collect_timestamps(
     context: &Context<'_, '_, '_>,
     signature: Node<'_, '_>,
@@ -844,19 +897,7 @@ fn collect_timestamps(
         .iter()
         .take(context.limits.max_timestamps_per_signature)
     {
-        let unsupported = node
-            .children()
-            .filter(Node::is_element)
-            .find(|child| {
-                matches!(
-                    child.tag_name().name(),
-                    "Include" | "ReferenceInfo" | "HashDataInfo" | "XMLTimeStamp"
-                )
-            })
-            .map(|_| {
-                "the timestamp selects its data with a form this build does not implement"
-                    .to_owned()
-            });
+        let unsupported = unsupported_form(context, *node, signature_value);
 
         let tokens: Vec<Vec<u8>> = xades::xades_children(*node, "EncapsulatedTimeStamp")
             .filter_map(|element| decode_base64(&text_of(element)))

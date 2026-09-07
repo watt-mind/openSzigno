@@ -139,9 +139,12 @@ store so that `certificate_qualified_status` can be determined and cited.
   the project after canonicalization. A differential CI check against
   `openssl verify` on generated chains is not yet in place.
 - **Canonicalization is also in-tree.** It matches the W3C examples and the
-  hand-computed cases in `crates/openszigno-verify/tests/c14n.rs`, but the
-  differential backend the design calls for (`xml_c14n` or `bergshamra` as a
-  CI oracle) has not been added, so there is no independent check.
+  hand-computed cases in `crates/openszigno-verify/tests/c14n.rs`, and
+  `tests/vectors.rs` now checks it against specification-transcribed canonical
+  forms and against a document whose digests and signature OpenSSL produced
+  over hand-written canonical octets. The differential backend the design
+  calls for (`xml_c14n` or `bergshamra` as a CI oracle) has still not been
+  added, so there is no second implementation running over arbitrary input.
 - **Distinguished names are compared by DER**, with no RFC 4518 string
   preparation. That is conservative: it can only reject a chain a lenient
   comparison would have accepted, never the other way round.

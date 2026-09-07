@@ -12,6 +12,17 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
 
 ### Added (M2 phase 2: XAdES signed properties and RFC 3161 timestamps)
 
+- `crates/openszigno-verify/tests/vectors.rs` and
+  `tests/fixtures/xmldsig/`: verification vectors this project did not
+  produce. Canonical forms transcribed from Canonical XML 1.0 (sections 3.2,
+  3.4, 3.6) and Exclusive XML Canonicalization 1.0 (section 2.2) with the
+  section cited at each, plus a complete signed dossier whose reference
+  digests and `ds:SignatureValue` were computed by OpenSSL and Python over
+  canonical octets written out by hand. The in-tests signer shares the
+  canonicalizer under test, so a shared mistake cancels out there; here it
+  cannot. The generator and its exact commands are committed; the private keys
+  are not.
+
 - XAdES `SigningCertificate` and `SigningCertificateV2` binding, in every
   recognised namespace (1.1.1, 1.2.2, 1.3.2, 1.4.1). The certificate the
   *signed* `CertDigest` names is the certificate the signature claims, so a
@@ -60,6 +71,44 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
   `xades:Cert` entries, and a fixed 512 KiB cap on one timestamp token.
 
 ### Changed (M2 phase 2)
+
+- **A timestamp that does not verify no longer makes a signature `invalid`.**
+  Following ETSI EN 319 102-1, a token that fails for any reason — malformed,
+  wrong imprint, bad TSA signature, TSA certificate problem, untrusted or
+  unknown TSA path — supplies no proof of existence, which is missing
+  information rather than evidence against the signature. The token keeps its
+  own `failed` checks and `verified: false`; the signature-level
+  `timestamp_verified` is now `unknown` and never `failed`, the validation
+  time falls back to `--at` or the clock, and the verdict is capped at
+  `indeterminate`. Only checks about the signature itself — digests, signature
+  value, algorithm policy, reference scope, the `SigningCertificate` binding,
+  and the signer's own chain — can still make it `invalid`.
+- The TSA certificate path is built from the union of the token's own
+  `SignedData` certificates, the enclosing signature's `ds:KeyInfo` and
+  `xades:CertificateValues` candidates, and the trust store's intermediates.
+  Real dossiers carry the TSA's issuing CA in the signature's
+  `CertificateValues` and put only the TSA leaf in the token, so the previous
+  token-only search reported chain breaks that were not there. Anchors still
+  come from the trust store alone.
+- The explicit `xades:Include` data-selection form is implemented for the case
+  where every `Include` resolves, same-document and by ID, to this signature's
+  own `ds:SignatureValue`; `referencedData` is not consulted, because for that
+  target it cannot change what is digested. Any other target set, and the
+  `ReferenceInfo`, `HashDataInfo` and `XMLTimeStamp` forms, stay
+  `timestamp_not_checked`.
+- `extendedKeyUsage` on the signing certificate is now enforced whether or not
+  it is marked critical, as RFC 5280 section 4.2.1.12 requires, and
+  `id-kp-documentSigning` (RFC 9336) is accepted alongside
+  `anyExtendedKeyUsage`. A certificate whose EKU names only unrelated purposes
+  — `emailProtection`, `serverAuth`, `clientAuth`, `codeSigning`,
+  `OCSPSigning` — now fails `cert_key_usage_invalid` even when the extension
+  is advisory. A CA's EKU is still enforced only when critical.
+- `cert_path_search_exhausted` is reported as `unknown` rather than `failed`:
+  hitting the expansion budget means the tool stopped looking, not that no
+  path exists, so it no longer makes a signature `invalid`.
+- Path building checks whether a chain has reached an anchor *before* refusing
+  to expand further, so `max_chain_length` is inclusive: a limit of 8 admits a
+  path of 8 certificates, where it previously admitted only 7.
 
 - `xades_not_validated` now means "qualifying properties this build does not
   validate are present", and names them in the message and in

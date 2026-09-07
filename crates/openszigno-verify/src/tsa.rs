@@ -139,8 +139,12 @@ pub struct TokenInput<'a> {
     /// timestamp, the canonicalized `ds:SignatureValue` element.
     pub imprint_input: Vec<u8>,
     pub anchors: &'a [ParsedCertificate],
-    /// Extra untrusted certificates offered for path building, from the trust
-    /// store. The token's own `certificates` set is added to these.
+    /// Extra untrusted certificates offered for path building: the enclosing
+    /// signature's `ds:KeyInfo` and `xades:CertificateValues` candidates, and
+    /// the trust store's intermediates. Real dossiers carry the TSA's own
+    /// issuing CA in the signature's `CertificateValues` rather than inside the
+    /// token, so a token whose certificate set holds only the TSA leaf still
+    /// chains. Anchors still come from the trust store alone.
     pub extra_certificates: &'a [ParsedCertificate],
     pub limits: &'a VerifyLimits,
     pub allow_legacy_algorithms: bool,
@@ -332,7 +336,8 @@ pub fn verify_token(input: &TokenInput<'_>) -> TokenOutcome {
         );
         let (code, status) = match path.code {
             CheckCode::CertPathOk => (CheckCode::TimestampTsaPathOk, CheckStatus::Passed),
-            CheckCode::CertPathUnknown => {
+            // No anchors, or a search that gave up: the tool does not know.
+            CheckCode::CertPathUnknown | CheckCode::CertPathSearchExhausted => {
                 (CheckCode::TimestampTsaPathUnknown, CheckStatus::Unknown)
             }
             _ => (CheckCode::TimestampTsaPathUntrusted, CheckStatus::Failed),
@@ -387,16 +392,16 @@ pub fn verify_token(input: &TokenInput<'_>) -> TokenOutcome {
 
 /// The one check that summarises a token, so a signature's own check list says
 /// what became of each of its timestamps without repeating the detail.
+///
+/// **This check is never `failed`.** A timestamp that does not verify — for any
+/// reason, from a malformed token to a TSA chain that reaches no anchor —
+/// supplies no proof that the signature existed at a given time. It says
+/// nothing about the signature itself, so under ETSI EN 319 102-1 it yields
+/// INDETERMINATE rather than TOTAL-FAILED: the missing proof is missing
+/// information, not evidence of forgery. The token keeps its own `failed`
+/// checks and `verified: false`, and the validation time falls back to `--at`
+/// or the clock.
 pub fn summary_check(checks: &[Check]) -> Check {
-    if checks
-        .iter()
-        .any(|check| check.status == CheckStatus::Failed)
-    {
-        return Check::failed(
-            CheckCode::TimestampVerified,
-            "the timestamp token did not verify; see the token's own checks",
-        );
-    }
     if checks
         .iter()
         .all(|check| check.status == CheckStatus::Passed)
@@ -404,6 +409,15 @@ pub fn summary_check(checks: &[Check]) -> Check {
         return Check::passed(
             CheckCode::TimestampVerified,
             "the timestamp token verified against a configured trust anchor",
+        );
+    }
+    if checks
+        .iter()
+        .any(|check| check.status == CheckStatus::Failed)
+    {
+        return Check::unknown(
+            CheckCode::TimestampVerified,
+            "the timestamp token did not verify, so it proves nothing about when this signature existed; see the token's own checks",
         );
     }
     Check::unknown(
@@ -871,9 +885,12 @@ mod tests {
         assert!(outcome.report.gen_time.is_some());
         // Sub-second accuracy widens the window to a whole second.
         assert_eq!(outcome.report.accuracy_seconds, Some(1));
+        // The token's own checks stay `failed`; the check the signature sees
+        // is `unknown`, because a token that did not verify proves nothing
+        // either way about the signature.
         assert_eq!(
             summary_check(&outcome.report.checks).status,
-            CheckStatus::Failed
+            CheckStatus::Unknown
         );
     }
 
@@ -1089,13 +1106,21 @@ mod tests {
     }
 
     #[test]
-    fn the_summary_reports_the_worst_check() {
+    fn the_summary_is_never_failed() {
         let passed = vec![Check::passed(CheckCode::TimestampImprintOk, "ok")];
         let unknown = vec![Check::unknown(CheckCode::TimestampTsaPathUnknown, "?")];
         let failed = vec![Check::failed(CheckCode::TimestampImprintMismatch, "no")];
+        let mixed = vec![
+            Check::passed(CheckCode::TimestampImprintOk, "ok"),
+            Check::failed(CheckCode::TimestampTsaPathUntrusted, "no"),
+        ];
         assert_eq!(summary_check(&passed).status, CheckStatus::Passed);
         assert_eq!(summary_check(&unknown).status, CheckStatus::Unknown);
-        assert_eq!(summary_check(&failed).status, CheckStatus::Failed);
+        // A failed token yields `unknown` at the signature level: it supplies
+        // no proof of existence, which is missing information rather than a
+        // finding against the signature (ETSI EN 319 102-1).
+        assert_eq!(summary_check(&failed).status, CheckStatus::Unknown);
+        assert_eq!(summary_check(&mixed).status, CheckStatus::Unknown);
     }
 
     #[test]

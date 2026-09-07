@@ -621,7 +621,7 @@ Reported verbatim under `data.limits` in `verify --json`.
 | `max_transforms_per_reference` | 8 | Transforms in one reference's chain. |
 | `max_certificates` | 64 | Certificates admitted into path building. |
 | `max_timestamps_per_signature` | 8 | `xades:SignatureTimeStamp` elements processed per signature. |
-| `max_chain_length` | 8 | Certificates in one candidate path. |
+| `max_chain_length` | 8 | Certificates in one candidate path, inclusive: a path of exactly this many certificates that ends at an anchor is accepted. |
 | `max_paths` | 32 | Completed candidate paths explored. |
 | path search expansions | 256 (fixed) | Total candidates visited during path building, successful or not. Not configurable. |
 | `ds:KeyInfo` candidates | 16 (fixed) | Certificates tried as the signer. |
@@ -703,20 +703,42 @@ order, and every step must pass before the token counts as verified:
 | 4 | `timestamp_tsa_certificate_ok` | The TSA certificate carries `extendedKeyUsage` with `id-kp-timeStamping` and nothing else, marked critical (RFC 3161 section 2.3). |
 | 5 | `timestamp_tsa_path_ok` | That certificate chains to a configured anchor **at `genTime`**, because a timestamp asserts existence at that instant. |
 
+The TSA path is built from the union of the token's own `SignedData`
+certificates, the enclosing signature's `ds:KeyInfo` and
+`xades:CertificateValues` candidates, and the trust store's intermediates,
+deduplicated by DER. Real dossiers put the TSA's issuing CA in the
+*signature's* `CertificateValues` and only the TSA leaf inside the token, so a
+verifier that looked in the token alone would report a chain break that is not
+there. Anchors still come from the trust store alone.
+
 A `xades:SignatureTimeStamp` covers the canonicalized `ds:SignatureValue`
 **element** — start tag, content, end tag — not the Base64 text and not its
 digest. The algorithm is the one the timestamp's own
 `ds:CanonicalizationMethod` names, defaulting to inclusive C14N 1.0 as XAdES
-prescribes. The `xades:Include`, `ReferenceInfo`, `HashDataInfo` and
-`XMLTimeStamp` forms select other data and are **not** implemented: a timestamp
-using one is reported as `timestamp_not_checked` (`skipped`) rather than
-checked against the wrong bytes. The same applies to a timestamp with no
-decodable token, with more than one token, or naming a canonicalization
-algorithm this build does not implement.
+prescribes.
+
+Data selection comes in two forms. The **implicit** form has no selection
+child at all and means the `ds:SignatureValue` element. The **explicit**
+`xades:Include` form (EN 319 132-1, XAdES 1.3.2 and 1.4.1) is accepted for
+exactly the case where it says the same thing: every `Include` is a
+same-document `#id` reference resolving, through the validated ID space, to
+this signature's own `ds:SignatureValue`. Several such `Include` elements are
+equivalent to one. The `referencedData` attribute is not consulted, because for
+this target it cannot change what is digested.
+
+Everything else is reported as `timestamp_not_checked` (`skipped`) rather than
+digested over bytes the timestamp did not mean: an `Include` naming any other
+element or failing to resolve, the `ReferenceInfo`, `HashDataInfo` and
+`XMLTimeStamp` forms, a timestamp with no decodable token or with more than
+one, and one naming a canonicalization algorithm this build does not
+implement.
 
 `timestamp_verified` summarises one token inside the signature's own check
-list: `passed` when every step passed, `failed` when any failed, `unknown`
-otherwise. Per signature, `signature_timestamp_present` or
+list: `passed` when every step passed, and **`unknown` otherwise — never
+`failed`**. The token keeps its own `failed` checks; see
+[Verdicts](#verdicts) for why the summary does not.
+
+Per signature, `signature_timestamp_present` or
 `signature_timestamp_absent` is emitted, always `unknown`, because a timestamp
 proves existence and not validity.
 
@@ -760,7 +782,7 @@ result.
 | `xades:CertificateValues/xades:EncapsulatedX509Certificate`, and any other encapsulated certificate under the signature's XAdES properties | `certificate_values` | Untrusted path candidates. This is where real dossiers carry the intermediates, and usually the root. |
 | A non-self-signed file in the trust store | `trust_store` | Untrusted path candidate. |
 | A self-signed file in the trust store | `trust_store` | **Trust anchor.** |
-| The `certificates` set of an RFC 3161 token | `timestamp_token` | Untrusted path candidates for that token's TSA certificate only. |
+| The `certificates` set of an RFC 3161 token | `timestamp_token` | Untrusted path candidates for that token's TSA certificate. The signature's own candidates and the store's intermediates are offered alongside them, because real dossiers carry the TSA's issuing CA in `xades:CertificateValues`. |
 
 The rule that matters: **only the trust store can supply an anchor.** A
 self-signed root found inside a dossier is a candidate like any other and can
@@ -786,8 +808,12 @@ implemented subset is:
   certificates whose names all match but which never reaches an anchor produces
   no completed paths at all while the search explores exponentially many
   prefixes. Exceeding the budget is the distinct outcome
-  `cert_path_search_exhausted` — the tool stopped looking, which is not the
-  same statement as "no path exists";
+  `cert_path_search_exhausted`, reported as `unknown` — the tool stopped
+  looking, which is not the same statement as "no path exists", and giving up
+  must not read as a finding against the signature;
+- completion checked before the length bound, so a chain of exactly
+  `max_chain_length` certificates that reaches an anchor is a path rather than
+  one the search refused to look at;
 - every link's signature verified with the issuer's public key under the
   algorithm allowlist above;
 - every certificate's validity window checked against the validation time;
@@ -826,11 +852,30 @@ exactly what is processed: `basicConstraints`, `keyUsage`, `nameConstraints`,
 `cert_unsupported_critical_extension`, including `certificatePolicies` (policy
 processing is not implemented), QCStatements, `cRLDistributionPoints`, and
 `authorityInfoAccess` — all of which are non-critical in practice, so marking
-one critical is a request for processing this tool cannot honour. A **critical**
-`extendedKeyUsage` must contain `anyExtendedKeyUsage`: there is no standard EKU
-for document signing, and `id-kp-emailProtection` or `id-kp-clientAuth` do not
-authorise it, so anything else is `cert_key_usage_invalid`. A non-critical
-`extendedKeyUsage` is a hint the issuer chose not to enforce and is not checked.
+one critical is a request for processing this tool cannot honour.
+
+**Extended key usage.** RFC 5280 section 4.2.1.12 makes `extendedKeyUsage` a
+restriction on what the key may be used for **whether or not the extension is
+critical**, so criticality does not decide whether it is enforced on the
+end-entity certificate. An absent extension imposes no restriction and is
+accepted; a present one must name a purpose that covers this use:
+
+| Purpose | Accepted for a signing certificate | Accepted for a TSA certificate |
+| --- | --- | --- |
+| absent | yes | no — RFC 3161 requires the extension |
+| `anyExtendedKeyUsage` (2.5.29.37.0) | yes | no — RFC 3161 wants exactly `id-kp-timeStamping` |
+| `id-kp-documentSigning` (1.3.6.1.5.5.7.3.36, RFC 9336) | yes | no |
+| `id-kp-timeStamping` (1.3.6.1.5.5.7.3.8) | no | required, alone and critical |
+| `id-kp-emailProtection`, `serverAuth`, `clientAuth`, `codeSigning`, `OCSPSigning` | no | no |
+
+`id-kp-emailProtection` is deliberately refused: signing a message to a mailbox
+is not signing a document, and a certificate issued for that purpose was not
+issued for this one. Anything not covered is `cert_key_usage_invalid`, critical
+or not. A **CA** certificate's `extendedKeyUsage` is enforced only when it is
+marked critical: RFC 5280 gives no path-processing rule for EKU in a CA
+certificate, real eIDAS hierarchies carry advisory sets there, and refusing
+them would reject chains that are correct — but a CA that marks the extension
+critical has asked to be taken at its word, and is.
 
 **Malformed is not absent.** An extension whose bytes do not decode as its OID
 says they should is `cert_malformed` (failed). Treating a decoding failure as
@@ -1114,7 +1159,7 @@ the tool could not determine the answer and is never a substitute for `failed`.
 | `cert_path_ok` | `passed` | A path to a configured anchor was built and every rule above holds. |
 | `cert_path_unknown` | `unknown` | No trust anchors were configured. |
 | `cert_path_untrusted` | `failed` | No path to a configured anchor exists. The message says how many candidates were considered and names the issuer CN of the highest certificate reached, which is the public CA name a caller needs to add to the store. |
-| `cert_path_search_exhausted` | `failed` | Path building hit its expansion budget. The tool stopped looking; this is not a statement that no path exists. |
+| `cert_path_search_exhausted` | `unknown` | Path building hit its expansion budget. The tool stopped looking, which is not a statement that no path exists, so it does not make a signature `invalid`. |
 | `cert_path_length_exceeded` | `failed` | A CA is followed by more intermediates than its `pathLenConstraint` allows. |
 | `cert_expired` | `failed` | A certificate in the path had expired at the validation time. |
 | `cert_not_yet_valid` | `failed` | One was not yet valid then. |
@@ -1139,7 +1184,7 @@ the tool could not determine the answer and is never a substitute for `failed`.
 | `timestamp_tsa_path_untrusted` | `failed` | It does not, under the same path rules as a signer chain. |
 | `timestamp_tsa_path_unknown` | `unknown` | No trust anchors were configured. |
 | `timestamp_before_signing_time` | `unknown` | The token's `genTime` precedes the claimed `xades:SigningTime` by more than the declared accuracy. Reported, never a failure: the claim is unauthenticated. |
-| `timestamp_verified` | `passed` / `failed` / `unknown` | Summarises one token in the signature's own check list. `passed` only when every check on that token passed. |
+| `timestamp_verified` | `passed` / `unknown` | Summarises one token in the signature's own check list. `passed` only when every check on that token passed; `unknown` for every other outcome, including a token that failed. Never `failed`: see [Verdicts](#verdicts). |
 | `archive_timestamp_present` | `skipped` | An `xades:ArchiveTimeStamp` is present and is out of scope for this release. |
 | `dossier_timestamp_not_validated` | `skipped` | Dossier-level `es:TimeStamp` elements are present; validating them is M3. |
 
@@ -1152,12 +1197,27 @@ there are no signatures — there is nothing to be valid. The terminology follow
 ETSI EN 319 102-1: `valid` is TOTAL-PASSED, `invalid` is TOTAL-FAILED, and
 `indeterminate` is INDETERMINATE.
 
+**Only checks about the signature itself can make it `invalid`:** the
+reference digests, the signature value, the algorithm policy, the reference
+scope, the `SigningCertificate` binding, and the signer's own certificate
+path. A signature timestamp is different. A token that does not verify — for
+any reason, from a malformed token to a TSA chain that reaches no anchor —
+supplies no proof that the signature existed at a given time. That is missing
+information, not evidence against the signature, so under ETSI EN 319 102-1 it
+yields INDETERMINATE rather than TOTAL-FAILED. Concretely: the token's own
+`checks` keep their `failed` entries and its `verified` stays `false`, the
+signature-level `timestamp_verified` is `unknown`, the validation time falls
+back to `--at` or the clock, and the verdict is capped at `indeterminate`
+unless something about the signature itself fails. A trust store that does not
+know a timestamp authority's CA is a gap in the store, not a forged dossier.
+
+The same reasoning makes `cert_path_search_exhausted` `unknown`: the tool
+stopped looking rather than concluded.
+
 Because `revocation_not_checked` is always emitted as a blocking `skipped`
 check, `valid` is unreachable in this release. That is the correct and honest
 outcome for a verifier that does not know whether a certificate was revoked,
-and it is asserted by a test. A failed timestamp check makes a signature
-`invalid`: a token that does not verify is a positive finding about the file,
-not an absence of information.
+and it is asserted by a test.
 
 ## Extraction policy
 

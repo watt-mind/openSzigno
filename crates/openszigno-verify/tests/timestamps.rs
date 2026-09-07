@@ -225,9 +225,12 @@ fn a_token_over_other_data_fails_the_imprint() {
         CheckCode::TimestampImprintMismatch,
         CheckStatus::Failed,
     );
-    assert_check(&report, CheckCode::TimestampVerified, CheckStatus::Failed);
+    // The token keeps its own failed check, but a timestamp that does not
+    // verify says nothing about the signature: it supplies no proof of
+    // existence, so the signature is indeterminate, not invalid.
+    assert_check(&report, CheckCode::TimestampVerified, CheckStatus::Unknown);
     assert!(!report.signatures[0].timestamps[0].verified);
-    assert_eq!(report.verdict, Verdict::Invalid);
+    assert_eq!(report.verdict, Verdict::Indeterminate);
 }
 
 /// RFC 3161 requires the TSA certificate to carry a critical
@@ -243,7 +246,8 @@ fn a_tsa_without_the_timestamping_eku_fails() {
         CheckCode::TimestampTsaCertificateInvalid,
         CheckStatus::Failed,
     );
-    assert_check(&report, CheckCode::TimestampVerified, CheckStatus::Failed);
+    assert_check(&report, CheckCode::TimestampVerified, CheckStatus::Unknown);
+    assert_eq!(report.verdict, Verdict::Indeterminate);
 }
 
 /// An `extendedKeyUsage` that is present but names another purpose is just as
@@ -311,6 +315,14 @@ fn a_tsa_chain_that_reaches_no_anchor_is_untrusted() {
         CheckStatus::Failed,
     );
     assert!(!report.signatures[0].timestamps[0].verified);
+    // Nothing about the signature itself failed, so an unanchored TSA leaves
+    // the verdict indeterminate: a trust store that does not know the TSA's CA
+    // is a gap in the store, not a forged dossier.
+    assert_eq!(report.verdict, Verdict::Indeterminate);
+    assert_eq!(
+        report.signatures[0].validation_time_source,
+        ValidationTimeSource::AtFlag
+    );
 }
 
 /// With no trust store there is nothing to say, and `unknown` is the honest
@@ -359,7 +371,9 @@ fn a_truncated_token_fails_to_parse() {
         CheckCode::TimestampTokenParsed,
         CheckStatus::Failed,
     );
-    assert_eq!(report.verdict, Verdict::Invalid);
+    // A token nobody can parse is missing information, not a finding about the
+    // signature.
+    assert_eq!(report.verdict, Verdict::Indeterminate);
 }
 
 /// Garbage in an `EncapsulatedTimeStamp` must be refused without panicking,
@@ -387,25 +401,6 @@ fn garbage_tokens_never_panic() {
         );
         assert_ne!(report.verdict, Verdict::Valid);
     }
-}
-
-/// A timestamp that selects its data with `xades:Include` uses a form this
-/// build does not implement, and is reported as unchecked rather than verified
-/// against the wrong bytes.
-#[test]
-fn an_unsupported_data_selection_form_is_not_checked() {
-    let pki = good_pki();
-    let signature = signature_with_timestamp(&pki, |timestamp| timestamp.include_element = true);
-    let xml = dossier(signature, &pki.signer_key);
-    let report = run_at(&xml, vec![pki.root_der.clone()], "2020-06-02T00:00:00Z");
-
-    assert_check(
-        &report,
-        CheckCode::TimestampNotChecked,
-        CheckStatus::Skipped,
-    );
-    assert!(!report.signatures[0].timestamps[0].verified);
-    assert_ne!(report.verdict, Verdict::Valid);
 }
 
 /// A `genTime` well before the claimed `SigningTime` is contradictory, but the
@@ -530,4 +525,119 @@ fn timestamp_shapes_this_build_does_not_process_are_not_checked() {
         assert!(!report.signatures[0].timestamps[0].verified);
         assert_ne!(report.verdict, Verdict::Valid);
     }
+}
+
+/// Real dossiers carry the TSA's issuing CA in the *signature's*
+/// `xades:CertificateValues` and put only the TSA leaf inside the token, so
+/// the path must be built from the union of both sources. Anchors still come
+/// only from the trust store.
+#[test]
+fn the_tsa_intermediate_may_come_from_the_signature_certificate_values() {
+    let root_key = rsa_key(keys::ROOT_RSA2048);
+    let intermediate_key = rsa_key(keys::INTERMEDIATE_RSA2048);
+    let signer_key = rsa_key(keys::SIGNER_RSA2048);
+    let root = self_signed(
+        &CertSpec::ca("openSzigno Test Root", BasicConstraints::Unconstrained),
+        &root_key,
+    );
+    let tsa_ca = issued_by(
+        &CertSpec::ca("openSzigno Test TSA CA", BasicConstraints::Unconstrained),
+        &intermediate_key,
+        &root,
+        &root_key,
+    );
+    let signer = issued_by(
+        &CertSpec::signer("openSzigno Test Signer"),
+        &signer_key,
+        &root,
+        &root_key,
+    );
+    let mut tsa_spec = CertSpec::signer("openSzigno Test TSA");
+    tsa_spec.custom_extensions = vec![extended_key_usage_extension(&[ID_KP_TIME_STAMPING], true)];
+    let tsa = issued_by(
+        &tsa_spec,
+        &rsa_key(keys::THIRD_RSA2048),
+        &tsa_ca,
+        &intermediate_key,
+    );
+
+    let mut signature = document_signature(vec![signer.der.clone()]);
+    // The issuing CA is in the signature's unsigned CertificateValues, and the
+    // token carries the TSA leaf alone.
+    signature.certificate_values = vec![tsa_ca.der.clone()];
+    let mut timestamp = TimestampSpec::new(
+        rsa_key(keys::THIRD_RSA2048),
+        tsa.der.clone(),
+        "2020-06-01T09:00:00Z",
+    );
+    timestamp.token_certificates = Vec::new();
+    signature.timestamp = Some(timestamp);
+    let xml = dossier(signature, &signer_key);
+    let report = run_at(&xml, vec![root.der.clone()], "2020-06-02T00:00:00Z");
+
+    assert_check(&report, CheckCode::TimestampTsaPathOk, CheckStatus::Passed);
+    assert_check(&report, CheckCode::TimestampVerified, CheckStatus::Passed);
+    assert!(report.signatures[0].timestamps[0].verified);
+    // The chain reports where each certificate came from, so a caller can see
+    // that the CA was not in the token.
+    let sources: Vec<String> = report.signatures[0].timestamps[0]
+        .chain
+        .iter()
+        .map(|entry| format!("{:?}", entry.source))
+        .collect();
+    assert!(
+        sources.iter().any(|source| source == "CertificateValues"),
+        "expected the CA to be credited to the signature's CertificateValues; got {sources:?}"
+    );
+}
+
+/// The same dossier without that CA anywhere cannot chain, which is what makes
+/// the previous test mean something.
+#[test]
+fn without_the_intermediate_the_tsa_path_is_untrusted() {
+    let root_key = rsa_key(keys::ROOT_RSA2048);
+    let intermediate_key = rsa_key(keys::INTERMEDIATE_RSA2048);
+    let signer_key = rsa_key(keys::SIGNER_RSA2048);
+    let root = self_signed(
+        &CertSpec::ca("openSzigno Test Root", BasicConstraints::Unconstrained),
+        &root_key,
+    );
+    let tsa_ca = issued_by(
+        &CertSpec::ca("openSzigno Test TSA CA", BasicConstraints::Unconstrained),
+        &intermediate_key,
+        &root,
+        &root_key,
+    );
+    let signer = issued_by(
+        &CertSpec::signer("openSzigno Test Signer"),
+        &signer_key,
+        &root,
+        &root_key,
+    );
+    let mut tsa_spec = CertSpec::signer("openSzigno Test TSA");
+    tsa_spec.custom_extensions = vec![extended_key_usage_extension(&[ID_KP_TIME_STAMPING], true)];
+    let tsa = issued_by(
+        &tsa_spec,
+        &rsa_key(keys::THIRD_RSA2048),
+        &tsa_ca,
+        &intermediate_key,
+    );
+
+    let mut signature = document_signature(vec![signer.der.clone()]);
+    let mut timestamp = TimestampSpec::new(
+        rsa_key(keys::THIRD_RSA2048),
+        tsa.der.clone(),
+        "2020-06-01T09:00:00Z",
+    );
+    timestamp.token_certificates = Vec::new();
+    signature.timestamp = Some(timestamp);
+    let xml = dossier(signature, &signer_key);
+    let report = run_at(&xml, vec![root.der.clone()], "2020-06-02T00:00:00Z");
+
+    assert_check(
+        &report,
+        CheckCode::TimestampTsaPathUntrusted,
+        CheckStatus::Failed,
+    );
+    assert_eq!(report.verdict, Verdict::Indeterminate);
 }

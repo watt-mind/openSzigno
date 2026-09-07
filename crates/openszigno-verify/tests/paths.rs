@@ -284,11 +284,14 @@ fn path_building_gives_up_rather_than_exploring_forever() {
         started.elapsed() < std::time::Duration::from_secs(5),
         "the bounded search should finish quickly"
     );
+    // Giving up is `unknown`, not `failed`: the tool stopped looking, which is
+    // not the same as concluding that no path exists.
     assert_check(
         &report,
         CheckCode::CertPathSearchExhausted,
-        CheckStatus::Failed,
+        CheckStatus::Unknown,
     );
+    assert_ne!(report.verdict, openszigno_verify::Verdict::Invalid);
 }
 
 // ---------------------------------------------------------------------------
@@ -472,26 +475,60 @@ fn signer_with_extensions(extensions: Vec<rcgen::CustomExtension>) -> VerifyRepo
     run(&xml, vec![root.der], Vec::new())
 }
 
-/// A critical extendedKeyUsage must permit the use. There is no standard EKU
-/// for document signing, and emailProtection does not authorise it, so only
-/// anyExtendedKeyUsage is accepted.
+/// An `extendedKeyUsage` on the signing certificate restricts what the key may
+/// be used for whether or not it is marked critical (RFC 5280 section
+/// 4.2.1.12), so a set that does not cover document signing fails either way.
+/// `id-kp-documentSigning` (RFC 9336) and `anyExtendedKeyUsage` are what this
+/// tool accepts; `emailProtection`, `serverAuth`, `clientAuth`, `codeSigning`
+/// and `OCSPSigning` are unrelated purposes.
 #[test]
-fn a_critical_extended_key_usage_must_permit_signing() {
-    let email = signer_with_extensions(vec![extended_key_usage_extension(
-        &["1.3.6.1.5.5.7.3.4"],
-        true,
-    )]);
-    assert_check(&email, CheckCode::CertKeyUsageInvalid, CheckStatus::Failed);
+fn an_extended_key_usage_must_permit_document_signing() {
+    for critical in [true, false] {
+        for oid in [
+            "1.3.6.1.5.5.7.3.4", // emailProtection
+            "1.3.6.1.5.5.7.3.1", // serverAuth
+            "1.3.6.1.5.5.7.3.2", // clientAuth
+            "1.3.6.1.5.5.7.3.3", // codeSigning
+            "1.3.6.1.5.5.7.3.9", // OCSPSigning
+            "1.3.6.1.5.5.7.3.8", // timeStamping, which is for a TSA only
+        ] {
+            let report =
+                signer_with_extensions(vec![extended_key_usage_extension(&[oid], critical)]);
+            assert_check(&report, CheckCode::CertKeyUsageInvalid, CheckStatus::Failed);
+        }
 
-    let any = signer_with_extensions(vec![extended_key_usage_extension(&["2.5.29.37.0"], true)]);
-    assert_check(&any, CheckCode::CertPathOk, CheckStatus::Passed);
+        let any = signer_with_extensions(vec![extended_key_usage_extension(
+            &["2.5.29.37.0"],
+            critical,
+        )]);
+        assert_check(&any, CheckCode::CertPathOk, CheckStatus::Passed);
 
-    // A non-critical EKU is a hint the issuer chose not to enforce.
-    let advisory = signer_with_extensions(vec![extended_key_usage_extension(
-        &["1.3.6.1.5.5.7.3.4"],
-        false,
-    )]);
-    assert_check(&advisory, CheckCode::CertPathOk, CheckStatus::Passed);
+        let document_signing = signer_with_extensions(vec![extended_key_usage_extension(
+            &["1.3.6.1.5.5.7.3.36"],
+            critical,
+        )]);
+        assert_check(
+            &document_signing,
+            CheckCode::CertPathOk,
+            CheckStatus::Passed,
+        );
+
+        // A set that also names an unrelated purpose is still permitted: the
+        // one that covers this use is present.
+        let mixed = signer_with_extensions(vec![extended_key_usage_extension(
+            &["1.3.6.1.5.5.7.3.4", "1.3.6.1.5.5.7.3.36"],
+            critical,
+        )]);
+        assert_check(&mixed, CheckCode::CertPathOk, CheckStatus::Passed);
+    }
+}
+
+/// An absent `extendedKeyUsage` imposes no restriction, which is the common
+/// shape for a qualified signing certificate.
+#[test]
+fn an_absent_extended_key_usage_permits_signing() {
+    let report = signer_with_extensions(Vec::new());
+    assert_check(&report, CheckCode::CertPathOk, CheckStatus::Passed);
 }
 
 /// QCStatements are non-critical in practice; a certificate that marks them
@@ -715,4 +752,100 @@ fn certificate_authorities_are_tried_last_but_are_tried() {
     assert_eq!(report.signatures[0].signing_certificate_index, Some(0));
     // It is still not a valid signer: a CA-only key usage forbids it.
     assert_check(&report, CheckCode::CertKeyUsageInvalid, CheckStatus::Failed);
+}
+
+/// A chain of exactly `max_chain_length` certificates is inside the limit, not
+/// outside it: the search must recognise that its last certificate is an anchor
+/// before it refuses to expand any further. A limit of three admits three.
+#[test]
+fn a_chain_of_exactly_the_maximum_length_is_accepted() {
+    let chain = three_link_chain();
+    let mut signature = document_signature(vec![chain.signer_der.clone()]);
+    signature.certificate_values = vec![chain.intermediate_der.clone()];
+    let spec = DossierSpec {
+        document_signature: Some(signature),
+        ..Default::default()
+    };
+    let xml = build(&spec, &[("doc", &chain.signer_key)]);
+
+    // signer, intermediate, root: exactly three.
+    let report = run_with_chain_limit(&xml, vec![chain.root_der.clone()], 3);
+    assert_check(&report, CheckCode::CertPathOk, CheckStatus::Passed);
+    assert_eq!(report.signatures[0].chain.len(), 3);
+
+    // One fewer, and the same path no longer fits. It is reported as untrusted
+    // rather than as a finding about the certificates themselves.
+    let report = run_with_chain_limit(&xml, vec![chain.root_der.clone()], 2);
+    assert_check(&report, CheckCode::CertPathUntrusted, CheckStatus::Failed);
+}
+
+/// Verify with a custom `max_chain_length`, so the boundary can be exercised
+/// without building an eight-certificate hierarchy.
+fn run_with_chain_limit(xml: &str, anchors: Vec<Vec<u8>>, max_chain_length: usize) -> VerifyReport {
+    let trust = MemoryTrustStore::new(anchors, Vec::new());
+    let revocation = NoRevocation;
+    let backend = RoxmltreeC14n;
+    let clock = FixedClock(parse_rfc3339("2020-06-01T00:00:00Z").expect("parses"));
+    let mut options = VerifyOptions::new(&clock, &trust, &revocation, &backend);
+    options.limits.max_chain_length = max_chain_length;
+    verify(xml.as_bytes(), &options).expect("the dossier parses structurally")
+}
+
+/// A CA's `extendedKeyUsage` is advisory unless it is marked critical: real
+/// eIDAS hierarchies carry sets there that no path-processing rule in RFC 5280
+/// covers, and refusing them would reject correct chains. A CA that marks the
+/// extension critical has asked to be taken at its word.
+#[test]
+fn a_ca_extended_key_usage_is_enforced_only_when_critical() {
+    let run_with_ca_extensions = |extensions: Vec<rcgen::CustomExtension>| {
+        let root_key = rsa_key(keys::ROOT_RSA2048);
+        let intermediate_key = rsa_key(keys::INTERMEDIATE_RSA2048);
+        let signer_key = rsa_key(keys::SIGNER_RSA2048);
+        let root = self_signed(
+            &CertSpec::ca("openSzigno Test Root", BasicConstraints::Unconstrained),
+            &root_key,
+        );
+        let mut ca = CertSpec::ca("openSzigno Test CA", BasicConstraints::Unconstrained);
+        ca.custom_extensions = extensions;
+        let intermediate = issued_by(&ca, &intermediate_key, &root, &root_key);
+        let signer = issued_by(
+            &CertSpec::signer("openSzigno Test Signer"),
+            &signer_key,
+            &intermediate,
+            &intermediate_key,
+        );
+        let mut signature = document_signature(vec![signer.der.clone()]);
+        signature.certificate_values = vec![intermediate.der.clone()];
+        let spec = DossierSpec {
+            document_signature: Some(signature),
+            ..Default::default()
+        };
+        let xml = build(&spec, &[("doc", &signer_key)]);
+        run(&xml, vec![root.der.clone()], Vec::new())
+    };
+
+    // Advisory: not enforced, however unrelated the purpose.
+    let advisory = run_with_ca_extensions(vec![extended_key_usage_extension(
+        &["1.3.6.1.5.5.7.3.1"],
+        false,
+    )]);
+    assert_check(&advisory, CheckCode::CertPathOk, CheckStatus::Passed);
+
+    // Critical and unrelated: refused.
+    let critical = run_with_ca_extensions(vec![extended_key_usage_extension(
+        &["1.3.6.1.5.5.7.3.1"],
+        true,
+    )]);
+    assert_check(
+        &critical,
+        CheckCode::CertKeyUsageInvalid,
+        CheckStatus::Failed,
+    );
+
+    // Critical and covering document signing: accepted.
+    let permitted = run_with_ca_extensions(vec![extended_key_usage_extension(
+        &["1.3.6.1.5.5.7.3.36"],
+        true,
+    )]);
+    assert_check(&permitted, CheckCode::CertPathOk, CheckStatus::Passed);
 }
