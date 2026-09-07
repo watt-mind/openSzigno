@@ -240,6 +240,67 @@ fn the_signature_object_carries_the_phase_two_fields() {
     );
 }
 
+/// The per-document coverage inventory is part of the JSON contract: every
+/// modelled document, in source order, with what covers it. Nothing here
+/// signs anything, so every document is `uncovered` and the run is capped at
+/// `indeterminate`.
+#[test]
+fn the_document_coverage_inventory_is_reported() {
+    let output = run(&[
+        "verify",
+        fixture("plain-base64.es3").to_str().unwrap(),
+        "--json",
+    ]);
+    assert_eq!(status(&output), 7);
+    let response = parse_json(&output);
+    let documents = response["data"]["documents"]
+        .as_array()
+        .expect("the document inventory is an array");
+    assert_eq!(documents.len(), 1);
+    assert_eq!(documents[0]["index"], 0);
+    assert_eq!(documents[0]["coverage"], "uncovered");
+    assert_eq!(documents[0]["nested_dossier"], false);
+    assert_eq!(documents[0]["covered_by"], Value::Array(Vec::new()));
+    assert!(documents[0]["object_ref"].is_string());
+    // A title never appears in the report.
+    assert!(documents[0]["title"].is_null());
+    assert_eq!(response["data"]["counts"]["documents_covered"], 0);
+    assert_eq!(response["data"]["counts"]["documents_uncovered"], 1);
+    assert_eq!(response["data"]["counts"]["documents_undetermined"], 0);
+    let codes: Vec<&str> = response["data"]["checks"]
+        .as_array()
+        .expect("an array")
+        .iter()
+        .map(|check| check["code"].as_str().expect("a string"))
+        .collect();
+    assert!(codes.contains(&"documents_uncovered"));
+}
+
+/// A document covered only by a signature that does not verify is
+/// `covered_unverified`: coverage and cryptographic outcome are separate
+/// answers, and the report keeps them apart.
+#[test]
+fn a_document_covered_by_a_failing_signature_is_covered_unverified() {
+    let directory = scratch();
+    let path = directory.path().join("unverifiable.es3");
+    std::fs::write(&path, unverifiable_dossier()).expect("the fixture is written");
+    let output = run(&["verify", path.to_str().unwrap(), "--json"]);
+    let response = parse_json(&output);
+    let document = &response["data"]["documents"][0];
+    assert_eq!(document["coverage"], "covered_unverified");
+    assert_eq!(document["covered_by"][0]["signature_index"], 0);
+    assert_eq!(document["covered_by"][0]["via"], "direct");
+    assert_eq!(document["covered_by"][0]["verdict"], "invalid");
+}
+
+/// Human output carries one coverage line per document.
+#[test]
+fn human_output_reports_document_coverage() {
+    let output = run(&["verify", fixture("plain-base64.es3").to_str().unwrap()]);
+    let text = String::from_utf8(output.stdout).expect("UTF-8");
+    assert!(text.contains("document 0: uncovered"), "got: {text}");
+}
+
 /// Human output must state the verdict it reached and the revocation policy it
 /// reached it under, and must not call an invalid signature valid.
 #[test]

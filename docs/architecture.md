@@ -689,6 +689,77 @@ Every reference's resolved location is reported in
 `data.signatures[].references[].resolved_to` as a path of element names, so a
 caller can see exactly what was signed without any content leaving the tool.
 
+### Document coverage
+
+Reference scope answers "does this signature cover what it must". Document
+coverage answers the other half of the question: **is every document in this
+dossier covered by anything at all**. A dossier whose one signature is perfect
+and whose second document nothing signs is not a signed dossier, and until
+this section existed the tool reported that case as if it were.
+
+`verify` therefore reports, for every `es:Document` in `es:Documents` in source
+order, which signatures cover it and how. Coverage is decided by **resolved
+references** and the implemented [reference-scope](#reference-scope) rules.
+Placement alone never grants coverage: it selects which mandated set applies,
+and a signature whose mandated set is incomplete covers nothing, because the
+container's own rule for what that signature must reference was not met.
+
+| Route | What grants it |
+| --- | --- |
+| `direct` | A document-level signature placed in **that** `es:Document`, whose reference scope is complete and whose references resolve to that document's `es:DocumentProfile` and its payload `ds:Object`. |
+| `frame` | A dossier-level signature whose reference scope is complete and whose references resolve to `es:Documents`, or to an ancestor of it, so the document sits inside what was signed. |
+
+An element counts as covered when it is a resolved node or a descendant of
+one, which is exactly the rule the scope check applies. A document-level
+signature covers only the document it is placed in.
+
+The states, per document:
+
+| State | Meaning |
+| --- | --- |
+| `covered` | At least one covering signature's own verdict is `valid`. |
+| `covered_unverified` | Covered, but only by signatures whose verdict is `invalid` or `indeterminate`. The `reason` names the best verdict among them; those signatures' own entries carry the cryptographic finding. |
+| `uncovered` | No signature covers it under the two rules above. |
+| `undetermined` | A signature that might cover it could not be evaluated: an unsupported transform or canonicalization algorithm, an unresolved or external reference, a placement the format does not describe, a structural failure, or a signature the run never examined because the dossier is over `max_signatures`. Such a signature clouds the document it sits in, or every document when it sits on the frame. |
+| `not_modelled` | The core parser skipped this `es:Document` because it carries no `es:DocumentProfile`, so it is not one of the modelled documents and the mandated set for it is undefined. The `reason` is the parser's own `document_without_profile` warning. |
+
+Coverage is deliberately **separate from the cryptographic outcome**. A
+document covered by a signature that does not verify is `covered_unverified`,
+not `uncovered`: the content really is inside what that signature references,
+and whether the signature holds is a different question, answered by the
+signature's own verdict. The reverse holds too: coverage changes no
+signature's checks or verdict.
+
+An embedded dossier (`nested_dossier: true`) is payload like any other and is
+covered like any other. **Its own inner signatures are not verified by this
+run.** There is no implied recursion: `verify` opens no payload, so a covered
+embedded dossier means the outer container vouches for those bytes, and says
+nothing whatever about the signatures inside them. The report states this on
+the document's `reason`.
+
+Three dossier-level checks carry the result, so a caller reading only the
+check list still sees it:
+
+- `documents_all_covered` (`passed`) when every modelled document is
+  `covered`. It is `info`, not `passed`, when every document is covered but at
+  least one only by signatures that did not verify: the finding is already on
+  those signatures, and repeating it here would double-count it.
+- `documents_uncovered` (`unknown`), naming the count and the indexes.
+- `documents_coverage_undetermined` (`unknown`), naming the count.
+
+Both blocking checks are `unknown`, never `failed`. An unsigned sibling is
+**missing information about that document**, not evidence against a signature
+that did verify, which under ETSI EN 319 102-1 is INDETERMINATE rather than
+TOTAL-FAILED. The consequence is the point of the whole section: a dossier
+with an unsigned document cannot be `valid`, because a verdict of `valid` has
+to mean that the whole dossier's content is signed. Reading a per-signature
+`valid` as "this dossier is signed" is precisely the mistake a container
+format with sibling documents invites, and the tool must not invite it.
+
+A `not_modelled` document is listed and is in none of the three counts: it is
+not a modelled document, the format's mandated set for it is undefined, and
+the parser already reports it as a conformance warning.
+
 ### Algorithm policy
 
 The e-dossier container specification deliberately places no constraint on
@@ -1549,11 +1620,34 @@ verify anything.
       "signatures_valid": 0,
       "signatures_invalid": 0,
       "signatures_indeterminate": 1,
-      "timestamps": 0
+      "timestamps": 0,
+      "timestamps_verified": 0,
+      "documents_covered": 1,
+      "documents_uncovered": 1,
+      "documents_undetermined": 0
     },
     "checks": [
       { "code": "signature_count_within_limits", "status": "passed",
         "message": "the number of signatures is within the verification limits" }
+    ],
+    "documents": [
+      {
+        "index": 0,
+        "object_ref": "obj0",
+        "nested_dossier": false,
+        "coverage": "covered",
+        "covered_by": [
+          { "signature_index": 0, "via": "direct", "verdict": "valid" }
+        ]
+      },
+      {
+        "index": 1,
+        "object_ref": "obj1",
+        "nested_dossier": false,
+        "coverage": "uncovered",
+        "covered_by": [],
+        "reason": "no signature's resolved references include this document"
+      }
     ],
     "signatures": [
       {
@@ -1684,6 +1778,16 @@ verify anything.
 
 Notes on the shape:
 
+- `data.documents[]` is the per-document coverage inventory: one entry per
+  `es:Document` in `es:Documents`, in source order, with `index` and
+  `object_ref` from the structural model (`null` on a document the parser did
+  not model), `nested_dossier`, the `coverage` state, the signatures in
+  `covered_by`, and a `reason` when there is something to say. **No title ever
+  appears here.** `data.counts` gains `documents_covered`,
+  `documents_uncovered` and `documents_undetermined`, which count the states
+  of the same name only: a `covered_unverified` or `not_modelled` document is
+  in `data.documents` and in none of the three. See
+  [Document coverage](#document-coverage).
 - `checks` at the top level belongs to the dossier; each signature carries its
   own `checks`, ordered by pipeline stage, so a consumer reading top to bottom
   sees the same order the tool evaluated.
@@ -1780,6 +1884,9 @@ verify), and `revocation_not_checked` (the caller switched revocation off).
 | `no_signatures` | `unknown` | The dossier carries no `ds:Signature`, so there is nothing that could be valid. |
 | `signature_count_within_limits` | `passed` | The signature count is within `max_signatures`. |
 | `signature_limit_exceeded` | `failed` | More signatures than `max_signatures`; the excess is not examined. |
+| `documents_all_covered` | `passed` / `info` | Every modelled document is covered. `passed` when each is covered by a signature that verified; `info` when at least one is covered only by signatures that did not verify, because that finding is already on those signatures. See [Document coverage](#document-coverage). |
+| `documents_uncovered` | `unknown` | One or more modelled documents are covered by no signature; the message names the count and the indexes. Blocking, so a dossier with an unsigned document cannot be `valid`. `unknown`, not `failed`: an unsigned sibling is missing information, not evidence against a signature that did verify. |
+| `documents_coverage_undetermined` | `unknown` | The coverage of one or more modelled documents could not be determined, because a signature that might cover them could not be evaluated. The message names the count. Blocking, for the same reason. |
 | `sig_structure` | `passed` | `ds:SignedInfo`, `ds:SignatureValue`, the methods, and at least one reference are present and within limits. |
 | `sig_structure_invalid` | `failed` | One of those is missing, malformed, or over a limit. |
 | `sig_placement` | `passed` | The signature is at a placement the e-dossier format defines. |
@@ -1887,7 +1994,12 @@ whose references and signature value verify under the pinned policy, a signed
 anchor at the validation time, a fully verified `xades:SignatureTimeStamp`
 (without one, `signature_timestamp_absent` is `unknown` and blocks — nothing
 proves when the signature existed), and fresh non-revoked status for every
-non-anchor certificate on both the signer's and the TSA's chains.
+non-anchor certificate on both the signer's and the TSA's chains. It also
+needs **every modelled document covered by a signature that verified**: a
+dossier carrying a document nothing signs, or one whose coverage could not be
+determined, is capped at `indeterminate` by `documents_uncovered` or
+`documents_coverage_undetermined`, however sound its other signatures are.
+See [Document coverage](#document-coverage) for why.
 
 It does **not** need the dossier to carry nothing else. Evidence a signature
 carries beyond that minimum — unsigned qualifying properties this build does
@@ -1923,7 +2035,8 @@ the aggregation is:
 - **`valid`** when every signature is `valid` and nothing else failed;
 - **`invalid`** when any signature is `invalid`, or a container timestamp's
   imprint or token contradicts the container;
-- **`indeterminate`** otherwise.
+- **`indeterminate`** otherwise, which includes a dossier whose every
+  signature is `valid` but which holds a document no signature covers.
 
 **Only checks about the signature itself can make it `invalid`:** the
 reference digests, the signature value, the algorithm policy, the reference

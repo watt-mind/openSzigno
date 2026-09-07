@@ -474,6 +474,41 @@ impl ContainerTimestampSpec {
     }
 }
 
+/// A further `es:Document` inside `es:Documents`, for the coverage cases.
+pub struct ExtraDocumentSpec {
+    /// The `Id` of the payload `ds:Object`, which is also the profile's
+    /// `OBJREF`.
+    pub id: String,
+    pub payload: String,
+    /// Emit an `es:DocumentProfile`. Without one the core parser skips the
+    /// document and reports `document_without_profile`.
+    pub profile: bool,
+    /// Declare the embedded-dossier MIME type, so the model flags the
+    /// document `nested_dossier`.
+    pub nested_dossier: bool,
+}
+
+impl ExtraDocumentSpec {
+    pub fn new(id: &str) -> Self {
+        Self {
+            id: id.to_owned(),
+            payload: BASE64.encode("sibling"),
+            profile: true,
+            nested_dossier: false,
+        }
+    }
+
+    pub fn without_profile(mut self) -> Self {
+        self.profile = false;
+        self
+    }
+
+    pub fn nested(mut self) -> Self {
+        self.nested_dossier = true;
+        self
+    }
+}
+
 /// The whole synthetic dossier.
 pub struct DossierSpec {
     pub namespace: String,
@@ -483,6 +518,8 @@ pub struct DossierSpec {
     /// An extra copy of the payload object, placed outside the signed document,
     /// for the signature-wrapping cases.
     pub decoy_object: Option<(String, String)>,
+    /// Further documents, in source order after the signed one.
+    pub extra_documents: Vec<ExtraDocumentSpec>,
     /// Emit a bare `es:TimeStamp` with no data selection, which is the shape
     /// this build reports as not checked.
     pub dossier_timestamp: bool,
@@ -498,6 +535,7 @@ impl Default for DossierSpec {
             document_signature: None,
             dossier_signature: None,
             decoy_object: None,
+            extra_documents: Vec::new(),
             dossier_timestamp: false,
             container_timestamps: Vec::new(),
         }
@@ -944,6 +982,30 @@ fn render(spec: &DossierSpec) -> String {
 </es:DocumentProfile>\
 <ds:Object Id=\"{id}\">{payload}</ds:Object>\
 </es:Document>"
+        ));
+    }
+    for document in &spec.extra_documents {
+        let id = &document.id;
+        let profile = if document.profile {
+            let mime = if document.nested_dossier {
+                "<es:MIME-Type type=\"application\" subtype=\"nldossier2\" extension=\"dosszie\"/>"
+            } else {
+                "<es:MIME-Type type=\"text\" subtype=\"plain\" extension=\"txt\"/>"
+            };
+            format!(
+                "<es:DocumentProfile Id=\"prof-{id}\" OBJREF=\"{id}\">\
+<es:Title>sibling</es:Title>\
+<es:CreationDate>2020-01-01T00:00:00Z</es:CreationDate>\
+<es:Format>{mime}</es:Format>\
+<es:BaseTransform><es:Transform Algorithm=\"base64\"/></es:BaseTransform>\
+</es:DocumentProfile>"
+            )
+        } else {
+            String::new()
+        };
+        out.push_str(&format!(
+            "<es:Document>{profile}<ds:Object Id=\"{id}\">{}</ds:Object></es:Document>",
+            document.payload
         ));
     }
     for (index, timestamp) in spec.container_timestamps.iter().enumerate() {

@@ -1905,6 +1905,43 @@ fn write_human_success(command: &str, response: &Response) -> io::Result<()> {
                     display_json_string(&check["status"])
                 )?;
             }
+            // Document coverage: which documents the signatures actually
+            // cover. Kept apart from the verdict lines above, because "this
+            // content is signed" and "that signature verifies" are different
+            // questions. Titles never appear here.
+            for document in data["documents"].as_array().into_iter().flatten() {
+                let name = document["index"].as_u64().map_or_else(
+                    || "document (not modelled)".to_owned(),
+                    |index| format!("document {index}"),
+                );
+                let by: Vec<String> = document["covered_by"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(|entry| {
+                        format!(
+                            "signature {} {}",
+                            entry["signature_index"],
+                            display_json_string(&entry["via"])
+                        )
+                    })
+                    .collect();
+                let by = if by.is_empty() {
+                    String::new()
+                } else {
+                    format!(" by {}", by.join(", "))
+                };
+                writeln!(
+                    out,
+                    "{name}: {}{by}{}",
+                    display_json_string(&document["coverage"]),
+                    if document["nested_dossier"] == Value::Bool(true) {
+                        " (an embedded dossier; its own inner signatures are not verified by this run)"
+                    } else {
+                        ""
+                    }
+                )?;
+            }
             for signature in data["signatures"].as_array().into_iter().flatten() {
                 writeln!(
                     out,
