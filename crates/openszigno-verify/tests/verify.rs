@@ -14,8 +14,8 @@ use common::{
 };
 use openszigno_verify::codes::{CheckCode, CheckStatus};
 use openszigno_verify::{
-    FixedClock, MemoryTrustStore, NoRevocation, NoTrust, RoxmltreeC14n, Verdict, VerifyOptions,
-    VerifyReport, parse_rfc3339, verify,
+    CoverageState, FixedClock, MemoryTrustStore, NoRevocation, NoTrust, RoxmltreeC14n, Verdict,
+    VerifyOptions, VerifyReport, parse_rfc3339, verify,
 };
 use rcgen::{BasicConstraints, GeneralSubtree, IsCa, KeyUsagePurpose, NameConstraints};
 
@@ -524,6 +524,11 @@ fn unreferenced_signed_properties_fail_the_scope_check() {
 /// A wrapping attempt: a copy of the payload is placed in a second, unsigned
 /// document. The signature still covers the original, and `resolved_to` shows
 /// a caller exactly which node was signed.
+///
+/// Nothing here fails — the signature is exactly as sound as it was — but the
+/// second document is covered by no signature, so the dossier cannot be
+/// `valid`: a verdict of `valid` must mean the whole dossier's content is
+/// signed. See the architecture document's "Document coverage" section.
 #[test]
 fn a_duplicated_payload_elsewhere_does_not_change_what_was_signed() {
     let pki = simple_pki();
@@ -540,6 +545,10 @@ fn a_duplicated_payload_elsewhere_does_not_change_what_was_signed() {
         .as_deref()
         .expect("the reference resolved");
     assert_eq!(resolved, "Dossier/Documents/Document/Object");
+    // The decoy is a document nothing signs, which is now said out loud.
+    assert_eq!(report.documents[1].coverage, CoverageState::Uncovered);
+    assert_check(&report, CheckCode::DocumentsUncovered, CheckStatus::Unknown);
+    assert_ne!(report.verdict, Verdict::Valid);
 }
 
 /// The same payload ID in two places is a parse error before verification even
