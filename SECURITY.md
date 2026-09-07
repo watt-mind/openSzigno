@@ -37,8 +37,37 @@ Equally, a rejection is not proof of forgery: the pinned algorithm policy
 refuses SHA-1, RSA below 2048 bits, and other weak algorithms outright, which
 will reject some genuine older dossiers.
 
-The remaining verification phases and payload decryption are planned
-milestones, described in [docs/roadmap.md](docs/roadmap.md).
+`xades:ArchiveTimeStamp` is reported but not verified, and payload decryption
+is a planned milestone; both are described in
+[docs/roadmap.md](docs/roadmap.md).
+
+## Network exposure
+
+**openSzigno makes no network connection unless you pass `--online` to
+`verify`.** Without that flag it opens no socket at all, in any command, and
+the `openszigno-verify` crate structurally cannot: it performs no I/O except
+through injected traits, and revocation data reaches it only as bytes the
+caller already has.
+
+With `--online`, the CLI — never the verify crate — may connect to exactly one
+class of destination: **URLs found inside the certificates being validated**,
+namely the `cRLDistributionPoints` URIs and the `authorityInfoAccess`
+`id-ad-ocsp` access locations. Those are fields a CA wrote into a certificate
+that a trust anchor signed. No URL is ever taken from the dossier's XML, no
+reference in a dossier is ever dereferenced with or without the flag, and trust
+anchors and trusted lists are never fetched in any mode.
+
+The requests are `GET` for a CRL and a `POST` of an RFC 6960 `OCSPRequest` for
+OCSP. They carry no data about the dossier beyond the certificate serial number
+the OCSP request necessarily names, which is a privacy consideration worth
+knowing about: it tells the CA's responder that someone is validating that
+certificate now. The transport is bounded — 5 s to connect, 20 s per fetch,
+16 MiB per CRL, 64 KiB per OCSP response, at most three redirects and never to
+another host — and no proxy is taken from the environment; `--online-proxy` is
+the only way to introduce one. Everything fetched is judged by exactly the
+offline rules before it is believed, so `--online` can widen where evidence
+comes from and can never relax a rule.
+[docs/trust.md](docs/trust.md#online-fetching) has the details.
 
 ## Threat model
 
@@ -65,13 +94,18 @@ openSzigno aims to guarantee that a hostile input cannot:
   exactly one object on stdout and all diagnostics go to stderr;
 - cause openSzigno to disclose input paths, document titles, or payload
   content in an error message;
+- cause openSzigno to make a network connection without `--online`, or, with
+  it, to any destination other than a URL published inside a certificate being
+  validated — including through a redirect, an environment proxy, or a scheme
+  the certificate did not name;
 - cause `verify` to report a signature as anything better than it is: to
   resolve a reference to a node other than the one the container semantics
   require (signature wrapping), to reach the network or the filesystem while
   resolving a reference, to have a weak or unlisted algorithm accepted, to have
   a certificate path accepted without a configured anchor, to have revocation
   data believed that the issuing CA did not authorise (including a CRL or OCSP
-  response the *signer* embedded in the dossier's own `RevocationValues`), to
+  response the *signer* embedded in the dossier's own `RevocationValues`, or
+  one a server answered with under `--online`), to
   have expired or out-of-scope revocation data treated as covering the
   validation time, to have a trusted-list anchor accepted for a service that
   was not granted at the validation time, or to reach a `valid` verdict while
@@ -113,9 +147,11 @@ The safety mechanisms behind these are documented in
 
 ## Out of scope
 
-- The absence of decryption support, dossier-level `es:TimeStamp` validation,
-  or `--online` revocation fetching. That is documented behaviour and tracked
-  as roadmap milestones, not a vulnerability.
+- The absence of decryption support or of `xades:ArchiveTimeStamp` imprint
+  verification. Both are documented behaviour — see
+  [docs/architecture.md](docs/architecture.md#archive-timestamps) for why the
+  archive-timestamp imprint was left unimplemented rather than guessed at — and
+  are tracked as roadmap items, not vulnerabilities.
 - An `indeterminate` verdict on a dossier you believe is good, when the cause
   is trust or revocation material you did not supply. Supplying it is the
   operator's job, and [docs/trust.md](docs/trust.md) describes how.

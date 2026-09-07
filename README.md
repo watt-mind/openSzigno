@@ -317,16 +317,20 @@ Flags:
 | `--lotl FILE` | `verify` | EU list of trusted lists (XML). Its `PointersToOtherTSL` entries name the national lists' signing certificates, so one out-of-band certificate bootstraps every `--trust-list`. The LOTL is verified against `--trust-list-signer` first and contributes no trust anchors of its own. |
 | `--trust-list-signer CERT` | `verify` | Certificate, PEM or DER, that must have signed the `--lotl` and, absent one, every `--trust-list`. Obtain it out of band — for the EU list of trusted lists, from the Official Journal. Without any signer the lists are read but reported `trust_list_unverified`, which caps the verdict at `indeterminate`. |
 | `--revocation-store DIR` | `verify` | Directory of CRLs (`crls/`) and OCSP responses (`ocsp/`), DER or PEM, checked in addition to the signature's own `xades:RevocationValues`. A flat directory works too; each file is classified by what it contains. Nothing is ever fetched. |
-| `--no-revocation` | `verify` | Do not check revocation at all. Emits `revocation_not_checked`, which is blocking, so this produces **at most** `indeterminate`. |
+| `--no-revocation` | `verify` | Do not check revocation at all. Emits `revocation_not_checked`, which is blocking, so this produces **at most** `indeterminate`. Cannot be combined with `--online`. |
+| `--online` | `verify` | Fetch revocation data the offline material does not cover, from the CRL distribution points and AIA OCSP responders **the certificates themselves publish**. The only thing that makes openszigno touch the network. Bounded: 5 s to connect, 20 s per fetch, 16 MiB per CRL, 64 KiB per OCSP response, at most 3 redirects and never to another host, no proxy from the environment. Everything fetched is checked by exactly the offline rules, so `--online` can only add data, never relax one; a failed fetch is `revocation_status_unknown`, which blocks. |
+| `--online-cache DIR` | `verify` | Write everything `--online` fetched into `DIR` in the `--revocation-store` layout, so a later run with `--revocation-store DIR` and no `--online` reproduces the result with no network at all. Requires `--online`. |
+| `--online-proxy URL` | `verify` | Route `--online` fetches through this proxy. Without it no proxy is used: `HTTP_PROXY` and its relatives are deliberately ignored. Requires `--online`. |
 | `--at TIME` | `verify` | Validation time as an RFC 3339 timestamp. It overrides everything: without it, a signature whose timestamp verified completely is validated at that token's `genTime`, and otherwise at the current time. Use it to ask "was this chain valid on that day" and to get reproducible results. |
 | `--allow-legacy-algorithms` | `verify` | Admit SHA-1 digests and RSA-SHA1 signature methods **for diagnosis only**: they emit `algorithm_legacy_allowed` instead of a passed check, the verdict stays capped at `indeterminate`, and no failed check can become a passed one. MD5, HMAC, DSA, and RSA keys below 2048 bits stay refused. |
 | `-h`, `--help` | all commands | Print help as plain text. |
 | `-V`, `--version` | top level | Print the version as plain text. |
 
-`verify` performs no network access of its own, in any mode, and the
-`openszigno-verify` crate structurally cannot: reference resolution is strictly
-same-document, and the trust store, the trusted lists, and the revocation store
-are the only external material a run consults. Its algorithm policy is pinned —
+`verify` performs no network access unless you pass `--online`, and even then
+only the CLI does: the `openszigno-verify` crate structurally cannot open a
+socket in any mode, reference resolution is strictly same-document with or
+without the flag, and trust anchors and trusted lists are never fetched at all.
+Its algorithm policy is pinned —
 SHA-256/384/512 digests, RSA (PKCS#1 v1.5 and PSS) at 2048 bits or more, ECDSA
 P-256/P-384, Canonical XML 1.0 and Exclusive C14N 1.0 — and weak algorithms are
 refused rather than warned about.

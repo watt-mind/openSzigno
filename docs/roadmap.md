@@ -146,12 +146,11 @@ stays the `"detected"` placeholder until it does.
   now blocks without exception — and `valid` became reachable, with exit
   status `0`.
 
-Deliberately deferred to M3: `--online` fetching from CRL distribution points
-and AIA. Everything needed for it exists — the `RevocationSource` injection
-point, the store loader, the classifier — but the transport policy (timeouts,
-size caps, no cross-host redirects) is network code that belongs in the CLI and
-has not been written. `--online`, `online_crl`, and `online_ocsp` do not exist
-in this release.
+Deliberately deferred to M3, and shipped there: `--online` fetching from CRL
+distribution points and AIA. Everything needed for it already existed — the
+`RevocationSource` injection point, the store loader, the classifier — and only
+the transport policy was missing, which is network code that belongs in the
+CLI.
 
 #### Residual risks carried by M2
 
@@ -189,45 +188,115 @@ in this release.
   synthetic material generated in `tests/`; whether real Microsec dossiers
   verify is only knowable through the private opt-in smoke tests.
 - **The trusted-list reader is narrow on purpose.** Only `X509Certificate`
-  digital identities become anchors; `X509SubjectName` and `X509SKI` ones are
-  skipped, and scheme-level `Qualifications` extensions are not processed. A
-  real national list therefore contributes fewer anchors than a full
-  implementation would, which can only cost coverage, never grant trust.
-- **Pre-eIDAS service statuses are not translated.** `undersupervision` and
-  `accredited` are not treated as granted, so a signature made before 2016
-  under a supervised CA reports `certificate_not_qualified` rather than a
-  qualified status this build is not equipped to determine.
-- **Revocation depends entirely on what the caller supplies.** With no
-  `RevocationValues` in the dossier and no `--revocation-store`, the answer is
-  `revocation_status_unknown` and the verdict `indeterminate`. Until `--online`
-  ships, obtaining historically correct CRLs is manual work described in
-  [trust.md](trust.md).
+  digital identities become anchors, and scheme-level `Qualifications`
+  extensions are not processed. M3 added `X509SKI` and `X509SubjectName` as
+  *service identities* that can decide qualified status without granting trust;
+  see the M3 section below.
+- **Revocation depends on what the caller supplies.** With no
+  `RevocationValues` in the dossier, no `--revocation-store` and no `--online`,
+  the answer is `revocation_status_unknown` and the verdict `indeterminate`.
+  M3 added `--online`; the manual workflow in [trust.md](trust.md) is still the
+  reproducible one.
 
-### M3: dossier-level timestamps and online revocation fetching
+### M3: container timestamps and online revocation fetching — done
 
-M2 phase 2 built the RFC 3161 machinery — token parsing, imprint comparison,
-TSA certificate and path validation — and `xades:SignatureTimeStamp` uses it
-today. What remains for M3 is the dossier-level `es:TimeStamp`, whose imprint
-is taken over the elements it *references* rather than over a
-`ds:SignatureValue`, so it needs the reference-resolution and canonicalization
-step a signature already has. Until then such an element is counted and
-reported as `dossier_timestamp_not_validated` (`info`, at the dossier level),
-and `timestamps_present` stays presence-only in `inspect` and `list`.
+Shipped. Four things landed.
 
-`xades:ArchiveTimeStamp` belongs to the same milestone. It is reported as
-`archive_timestamp_present` (`info`) and not verified, so this release makes no
-claim about long-term (B-LTA) re-validation: a `valid` verdict says the
-signature's own evidence checks out at the stated validation time, not that its
-archival chain does.
+**Container `es:TimeStamp` validation.** A dossier-level or document-level
+`es:TimeStamp` carries `xades:TimeStampType` semantics, so it protects the
+elements its `xades:Include` children name rather than a `ds:SignatureValue`.
+Each `Include` is resolved on the parser's ID space, the reference-scope rule
+for timestamps is enforced (a dossier timestamp must cover `es:DossierProfile`
+and `es:Documents`; a document timestamp its `es:DocumentProfile` and the
+payload `ds:Object`), each included element is canonicalized with the declared
+method and the results concatenated in `Include` order, and the resulting
+imprint is checked against a token verified by the existing RFC 3161 machinery
+— TSA path, revocation and trust included. The outcome is reported at the
+dossier level as `dossier_timestamp_verified` / `dossier_timestamp_invalid` /
+`dossier_timestamp_not_checked` and the per-document `document_timestamp_*`
+set, in a new `data.timestamps` array with a `data.counts.timestamps_verified`
+count. None of it touches a signature's verdict. See
+[architecture.md](architecture.md#container-timestamps).
 
-The other M3 item is the revocation residual M2 phase 3 left: `--online`
-fetching of CRLs from a certificate's distribution points and of OCSP from its
-AIA. The verify crate must stay network-free, so the fetching belongs in the
-CLI behind the explicit flag, with a fixed timeout, a size cap, HTTP and HTTPS
-only as published, no redirects across hosts, and every fetched URL recorded in
-the output. Offline stays the default; `--online` can only add data, never
-relax a rule. The reported `revocation_source` values `online_crl` and
-`online_ocsp` are reserved for it and are not emitted today.
+**`--online` revocation fetching.** In the CLI only; the verify crate stays
+network-free and structurally cannot open a socket. CRLs come from the
+certificate's own distribution points and OCSP responses from its AIA
+responders, with the scheme exactly as published, a 5 s connect and 20 s total
+timeout, 16 MiB and 64 KiB size caps, at most three redirects and none across
+hosts, no proxy from the environment unless `--online-proxy` names one, and
+every fetched artefact validated by the offline code path before use. Nothing
+is fetched for a certificate the caller's own material already covers.
+`--online-cache DIR` writes what was fetched in the `--revocation-store`
+layout, so a later offline run reproduces the result. Sources are reported as
+`online_crl` / `online_ocsp`. See
+[architecture.md](architecture.md#online-revocation-fetching) and
+[trust.md](trust.md#online-fetching).
+
+**Trusted-list reader gaps.** `X509SKI` and `X509SubjectName` service digital
+identities are read and can decide qualified status over a chain some anchor
+already validated; neither becomes an anchor, and both are documented as weaker
+than a certificate identity. The pre-eIDAS statuses `undersupervision` and
+`accredited` count as granted for their historical window — a validation time
+before 2016-07-01, when eIDAS began to apply — with the honoured status named
+in the report. `ServiceName` prefers the `xml:lang="en"` entry.
+
+**Archive timestamps — deliberately not implemented.** `xades:ArchiveTimeStamp`
+is still `archive_timestamp_present` (`info`) and is not verified. The XAdES
+1.4.1 clause 8.2.1 imprint is under-specified in ways only interoperability
+evidence can settle — the namespace context each unsigned property is
+canonicalized in, how properties added after the timestamp are excluded,
+whether the qualifying-properties `ds:Object` participates, and how the 1.3.2
+and 1.4.1 forms differ in all three — and this project has no consented
+real-world B-LTA material to check an implementation against. A synthetic
+fixture generated by the same code that verifies it would only assert that the
+implementation agrees with itself. Reporting `archive_timestamp_verified` on
+that basis is exactly the unearned assurance this project refuses, so the
+element is named and left unverified, no `poe_times` are recorded, and an
+archive timestamp does not extend the validation-time reasoning. The reasoning
+is written out in
+[architecture.md](architecture.md#archive-timestamps).
+
+#### Residual risks carried by M3
+
+- **Archive timestamps are still unverified**, so this build makes no claim
+  about long-term (B-LTA) re-validation. Closing it needs consented real
+  archive-timestamped material or a second implementation to differ against.
+- **A container timestamp's imprint rule has no real-world evidence either.**
+  The `xades:Include` concatenation of XAdES 7.1.4.3.1 is unambiguous where the
+  archive-timestamp rule is not, and the scope rule follows the e-dossier
+  placement rules the signature pipeline already enforces — but no real
+  Microsec dossier carrying an `es:TimeStamp` has been verified with it. An
+  imprint mismatch on real material would surface as a dossier-level `invalid`,
+  which is the correct reading of "the container changed after it was stamped"
+  and would be the wrong reading of "this implementation misread the
+  specification". If field evidence shows the latter, the fix is the imprint
+  rule, not the severity.
+- **`--online` widens the attack surface to whatever a CA's server answers
+  with.** Every artefact is still signature-checked against an authorised
+  issuer before it is believed, so the worst a hostile responder can do is
+  refuse to answer — but the DER it serves is parsed, and parsing
+  attacker-supplied DER is the risk `--online` adds that offline verification
+  did not have. It is off by default for that reason.
+- **An OCSP request tells the responder who is asking about what.** The
+  `certID` names the certificate's serial number, so a CA can see that someone
+  is validating that certificate now. `--online-cache` plus a later offline run
+  is the workflow for anyone who cares.
+- **The `certID` uses SHA-256 only.** RFC 6960 makes SHA-1 the default and some
+  responders answer only about a SHA-1 `certID`. Those simply yield no usable
+  answer and the certificate stays `revocation_status_unknown`, which is the
+  same place it was before anything was fetched. Asking with SHA-1 would mean
+  this build *generating* a legacy digest, which is a different thing from
+  accepting one in an archived response it did not create.
+- **`X509SKI` and `X509SubjectName` identities are weaker evidence.** They can
+  recognise a certificate already in a validated chain but cannot state an
+  issuing relationship, and the subject-name comparison drops the ASN.1 string
+  tag because an RFC 4514 string cannot express it. Neither can grant trust;
+  both can only decide `qualified`, a legal category.
+- **The pre-eIDAS window is a judgement call.** Treating `undersupervision` and
+  `accredited` as granted before 2016-07-01 is this project's reading of the
+  eIDAS transition, not something a trusted list states. The honoured status is
+  always named so a reader can disagree with the reading and see exactly what
+  it rested on.
 
 ### M4: encrypted payload decryption
 
@@ -310,7 +379,8 @@ timestamp whose certificates have expired, one genuinely revoked certificate,
 one chain to a CA outside the trust set); 1 `indeterminate` capped by the
 legacy-algorithm flag. Real Microsec dossiers embed OCSP responses for the
 end-entity certificate only, so the CA CRLs must be supplied through the
-revocation store until online fetching lands in M3.
+revocation store, or fetched with `--online`, which M3 added. The corpus has
+not been re-measured with `--online`.
 
 ## Engineering items
 
@@ -343,12 +413,15 @@ These are not format milestones; they can land in any order.
   unsupported transform chains are rejected or skipped. A rejection is not
   evidence that a dossier is malformed; it may simply be out of the currently
   supported profile.
-- **No positive cryptographic assurance.** `verify` can now say that a
-  signature is `invalid`, which is a real finding, but it cannot say that one
-  is valid: revocation, timestamps, and the XAdES signing-certificate binding
-  are not checked. A dossier that parses cleanly, or that reaches
-  `indeterminate`, may still be forged. This is the single most important
-  thing for a downstream caller to internalise.
+- **`valid` is narrower than it sounds.** It says that every check this build
+  makes passed at the stated validation time, against trust and revocation
+  material the caller chose. It is not a statement that the signer is who the
+  certificate claims, and it is never a legal judgement. A dossier that reaches
+  `indeterminate` may still be forged. This is the single most important thing
+  for a downstream caller to internalise.
+- **Network exposure with `--online`.** Off by default. With it, the CLI
+  connects only to URLs published inside the certificates being validated, and
+  parses whatever DER those servers answer with. See `SECURITY.md`.
 
 ## Private-corpus policy for maintainers
 

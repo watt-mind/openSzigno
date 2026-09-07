@@ -14,13 +14,17 @@ described here is intended to be stable for a given `schema_version`.
 
 ## Not yet implemented
 
-The current release does not do the following. Both are planned milestones,
-described in [roadmap.md](roadmap.md); until the corresponding code exists, no
-output may claim or imply that anything they would have checked was checked.
+The current release does not do the following. Until the corresponding code
+exists, no output may claim or imply that anything it would have checked was
+checked.
 
-- dossier-level `es:TimeStamp` validation and `--online` fetching of CRL
-  distribution points and OCSP responders, both M3;
-- decryption of encrypted payloads (M4).
+- verification of `xades:ArchiveTimeStamp`, whose imprint rules M3 declined to
+  implement rather than guess at; see
+  [Archive timestamps](#archive-timestamps);
+- XAdES level detection (B-B, B-T, B-LT, B-LTA), scheme-level trusted-list
+  `Qualifications` extensions, and signature-policy processing;
+- decryption of encrypted payloads, the M4 milestone described in
+  [roadmap.md](roadmap.md).
 
 Permanent non-goals for this tool:
 
@@ -476,18 +480,28 @@ openszigno verify FILE [--json]
     --trust-list-signer CERT    # certificate that must have signed each list
     --revocation-store DIR      # CRLs and OCSP responses, offline
     --no-revocation             # switch revocation off; caps at indeterminate
+    --online                    # fetch what offline data does not cover
+    --online-cache DIR          # write what --online fetched, store-shaped
+    --online-proxy URL          # the only proxy --online will ever use
     --at <RFC3339>              # validation time; overrides any timestamp
     --allow-legacy-algorithms   # admit SHA-1 for diagnosis only
     --allow-namespace URI       # as on every other command, repeatable
 ```
 
-`--offline` is not a flag because offline is the only mode: the verifier
-performs no network access of its own, in any mode, and `openszigno-verify`
-structurally cannot — revocation data reaches it only through the injected
-`RevocationSource`. Reference resolution is strictly same-document, and the
-trust store, the trusted lists, and the revocation store are the only external
-material a run consults. [trust.md](trust.md) describes how to obtain and lay
-out all three.
+Offline is the default and `openszigno-verify` is network-free by
+construction: it opens no socket in any mode, and revocation data reaches it
+only through the injected `RevocationSource`. `--online` does not change that.
+It permits the **CLI** to fetch CRLs and OCSP responses that the caller's own
+material does not cover, from the URLs the certificates themselves publish, and
+to hand what comes back to the verifier through the same seam a
+`--revocation-store` file arrives through. See [Online
+revocation](#online-revocation-fetching).
+
+Reference resolution is strictly same-document in every mode — a `ds:Reference`
+or an `xades:Include` never reaches the network or the filesystem, with or
+without `--online` — and the trust store, the trusted lists, and the revocation
+store remain the only external material a run consults on its own.
+[trust.md](trust.md) describes how to obtain and lay out all of them.
 
 ### Verification pipeline
 
@@ -776,10 +790,87 @@ proves existence and not validity.
 token's declared accuracy, the two contradict each other, but `SigningTime` is
 an unauthenticated claim and a claim cannot condemn a verified token.
 
-Dossier-level `es:TimeStamp` elements protect the elements they reference, so
-verifying one needs the reference machinery M3 adds. They are counted and
-reported as `dossier_timestamp_not_validated` (`skipped`) rather than guessed
-at.
+Dossier-level and document-level `es:TimeStamp` elements protect the elements
+they reference; see [Container timestamps](#container-timestamps).
+
+### Container timestamps
+
+An `es:TimeStamp` is not a signature timestamp. The e-dossier specification
+gives it `xades:TimeStampType` semantics, so it protects **the elements its
+`xades:Include` children name**, and unlike a `SignatureTimeStamp` it has no
+implicit data selection to fall back on. Verifying one needs the reference
+resolution, the scope rule and the canonicalization a signature gets, which is
+what M3 added.
+
+| Step | What is required |
+| --- | --- |
+| Placement | A direct `es:TimeStamp` child of `es:Dossier` is a **dossier timestamp**; a direct child of `es:Document` is a **document timestamp**. Anywhere else, the format does not say what the element protects and nothing is digested. |
+| Resolution | Every `xades:Include/@URI` is `#id` and must resolve, through the ID space `openszigno-core` validated, to exactly one element. Nothing is ever dereferenced off the document. |
+| Scope | A dossier timestamp must cover `/es:Dossier/es:DossierProfile` **and** `/es:Dossier/es:Documents`. A document timestamp must cover its `es:DocumentProfile` **and** the document's payload `ds:Object`. An element is covered when an `Include` resolves to it or to an ancestor of it. |
+| Imprint | Each included element is canonicalized on its own with the algorithm the timestamp's `ds:CanonicalizationMethod` names — inclusive C14N 1.0 when it names none, as XAdES 7.1.4.3.1 prescribes — and the results are concatenated **in `Include` document order**. Reordering the `Include` elements changes the imprint, which is the point. |
+| Token | Verified by exactly the machinery a signature timestamp uses: the CMS parse, the imprint, the `SignerInfo` signature, the critical `id-kp-timeStamping` requirement, and a TSA path validated at `genTime`. |
+
+The scope rule matters for the same reason it does on a signature: without it,
+a timestamp that covers only the payload would attest to a document whose
+profile — its title, its declared type — could still be rewritten afterwards.
+
+**What a container timestamp decides.** Nothing about any signature. It is a
+statement about the container, so it is reported at the dossier level and is
+never folded into a signature's checks or verdict; a dossier that carries one
+produces exactly the same per-signature output as one that does not. It can
+lower the **dossier** verdict, and only in one direction:
+
+- `dossier_timestamp_invalid` / `document_timestamp_invalid` (**`failed`**)
+  when the token is evidence *against* the container: the imprint does not
+  match the elements it names, the token will not parse, the TSA's signature
+  does not verify, or the TSA certificate is not a timestamping certificate.
+  The dossier verdict becomes `invalid` while every signature keeps the verdict
+  its own evidence earned, and the JSON keeps the two apart.
+- `dossier_timestamp_verified` / `document_timestamp_verified` (`info`) when
+  every check on the token passed.
+- `dossier_timestamp_not_checked` / `document_timestamp_not_checked` (`info`)
+  for everything else, which is a gap in the caller's material rather than a
+  finding: no trust anchors were configured, an `Include` did not resolve, the
+  mandated elements are not covered, the data selection uses a form this build
+  does not implement (`ReferenceInfo`, `HashDataInfo`, `XMLTimeStamp`, or no
+  `Include` at all), the token would not decode, or there is more than one.
+  Informational, because carrying more evidence than the minimum must never
+  make a dossier look worse than carrying none.
+
+Each container timestamp appears in `data.timestamps[]` with its own `checks`,
+its `kind` (`dossier-timestamp` or `document-timestamp`), and, for a document
+timestamp, the `document_index` it belongs to. `data.counts.timestamps` counts
+them and `data.counts.timestamps_verified` counts the ones that verified
+completely.
+
+### Archive timestamps
+
+`xades:ArchiveTimeStamp` — the XAdES-A / B-LTA element, in both the 1.3.2 and
+the `xadesv141` spelling — is still reported as `archive_timestamp_present`
+(`info`) and **is not verified**. This is a deliberate M3 decision, not an
+oversight, and the reason is worth stating plainly.
+
+The XAdES 1.4.1 clause 8.2.1 imprint is an ordered concatenation of the
+references' processed data, `ds:SignedInfo`, `ds:SignatureValue`,
+`ds:KeyInfo`, the unsigned qualifying properties in order, and the `ds:Object`
+elements. Several parts of that ordering are under-specified in ways that only
+interoperability testing can settle: which namespace context each unsigned
+property is canonicalized in, how properties added *after* the archive
+timestamp are excluded, whether the `ds:Object` holding the qualifying
+properties participates, and how the 1.3.2 and 1.4.1 forms differ in all three.
+This project has no real-world archive-timestamped material to check an
+implementation against, and a synthetic fixture generated by the same code that
+verifies it proves nothing at all — it would only assert that the
+implementation agrees with itself.
+
+Reporting `archive_timestamp_verified` on that basis would be exactly the kind
+of unearned assurance this project refuses. So the element is named, counted in
+`xades.archive_timestamps`, and left unverified; no `poe_times` are recorded
+and an archive timestamp does not extend the validation-time reasoning. A
+`valid` verdict continues to say that the signature's own evidence checks out
+at the stated validation time, not that its archival chain does. Closing this
+needs consented real B-LTA material or a second implementation to differ
+against; it is tracked as a residual in [roadmap.md](roadmap.md).
 
 ### Validation time
 
@@ -1192,9 +1283,69 @@ dossier that embeds nothing at all. See [trust.md](trust.md).
 (`skipped`), which is blocking, so it is documented as producing **at most**
 `indeterminate`.
 
-`--online` fetching from CRL distribution points and AIA is not implemented and
-is an M3 residual. The codes `online_crl` and `online_ocsp` are not emitted by
-this release.
+### Online revocation fetching
+
+`--online` is the only thing that makes openSzigno touch the network, and it
+does so under a fixed policy the caller cannot widen.
+
+**Where the URLs come from.** Only from the certificates themselves: the
+`cRLDistributionPoints` extension's `fullName` URIs and the
+`authorityInfoAccess` extension's `id-ad-ocsp` access locations. These are
+fields a CA wrote into a certificate that a trust anchor signed. No URL is ever
+taken from the dossier's XML, from a redirect to another host, or from the
+environment, and a `ds:Reference` or an `xades:Include` is still never
+dereferenced.
+
+**What is fetched, and when.** Nothing, for a certificate the caller's own
+material already answers for. Before any request is made, each certificate is
+put to the *same* offline code path the verdict will use; only a certificate
+that comes back without a definite answer is fetched for. OCSP is tried before
+CRLs, because a response answers about one certificate where a CRL is a list
+that may run to megabytes. Certificates whose issuer is not to hand are skipped
+— a CRL could not be checked against them anyway — and so are self-signed
+roots, whose revocation is never asked about.
+
+**The transport policy.**
+
+| Rule | Value | Why |
+| --- | --- | --- |
+| Schemes | `http` and `https`, exactly as published | Neither is rewritten. Upgrading `http` to `https` is a guess about a host's configuration. Confidentiality is not the point: these are public documents and every one is signature-checked before it is believed. |
+| Connect timeout | 5 s | |
+| Total timeout | 20 s per fetch | A fetch that exceeds it is a named failure, never a hang. |
+| Size cap | 16 MiB for a CRL, 64 KiB for an OCSP response | Enforced by the reader, so a server that lies about `Content-Length` cannot make the run allocate more. |
+| Redirects | at most 3, **never to another host** | The authority for a URL is the certificate, and the certificate named one host. The port is part of the host. |
+| Proxy | none, unless `--online-proxy URL` | `HTTP_PROXY` and its relatives are ignored. A verifier that silently routed its revocation traffic through whatever the shell happened to set would hand an attacker who controls that variable a way to feed it chosen bytes. |
+| Requests | `GET` for a CRL; `POST` of an RFC 6960 `OCSPRequest` as `application/ocsp-request` for OCSP | The `certID` uses **SHA-256**, which is inside the pinned allowlist. No nonce is sent: a nonce defends a live request against replay, and the verifier deliberately ignores nonces because it must also read archived responses. |
+| Volume | at most 32 certificates per run, at most 4 URLs per certificate | Opening one dossier cannot generate unbounded traffic. |
+
+**What fetching can and cannot do.** It can only *add* data. Every fetched
+artefact is classified and then judged by exactly the offline rules — issuer
+match, signature by an authorised issuer, scope, freshness — so a server that
+answers with a well-formed CRL from the wrong CA changes nothing, and one that
+answers with an HTML error page is `invalid`. Online material is consulted
+**last**, after the signature's own `RevocationValues` and the revocation
+store, so it can never displace an answer that was already to hand.
+
+**When it fails.** Each failure contributes one `revocation_status_unknown`
+(`unknown`, so it blocks) naming the URL and a failure class: `timeout`,
+`http status <code>`, `too large`, `redirect`, `invalid`, or `transport`. The
+class is reported because the remedies differ — a timeout is somebody else's
+outage, a `404` is a stale URL in an old certificate, and "not a CRL" is what a
+captive portal looks like from here. A URL is public CA material, so naming it
+is safe and is the one thing that makes the failure actionable. Nothing panics
+and nothing hangs.
+
+**Reproducibility.** `--online-cache DIR` writes every fetched artefact into
+`DIR/crls/` and `DIR/ocsp/`, named by the SHA-256 of its own bytes, which is
+the `--revocation-store` layout. A later run with `--revocation-store DIR` and
+no `--online` therefore reaches the same answer with no network at all — the
+only difference being that the source is reported as `store_crl` rather than
+`online_crl`. Nothing is ever deleted from the cache.
+
+`chain[].revocation.source` reports `online_crl` and `online_ocsp` for answers
+that came from the network, and `policy.revocation` reads `online` for any run
+that was given the flag, whether or not anything was actually fetched.
+`--online` and `--no-revocation` cannot be combined.
 
 ### Verify result shape
 
@@ -1394,7 +1545,9 @@ Notes on the shape:
 - `chain[].revocation` carries this certificate's own revocation answer with
   the source it came from. `status` is one of `good`, `revoked`,
   `revoked_after_validation_time`, `unknown`, `not_checked`, or
-  `trust_anchor`. The anchor's entry is always `trust_anchor`, because the
+  `trust_anchor`, and `source` is one of `embedded_crl`, `embedded_ocsp`,
+  `store_crl`, `store_ocsp`, `online_crl`, or `online_ocsp`.
+  The anchor's entry is always `trust_anchor`, because the
   anchor is never asked about; the whole object is `null` only when no path was
   built at all.
 - `qualified`, `qualified_signature_device` and `qualified_service` sit on the
@@ -1515,12 +1668,12 @@ verify), and `revocation_not_checked` (the caller switched revocation off).
 | `cert_basic_constraints_invalid` | `failed` | An issuing certificate is not marked as a CA. |
 | `cert_name_constraint_violation` | `failed` | A certificate violates a name constraint imposed by a CA above it. |
 | `cert_unsupported_critical_extension` | `failed` | A certificate carries a critical extension this validator does not understand. |
-| `revocation_policy` | `info` | Reports the revocation policy actually applied: `offline` or, with `--no-revocation`, off. Always emitted, so the policy is visible even when no data was found. |
+| `revocation_policy` | `info` | Reports the revocation policy actually applied: `offline`, `online` with `--online`, or off with `--no-revocation`. Always emitted, so the policy is visible even when no data was found. |
 | `revocation_not_checked` | `skipped` | Emitted **only** when the caller passed `--no-revocation`. Blocking, so switching the check off is documented as producing at most `indeterminate`. |
 | `revocation_ok` | `passed` | Every certificate in the path except the trust anchor has fresh, verified, non-revoked status. Emitted once per chain — the signer's and each timestamp authority's — and the message names which. |
 | `cert_revoked` | `failed` | A certificate in the path was revoked at or before the validation time. `certificateHold` counts. |
 | `cert_revoked_after_validation_time` | `info` / `unknown` | A certificate was revoked *after* the instant being validated, so that revocation did not apply then. `info` when the validation time was **proven** by a fully verified signature timestamp, `unknown` when it was merely asserted by `--at` or the clock. Never `passed`: the certificate really was revoked, and the message gives the time and reason. |
-| `revocation_status_unknown` | `unknown` | No usable revocation data covers a certificate in the path, or no path was built to ask about. |
+| `revocation_status_unknown` | `unknown` | No usable revocation data covers a certificate in the path, or no path was built to ask about. Under `--online`, also emitted once per failed fetch, naming the URL and the failure class (`timeout`, `http status <code>`, `too large`, `redirect`, `invalid`, `transport`). Blocking either way: a fetch that did not happen leaves the certificate exactly as uncovered as it was. |
 | `revocation_data_stale` | `unknown` | The data's `nextUpdate` had passed at the validation time, or it carries none and its `thisUpdate` precedes it. Also the OCSP `unknown` status. |
 | `revocation_data_invalid` | `unknown` | Data was found but could not be used: signed by someone unauthorised, a delta or indirect CRL, an unimplemented `issuingDistributionPoint` form, a critical CRL extension this build does not implement, or an OCSP response whose status is not `successful`. `unknown`, not `failed`: unusable data means the tool could not answer. |
 | `trust_list_loaded` | `info` | A `--trust-list` file was read; the message says how many anchors it contributed. |
@@ -1545,8 +1698,13 @@ verify), and `revocation_not_checked` (the caller switched revocation off).
 | `timestamp_tsa_path_unknown` | `unknown` | No trust anchors were configured. |
 | `timestamp_before_signing_time` | `unknown` | The token's `genTime` precedes the claimed `xades:SigningTime` by more than the declared accuracy. Reported, never a failure: the claim is unauthenticated. |
 | `timestamp_verified` | `passed` / `unknown` | Summarises one token in the signature's own check list, **excluding** its revocation checks, which are folded into the signature's verdict separately so they are counted once. `passed` only when every other check on that token passed or was informational; `unknown` for every other outcome, including a token that failed. Never `failed`: see [Verdicts](#verdicts). |
-| `archive_timestamp_present` | `info` | An `xades:ArchiveTimeStamp` is present and is not validated; this release makes no claim about long-term (B-LTA) re-validation, which is M3. Informational: an archive timestamp is evidence laid *on top of* a signature, so declining to re-verify it does not make the evidence already checked worth less. Omitted when none is present. |
-| `dossier_timestamp_not_validated` | `info` | Dossier-level `es:TimeStamp` elements are present; validating them is M3. Emitted at the **dossier** level only, and informational: an `es:TimeStamp` is a statement about the container, not about any one signature, so it must not decide whether the signatures inside it are valid. |
+| `archive_timestamp_present` | `info` | An `xades:ArchiveTimeStamp` is present and is **not** validated. See [Archive timestamps](#archive-timestamps) for why M3 declined to implement the imprint rather than guess at it. Informational: an archive timestamp is evidence laid *on top of* a signature, so declining to re-verify it does not make the evidence already checked worth less. Omitted when none is present. |
+| `dossier_timestamp_verified` | `info` | A dossier-level `es:TimeStamp` covered the elements the format mandates and its RFC 3161 token passed every check. Dossier level only. |
+| `dossier_timestamp_invalid` | `failed` | A dossier-level `es:TimeStamp` contradicts the container: the imprint does not match, the token will not parse, the TSA signature does not verify, or the TSA certificate is not a timestamping certificate. Lowers the **dossier** verdict; every signature keeps its own. |
+| `dossier_timestamp_not_checked` | `info` | A dossier-level `es:TimeStamp` could not be finished: no anchors, an unresolved `Include`, a scope the format mandates that it does not cover, a data-selection form this build does not implement, or no single decodable token. A gap, not a finding, so it does not block. |
+| `document_timestamp_verified` | `info` | As `dossier_timestamp_verified`, for a `es:TimeStamp` inside one `es:Document`. The message names the document index. |
+| `document_timestamp_invalid` | `failed` | As `dossier_timestamp_invalid`, per document. |
+| `document_timestamp_not_checked` | `info` | As `dossier_timestamp_not_checked`, per document. |
 
 ### Verdicts
 
@@ -1568,10 +1726,19 @@ non-anchor certificate on both the signer's and the TSA's chains.
 
 It does **not** need the dossier to carry nothing else. Evidence a signature
 carries beyond that minimum — unsigned qualifying properties this build does
-not validate, an `xades:ArchiveTimeStamp`, a dossier-level `es:TimeStamp` — is
-reported as `info` and does not block, because none of it can make what was
-checked worth less. Nor does a revocation dated after a validation time a
-verified timestamp proves.
+not validate, an `xades:ArchiveTimeStamp`, a container `es:TimeStamp` this run
+could not finish checking — is reported as `info` and does not block, because
+none of it can make what was checked worth less. Nor does a revocation dated
+after a validation time a verified timestamp proves.
+
+The one container-level exception runs the other way. A container
+`es:TimeStamp` whose imprint does not match the elements it names, or whose
+token does not parse or verify, is evidence that the *container* was altered
+after it was stamped. That is a finding, so `dossier_timestamp_invalid` and
+`document_timestamp_invalid` are `failed` and make the **dossier** verdict
+`invalid`. They never touch a signature's own checks or verdict: the JSON keeps
+"this signature verifies" and "this container has been tampered with" apart,
+because they are different questions with different answers.
 
 **Only checks about the signature itself can make it `invalid`:** the
 reference digests, the signature value, the algorithm policy, the reference
@@ -1703,9 +1870,14 @@ is valid. A rejection is likewise not proof of forgery: the pinned algorithm
 policy refuses some genuine older dossiers, which is the correct trade and must
 not be misread.
 
-Still outside the boundary until M3 ships: `--online` fetching of CRL
-distribution points and OCSP responders, dossier-level `es:TimeStamp`
-verification, XAdES level detection, `ArchiveTimeStamp`, scheme-level
-trusted-list `Qualifications` extensions, and signature-policy processing — an
-explicit policy identifier is reported, and the policy it names is neither
-fetched nor enforced.
+`--online` widens where revocation data may come from and nothing else. It
+never relaxes a rule: a fetched CRL or OCSP response is judged by exactly the
+offline rules, only URLs the certificates themselves publish are contacted, and
+a failed fetch is `revocation_status_unknown`, which blocks. A run that reaches
+`valid` with `--online` reached it on evidence that would have supported the
+same verdict had the operator downloaded the same files by hand.
+
+Still outside the boundary: `xades:ArchiveTimeStamp` verification, XAdES level
+detection, scheme-level trusted-list `Qualifications` extensions, and
+signature-policy processing — an explicit policy identifier is reported, and
+the policy it names is neither fetched nor enforced.
