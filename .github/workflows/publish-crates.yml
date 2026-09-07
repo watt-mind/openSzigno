@@ -2,14 +2,19 @@ name: Publish crates
 
 # Custom `dist` publish job, wired in as `./publish-crates` in the
 # `publish-jobs` list of dist-workspace.toml. It runs inside the release
-# workflow, after `host` has uploaded the artefacts and before `announce`
-# undrafts the release.
+# workflow, after `host` has built and staged the artefacts and before
+# `announce` uploads them and undrafts the release.
 #
 # It deliberately does not trigger on `release: published`: dist undrafts
 # the release with GITHUB_TOKEN, and an event raised by GITHUB_TOKEN never
 # triggers another workflow, so a release-event workflow would never fire.
 #
 # `workflow_dispatch` stays for reruns by hand after a failed publish.
+#
+# The job is idempotent. Every crate is looked up in the crates.io sparse
+# index first and skipped if that exact version is already there, so a
+# rerun after a partial success finishes the remaining crates instead of
+# failing on the first one.
 
 on:
   workflow_call:
@@ -34,6 +39,14 @@ on:
 permissions:
   contents: read
 
+# Two runs for the same release must not publish at the same time: the
+# second would race the first between its index check and its upload.
+# Queue them instead of cancelling, so a rerun started while the first run
+# is still going still gets to finish the job.
+concurrency:
+  group: publish-crates-${{ inputs.tag || github.ref }}
+  cancel-in-progress: false
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -41,6 +54,7 @@ jobs:
   publish:
     name: Publish to crates.io
     runs-on: ubuntu-22.04
+    timeout-minutes: 45
     permissions:
       contents: read
     steps:
@@ -60,14 +74,19 @@ jobs:
           fi
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           ref: ${{ steps.release.outputs.tag }}
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable branch @ 2026-09-03
+        with:
+          # A commit pin makes github.action_ref a SHA, so the toolchain
+          # the action would otherwise read from the ref has to be given.
+          toolchain: stable
 
       - name: Check that the tag matches the workspace version
+        id: version
         env:
           TAG: ${{ steps.release.outputs.tag }}
         run: |
@@ -79,6 +98,7 @@ jobs:
             echo "::error::tag $TAG does not match workspace version $version"
             exit 1
           fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
 
       - name: Check for the registry token
         id: token
@@ -92,22 +112,82 @@ jobs:
             echo "present=true" >> "$GITHUB_OUTPUT"
           fi
 
-      # Published in dependency order. `cargo publish` waits for each crate
-      # to appear in the index before it returns, so the next one resolves.
-      - name: Publish openszigno-core
+      # Published in dependency order, each one skipped if crates.io
+      # already has that exact version. A rerun after a partial success
+      # therefore continues where the failed run stopped instead of dying
+      # on "crate version is already uploaded".
+      #
+      # The lookup goes to the sparse index rather than to `cargo search`
+      # (which matches on name prefix and reports only the latest version)
+      # or `cargo info` (which reads a possibly stale local index cache).
+      # The index answers one newline-delimited JSON record per published
+      # version, and returns 404 while a crate has no versions at all.
+      # After each publish the same lookup is polled until the version is
+      # visible, because the next crate resolves its dependency from the
+      # index rather than from the workspace.
+      - name: Publish the crates in dependency order
         if: steps.token.outputs.present == 'true'
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: cargo publish -p openszigno-core --locked
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
 
-      - name: Publish openszigno-verify
-        if: steps.token.outputs.present == 'true'
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: cargo publish -p openszigno-verify --locked
+          # Sparse-index path for a crate name, per the crates.io index
+          # layout: 1 and 2 character names live under `1/` and `2/`, three
+          # character names under `3/<first letter>/`, and everything else
+          # under `<first two>/<next two>/`.
+          index_path() {
+            name=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
+            case ${#name} in
+              1) printf '1/%s' "$name" ;;
+              2) printf '2/%s' "$name" ;;
+              3) printf '3/%s/%s' "${name:0:1}" "$name" ;;
+              *) printf '%s/%s/%s' "${name:0:2}" "${name:2:2}" "$name" ;;
+            esac
+          }
 
-      - name: Publish openszigno-cli
-        if: steps.token.outputs.present == 'true'
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: cargo publish -p openszigno-cli --locked
+          # 0 when the exact version is in the index, 1 when it is not.
+          # Any HTTP status other than 200 or 404 is a hard failure: a
+          # transient 5xx must not be mistaken for "not published yet".
+          in_index() {
+            url="https://index.crates.io/$(index_path "$1")"
+            body=$(mktemp)
+            code=$(curl -sS -o "$body" -w '%{http_code}' \
+              -H 'Accept: text/plain' "$url" || echo 000)
+            case "$code" in
+              200) present=$(jq -rs --arg v "$2" \
+                     'map(select(.vers == $v)) | length' "$body") ;;
+              404) present=0 ;;
+              *) echo "::error::crates.io index returned HTTP $code for $1"
+                 rm -f "$body"; exit 1 ;;
+            esac
+            rm -f "$body"
+            [ "$present" != "0" ]
+          }
+
+          # The index is a CDN, so a freshly published version can take a
+          # few seconds to become readable. The next crate in the chain
+          # resolves its dependency through exactly this path, so wait for
+          # it rather than hoping.
+          wait_for_index() {
+            for _ in $(seq 1 60); do
+              if in_index "$1" "$2"; then
+                echo "$1 $2 is visible in the index"
+                return 0
+              fi
+              sleep 10
+            done
+            echo "::error::$1 $2 did not appear in the crates.io index within 10 minutes"
+            return 1
+          }
+
+          for crate in openszigno-core openszigno-verify openszigno-cli; do
+            if in_index "$crate" "$VERSION"; then
+              echo "::notice::$crate $VERSION is already on crates.io; skipping"
+              continue
+            fi
+            echo "publishing $crate $VERSION"
+            cargo publish -p "$crate" --locked
+            wait_for_index "$crate" "$VERSION"
+          done
