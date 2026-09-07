@@ -10,6 +10,10 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.4.0] - 2026-09-08
+
 ### Added (M4: decryption of encrypted payloads)
 
 - **`extract --decrypt-key FILE`** decrypts documents whose transform chain
@@ -1097,5 +1101,6 @@ This release performs no cryptographic verification of any kind.
 
 [0.1.0]: https://github.com/watt-mind/openSzigno/releases/tag/v0.1.0
 [0.2.0]: https://github.com/watt-mind/openSzigno/compare/v0.1.0...v0.2.0
-[Unreleased]: https://github.com/watt-mind/openSzigno/compare/v0.3.0...develop
+[Unreleased]: https://github.com/watt-mind/openSzigno/compare/v0.4.0...develop
+[0.4.0]: https://github.com/watt-mind/openSzigno/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/watt-mind/openSzigno/compare/v0.2.0...v0.3.0

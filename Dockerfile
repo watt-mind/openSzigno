@@ -19,7 +19,7 @@ RUN cargo build --release --locked -p openszigno-cli \
 
 FROM scratch
 
-ARG VERSION=0.3.0
+ARG VERSION=0.4.0
 ARG REVISION=unknown
 
 LABEL org.opencontainers.image.title="openSzigno" \
