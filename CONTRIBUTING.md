@@ -37,7 +37,7 @@ change per pull request, with its tests.
 ## Commit messages
 
 Use Conventional Commits. The type is required; the scope is optional and is
-`core` or `cli`.
+`core`, `cli`, or `verify`.
 
 ```text
 <type>(<scope>): <imperative summary, lowercase, no trailing period>
@@ -59,6 +59,7 @@ Examples:
 ```text
 fix(core): check the ZIP compression ratio on actual decoded bytes
 feat(cli): report the detected namespace in inspect output
+feat(verify): bind the signing certificate through xades:SigningCertificate
 docs: document the stable error codes and their exit statuses
 ```
 

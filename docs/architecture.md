@@ -455,18 +455,19 @@ Warning codes. Warnings never change the exit status by themselves:
 
 ## The `verify` command
 
-`verify` is the M2 milestone. This release ships **phase 1**: the XMLDSig
-core plus certificate-path validation against a caller-supplied trust store.
-XAdES qualifying properties are detected but not validated, and revocation and
-timestamps are reported as `skipped`. That caps every verdict at
-`indeterminate`: **phase 1 cannot return `valid`**, by construction and by
-test. A caller that sees `indeterminate` has learned that nothing failed, not
-that anything is trustworthy.
+`verify` is the M2 milestone. This release ships **phase 2**: the XMLDSig
+core, the XAdES signed properties, RFC 3161 signature timestamps, and
+certificate-path validation against a caller-supplied trust store at a
+validation time a verified timestamp may move. Revocation is still reported as
+`skipped`, which caps every verdict at `indeterminate`: **this release cannot
+return `valid`**, by construction and by test. A caller that sees
+`indeterminate` has learned that nothing failed, not that anything is
+trustworthy.
 
 ```text
 openszigno verify FILE [--json]
     --trust-store DIR           # anchors, and optional extra CA certificates
-    --at <RFC3339>              # validation time; default: now
+    --at <RFC3339>              # validation time; overrides any timestamp
     --allow-legacy-algorithms   # admit SHA-1 for diagnosis only
     --allow-namespace URI       # as on every other command, repeatable
 ```
@@ -501,12 +502,24 @@ meaningless:
    applied afterwards still sees none and inserting a comment into a signed
    element cannot change its digest. The `#xpointer(...)` forms that would keep
    comments are not supported and are refused as external references.
-3. **XAdES.** Presence is reported; nothing is validated (phase 2).
-4. **Certificate path.** The signing certificate is chosen from `ds:KeyInfo`,
-   then a path is built from it through the other candidate certificates to a
-   configured anchor and validated.
-5. **Revocation and timestamps.** Reported as `skipped`, never silently
-   omitted.
+3. **XAdES.** The signed `SigningCertificate` / `SigningCertificateV2`
+   property is read and the certificate it digests is required to be the one
+   whose key verified the signature (see
+   [XAdES signed properties](#xades-signed-properties)). `SigningTime` and the
+   signature policy identifier are reported and never acted on. Any
+   qualifying property this build does not process is named rather than
+   ignored.
+4. **Timestamps.** Every `xades:SignatureTimeStamp` token is parsed, its
+   imprint recomputed over the canonicalized `ds:SignatureValue`, the TSA
+   signature verified, the TSA certificate's `extendedKeyUsage` checked, and
+   its path validated to an anchor at the token's `genTime` (see
+   [Signature timestamps](#signature-timestamps)).
+5. **Certificate path.** The signing certificate is the one the signed XAdES
+   property designates, falling back to the `ds:KeyInfo` candidate whose key
+   verified the signature; a path is then built from it through the other
+   candidate certificates to a configured anchor and validated at this
+   signature's [validation time](#validation-time).
+6. **Revocation.** Reported as `skipped`, never silently omitted.
 
 ### Reference scope
 
@@ -607,10 +620,13 @@ Reported verbatim under `data.limits` in `verify --json`.
 | `max_references_per_signature` | 32 | `ds:Reference` elements per signature. |
 | `max_transforms_per_reference` | 8 | Transforms in one reference's chain. |
 | `max_certificates` | 64 | Certificates admitted into path building. |
+| `max_timestamps_per_signature` | 8 | `xades:SignatureTimeStamp` elements processed per signature. |
 | `max_chain_length` | 8 | Certificates in one candidate path. |
 | `max_paths` | 32 | Completed candidate paths explored. |
 | path search expansions | 256 (fixed) | Total candidates visited during path building, successful or not. Not configurable. |
 | `ds:KeyInfo` candidates | 16 (fixed) | Certificates tried as the signer. |
+| `xades:Cert` entries | 16 (fixed) | `SigningCertificate` entries digested against the candidates. |
+| timestamp token size | 512 KiB (fixed) | Largest RFC 3161 token parsed. |
 
 ### Signing-certificate selection
 
@@ -626,6 +642,116 @@ which case `signature_value_invalid` says how many were tried. A candidate with
 a key below the minimum size or of an unsupported type is reported as
 `algorithm_rejected` rather than as a mismatch.
 
+The key-based selection is only the fallback. When the signature carries a
+signed `SigningCertificate` property, **that property decides**, and a
+disagreement is a failure rather than a preference: see below.
+
+### XAdES signed properties
+
+`ds:KeyInfo` is unsigned unless a reference happens to cover it, so on its own
+it is a hint from whoever assembled the file. The XAdES
+`SigningCertificate` (XAdES 1.3.2 and earlier) and `SigningCertificateV2`
+(EN 319 132-1) properties live inside `xades:SignedProperties`, which the
+mandated reference set requires the signature to cover, so what they say is
+signed. `verify` therefore treats the certificate their `CertDigest` names as
+the certificate the signature claims, in every recognised XAdES namespace
+(1.1.1, 1.2.2, 1.3.2, 1.4.1).
+
+The rules:
+
+- the digest is recomputed over the DER of each offered certificate with the
+  algorithm the property declares, which must be inside the pinned digest
+  allowlist; SHA-1 is refused unless `--allow-legacy-algorithms` is given, and
+  then it still cannot produce a `passed`;
+- when `IssuerSerialV2` is present its DER issuer name and serial must match
+  the digested certificate exactly. For the older `IssuerSerial`, only the
+  serial number is compared: its issuer is an RFC 4514 string, and comparing
+  that to a DER name needs name preparation this project does not implement.
+  The digest is the binding; issuer and serial are corroboration, and a
+  corroboration that contradicts the digest fails;
+- **if the certificate whose key verified `ds:SignatureValue` is not the
+  digested one, the signature fails** with
+  `xades_signing_certificate_mismatch`, and the certificate reported and
+  path-validated is the one the signed property designates. This is the
+  certificate-substitution check;
+- a signature carrying no such property emits
+  `xades_signing_certificate_absent` with status `unknown`: nothing signed says
+  which certificate signed it.
+
+`SignaturePolicyIdentifier` is reported and never applied:
+`xades_signature_policy_implied` or `xades_signature_policy_explicit`, both
+`unknown`, with the explicit form's identifier in
+`signatures[].xades.signature_policy_id`. No policy document is fetched,
+parsed, or enforced. Any other qualifying property — `CompleteCertificateRefs`,
+`RevocationValues`, `SignerRole`, `DataObjectFormat`, and the rest — is named
+in `signatures[].xades.unvalidated_properties` and reported once as
+`xades_not_validated`. `ArchiveTimeStamp` gets its own
+`archive_timestamp_present`, `skipped`: it covers a much larger,
+version-dependent set of data and is out of scope.
+
+### Signature timestamps
+
+Each `xades:SignatureTimeStamp` in the unsigned properties carries an RFC 3161
+token in an `xades:EncapsulatedTimeStamp`. Each token is verified in this
+order, and every step must pass before the token counts as verified:
+
+| Step | Check code | What it means |
+| --- | --- | --- |
+| 1 | `timestamp_token_parsed` | The token is a CMS `SignedData` whose encapsulated content type is `id-ct-TSTInfo` and whose `TSTInfo` decodes. |
+| 2 | `timestamp_imprint_ok` | `messageImprint` equals the digest of the canonicalized `ds:SignatureValue`, under an allowlisted algorithm. |
+| 3 | `timestamp_signature_ok` | The `SignerInfo` signature verifies over the DER `SET OF` encoding of the signed attributes, whose `content-type` is `id-ct-TSTInfo` and whose `message-digest` matches the eContent. |
+| 4 | `timestamp_tsa_certificate_ok` | The TSA certificate carries `extendedKeyUsage` with `id-kp-timeStamping` and nothing else, marked critical (RFC 3161 section 2.3). |
+| 5 | `timestamp_tsa_path_ok` | That certificate chains to a configured anchor **at `genTime`**, because a timestamp asserts existence at that instant. |
+
+A `xades:SignatureTimeStamp` covers the canonicalized `ds:SignatureValue`
+**element** — start tag, content, end tag — not the Base64 text and not its
+digest. The algorithm is the one the timestamp's own
+`ds:CanonicalizationMethod` names, defaulting to inclusive C14N 1.0 as XAdES
+prescribes. The `xades:Include`, `ReferenceInfo`, `HashDataInfo` and
+`XMLTimeStamp` forms select other data and are **not** implemented: a timestamp
+using one is reported as `timestamp_not_checked` (`skipped`) rather than
+checked against the wrong bytes. The same applies to a timestamp with no
+decodable token, with more than one token, or naming a canonicalization
+algorithm this build does not implement.
+
+`timestamp_verified` summarises one token inside the signature's own check
+list: `passed` when every step passed, `failed` when any failed, `unknown`
+otherwise. Per signature, `signature_timestamp_present` or
+`signature_timestamp_absent` is emitted, always `unknown`, because a timestamp
+proves existence and not validity.
+
+`timestamp_before_signing_time` is `unknown`, never `failed`: when a token's
+`genTime` is earlier than the claimed `xades:SigningTime` by more than the
+token's declared accuracy, the two contradict each other, but `SigningTime` is
+an unauthenticated claim and a claim cannot condemn a verified token.
+
+Dossier-level `es:TimeStamp` elements protect the elements they reference, so
+verifying one needs the reference machinery M3 adds. They are counted and
+reported as `dossier_timestamp_not_validated` (`skipped`) rather than guessed
+at.
+
+### Validation time
+
+Each signature's certificate path is validated at that signature's own
+validation time, reported as `signatures[].validation_time` with
+`signatures[].validation_time_source`. The precedence is fixed:
+
+| Source | When it applies |
+| --- | --- |
+| `at_flag` | `--at` was given. An operator asking "was this valid then?" must not be answered about some other instant, so `--at` always wins. |
+| `timestamp` | No `--at`, and at least one signature timestamp verified completely. The earliest such `genTime` is used. |
+| `current_time` | Neither of the above. |
+
+This is what lets a historical dossier chain: a signing certificate that
+expired years ago was valid at the timestamp's `genTime`, and a verified
+timestamp is proof that the signature existed then. A token that did not fully
+verify — including one whose TSA chain is `unknown` because no trust store was
+configured — never moves the validation time.
+
+`data.verification_time` at the top of the report keeps its meaning: the `--at`
+value and the clock reading for the run as a whole, not the per-signature
+result.
+
 ### Where candidate certificates come from
 
 | Source | `chain[].source` | Role |
@@ -634,6 +760,7 @@ a key below the minimum size or of an unsupported type is reported as
 | `xades:CertificateValues/xades:EncapsulatedX509Certificate`, and any other encapsulated certificate under the signature's XAdES properties | `certificate_values` | Untrusted path candidates. This is where real dossiers carry the intermediates, and usually the root. |
 | A non-self-signed file in the trust store | `trust_store` | Untrusted path candidate. |
 | A self-signed file in the trust store | `trust_store` | **Trust anchor.** |
+| The `certificates` set of an RFC 3161 token | `timestamp_token` | Untrusted path candidates for that token's TSA certificate only. |
 
 The rule that matters: **only the trust store can supply an anchor.** A
 self-signed root found inside a dossier is a candidate like any other and can
@@ -837,7 +964,48 @@ verify anything.
             "status": "passed"
           }
         ],
-        "timestamps": [],
+        "xades": {
+          "present": true,
+          "signing_time": "2020-01-01T00:00:00Z",
+          "signing_certificate": {
+            "form": "v2",
+            "digest_algorithm": "sha256",
+            "issuer_serial_present": true,
+            "matched": true
+          },
+          "signature_policy": "implied",
+          "signature_policy_id": null,
+          "signature_timestamps": 1,
+          "archive_timestamps": 0,
+          "unvalidated_properties": []
+        },
+        "timestamps": [
+          {
+            "kind": "signature-timestamp",
+            "gen_time": "2020-06-01T09:00:00Z",
+            "accuracy_seconds": 1,
+            "serial_hex": "2a",
+            "imprint_algorithm": "sha256",
+            "tsa_certificate": {
+              "subject_cn": "…", "issuer_cn": "…", "serial_hex": "…",
+              "not_before": "…", "not_after": "…",
+              "key_algorithm": "rsa", "key_bits": 2048,
+              "sha256_fingerprint": "…", "qualified": null
+            },
+            "chain": [
+              { "subject_cn": "…", "issuer_cn": "…", "serial_hex": "…",
+                "not_before": "…", "not_after": "…",
+                "is_trust_anchor": false, "source": "timestamp_token" }
+            ],
+            "verified": true,
+            "checks": [
+              { "code": "timestamp_imprint_ok", "status": "passed",
+                "message": "the message imprint matches the data the timestamp covers" }
+            ]
+          }
+        ],
+        "validation_time": "2020-06-01T09:00:00Z",
+        "validation_time_source": "timestamp",
         "checks": [
           { "code": "reference_digest_ok", "status": "passed",
             "message": "4 of 4 reference digests matched" }
@@ -867,12 +1035,27 @@ Notes on the shape:
   `resolved_to` still shows what each URI pointed at.
 - `signing_time` is the `xades:SigningTime` the signature **claims**,
   normalised to RFC 3339 UTC (`null` when absent or unparseable). It is read,
-  never trusted: nothing authenticates it until a verified timestamp token
-  binds it, which is phase 2, and it never becomes the validation time — only
-  `--at` and the clock do that. The `signing_time_present` check reports that
-  it was read, always with status `unknown`.
-- `xades_level` is a placeholder in phase 1: `"detected"` or `null`, because
-  XAdES is not validated yet. `timestamps` is always empty.
+  never trusted, and it never becomes a validation time: only `--at`, a
+  verified timestamp, and the clock do that. The `signing_time_present` check
+  reports that it was read, always with status `unknown`.
+- `xades` reports what the qualifying properties said, not what was concluded
+  from them: the check codes carry the conclusions.
+  `xades.signing_certificate` is `null` when the signature carries no
+  `SigningCertificate` property at all, and `matched: false` when it carries
+  one that no offered certificate answers to.
+- `timestamps[]` holds one entry per `xades:SignatureTimeStamp`, each with its
+  own `checks`. `verified` is true only when every one of those checks passed,
+  which is the condition for `gen_time` to become the validation time. A token
+  that failed to parse reports `gen_time: null` and a single failed
+  `timestamp_token_parsed`. The signature's own `checks` carry one
+  `timestamp_verified` per token, so a consumer reading only the signature
+  level still sees the outcome.
+- `validation_time` and `validation_time_source` are per signature; see
+  [Validation time](#validation-time). `data.verification_time` remains the
+  run-level `--at` and clock reading.
+- `xades_level` is still a placeholder: `"detected"` or `null`. Level
+  detection (B-B, B-T, B-LT, B-LTA) is not implemented, and reporting a level
+  would imply a determination this build does not make.
 - The certificate summary is limited on purpose to subject and issuer common
   names, serial, validity, key algorithm and size, and the SHA-256
   fingerprint. Full distinguished names and subject alternative names stay out
@@ -918,7 +1101,12 @@ the tool could not determine the answer and is never a substitute for `failed`.
 | `signature_value_invalid` | `failed` | It did not verify, or is not canonical Base64. |
 | `xades_present` | `passed` | `xades:QualifyingProperties` was found for this signature. |
 | `xades_absent` | `skipped` | None was found; this is a bare XMLDSig signature. |
-| `xades_not_validated` | `skipped` | XAdES properties are not validated in this phase. |
+| `xades_not_validated` | `skipped` | Qualifying properties this build does not validate are present; the message and `xades.unvalidated_properties` name them. |
+| `xades_signing_certificate_bound` | `passed` | The signing certificate matches the digest the signed `SigningCertificate` / `SigningCertificateV2` property names. |
+| `xades_signing_certificate_mismatch` | `failed` | It does not: no offered certificate answers to the digest, an issuer and serial contradict it, the declared digest algorithm is outside the allowlist, or the certificate whose key verified the signature is not the digested one. The certificate-substitution check. |
+| `xades_signing_certificate_absent` | `unknown` | The signature carries no such property, so nothing signed says which certificate signed it. |
+| `xades_signature_policy_implied` | `unknown` | An implied signature policy is declared. Reported only; no policy is processed. |
+| `xades_signature_policy_explicit` | `unknown` | An explicit signature policy is declared. Its identifier is reported; no policy document is fetched or applied. |
 | `signing_certificate_available` | `passed` | A usable certificate was found in `ds:KeyInfo`. |
 | `signing_certificate_missing` | `failed` | None was. |
 | `signing_time_present` | `unknown` | Reports whether a claimed `xades:SigningTime` was read. Always `unknown`: the claim is unauthenticated until phase 2 binds it to a timestamp. |
@@ -937,7 +1125,23 @@ the tool could not determine the answer and is never a substitute for `failed`.
 | `cert_name_constraint_violation` | `failed` | A certificate violates a name constraint imposed by a CA above it. |
 | `cert_unsupported_critical_extension` | `failed` | A certificate carries a critical extension this validator does not understand. |
 | `revocation_not_checked` | `skipped` | Revocation is phase 3. Blocking: caps the verdict at `indeterminate`. |
-| `timestamp_not_checked` | `skipped` | Timestamps are phase 2. Blocking: caps the verdict at `indeterminate`. |
+| `signature_timestamp_present` | `unknown` | The signature carries at least one `xades:SignatureTimeStamp`. A timestamp proves existence, not validity, so this never passes. |
+| `signature_timestamp_absent` | `unknown` | It carries none, so nothing proves when it existed. |
+| `timestamp_not_checked` | `skipped` | A timestamp uses a form this build does not process: an `Include`-style data selection, no decodable token, more than one token, or an unimplemented canonicalization algorithm. |
+| `timestamp_token_parsed` | `passed` / `failed` | The token is (or is not) a CMS `SignedData` over an RFC 3161 `TSTInfo` within the size limit. |
+| `timestamp_imprint_ok` | `passed` | The `messageImprint` matches the digest of the canonicalized `ds:SignatureValue`. |
+| `timestamp_imprint_mismatch` | `failed` | It does not, or names a digest algorithm outside the allowlist. |
+| `timestamp_signature_ok` | `passed` | The TSA's `SignerInfo` signature verified over its signed attributes. |
+| `timestamp_signature_invalid` | `failed` | It did not, the signed attributes are missing or wrong, the token carries no single `SignerInfo`, or the named TSA certificate is not in the token. |
+| `timestamp_tsa_certificate_ok` | `passed` | The TSA certificate carries a critical `extendedKeyUsage` of exactly `id-kp-timeStamping`. |
+| `timestamp_tsa_certificate_invalid` | `failed` | It does not. |
+| `timestamp_tsa_path_ok` | `passed` | The TSA certificate chains to a configured anchor at the token's `genTime`. |
+| `timestamp_tsa_path_untrusted` | `failed` | It does not, under the same path rules as a signer chain. |
+| `timestamp_tsa_path_unknown` | `unknown` | No trust anchors were configured. |
+| `timestamp_before_signing_time` | `unknown` | The token's `genTime` precedes the claimed `xades:SigningTime` by more than the declared accuracy. Reported, never a failure: the claim is unauthenticated. |
+| `timestamp_verified` | `passed` / `failed` / `unknown` | Summarises one token in the signature's own check list. `passed` only when every check on that token passed. |
+| `archive_timestamp_present` | `skipped` | An `xades:ArchiveTimeStamp` is present and is out of scope for this release. |
+| `dossier_timestamp_not_validated` | `skipped` | Dossier-level `es:TimeStamp` elements are present; validating them is M3. |
 
 ### Verdicts
 
@@ -948,10 +1152,12 @@ there are no signatures — there is nothing to be valid. The terminology follow
 ETSI EN 319 102-1: `valid` is TOTAL-PASSED, `invalid` is TOTAL-FAILED, and
 `indeterminate` is INDETERMINATE.
 
-Because `revocation_not_checked` and `timestamp_not_checked` are always emitted
-as blocking `skipped` checks, `valid` is unreachable in this release. That is
-the correct and honest outcome for a phase-1 verifier, and it is asserted by a
-test.
+Because `revocation_not_checked` is always emitted as a blocking `skipped`
+check, `valid` is unreachable in this release. That is the correct and honest
+outcome for a verifier that does not know whether a certificate was revoked,
+and it is asserted by a test. A failed timestamp check makes a signature
+`invalid`: a token that does not verify is a positive finding about the file,
+not an absence of information.
 
 ## Extraction policy
 
@@ -1025,15 +1231,16 @@ test.
 
 ## Verification boundary
 
-`verify` ships the M2 phase-1 subset: canonicalization, reference digests, the
-signature value, the e-dossier reference-scope rules, and certificate-path
-validation against a caller-supplied trust store. Within that subset it may
-report a signature `invalid`, which is a positive cryptographic finding.
+`verify` ships the M2 phase-2 subset: canonicalization, reference digests, the
+signature value, the e-dossier reference-scope rules, the XAdES signed
+`SigningCertificate` binding, RFC 3161 signature timestamps, and
+certificate-path validation against a caller-supplied trust store. Within that
+subset it may report a signature `invalid`, which is a positive cryptographic
+finding.
 
-**It may never report anything `valid`.** Revocation and timestamps are not
-checked, XAdES qualifying properties are detected but not validated, and
-qualified status is not determined, so every check that would be needed to
-conclude `valid` is emitted as `skipped` and the verdict is capped at
+**It may never report anything `valid`.** Revocation is not checked and
+qualified status is not determined, so a check that would be needed to
+conclude `valid` is always emitted as `skipped` and the verdict is capped at
 `indeterminate`. `indeterminate` means "nothing failed", not "this is
 trustworthy", and the human output says so on every run.
 
@@ -1048,8 +1255,8 @@ is valid. A rejection is likewise not proof of forgery: the pinned algorithm
 policy refuses some genuine older dossiers, which is the correct trade and must
 not be misread.
 
-Still outside the boundary until the later phases ship: XAdES
-`SigningCertificate`/`SigningCertificateV2` binding (so in phase 1 the
-signing certificate is taken from `ds:KeyInfo`, which the signature covers only
-if a reference says so), signing time, signature policy, level detection,
-timestamps, revocation, and trusted-list qualified status.
+Still outside the boundary until phase 3 and M3 ship: revocation (CRL, OCSP,
+and the dossier's own `RevocationValues`), trusted-list qualified status,
+XAdES level detection, `ArchiveTimeStamp`, dossier-level `es:TimeStamp`
+verification, and signature-policy processing — an explicit policy identifier
+is reported, and the policy it names is neither fetched nor enforced.
