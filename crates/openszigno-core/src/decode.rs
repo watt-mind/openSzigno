@@ -102,7 +102,8 @@ fn decode_zip(archive_bytes: &[u8], limits: &Limits) -> Result<Vec<u8>, Error> {
     }
 
     let member = archive.by_index(0).map_err(|error| match error {
-        zip::result::ZipError::UnsupportedArchive(_) => Error::new(
+        zip::result::ZipError::UnsupportedArchive(_)
+        | zip::result::ZipError::CompressionMethodNotSupported(_) => Error::new(
             ErrorCode::UnsupportedZipMember,
             "ZIP member uses encryption or an unsupported compression method",
         ),

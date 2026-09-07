@@ -4,7 +4,10 @@
 //! path is a time-of-check/time-of-use bug: another process can replace the
 //! directory with a symlink between the two steps. On Unix the directory is
 //! therefore opened once with `O_DIRECTORY | O_NOFOLLOW` and every output file
-//! is created relative to that descriptor. On other platforms the path-based
+//! is created relative to that descriptor; the directory itself is reached by
+//! opening each path component relative to the previous one with
+//! `O_NOFOLLOW`, so no component is ever resolved through a symlink. On other
+//! platforms the path-based
 //! no-clobber approach is kept, hardened with an explicit reparse-point
 //! (symlink and junction) rejection for every path component.
 
@@ -68,31 +71,25 @@ fn reject_reparse_point(_metadata: &std::fs::Metadata) -> Result<(), OpenError> 
     Ok(())
 }
 
-/// Create the output directory, without following links.
-///
-/// Directories created by this run are private to the user; directories that
-/// already exist keep their own mode.
+/// Create the output directory by path (non-Unix platforms only; Unix walks
+/// and creates components relative to descriptors instead).
+#[cfg(not(unix))]
 fn create_directory(path: &Path) -> Result<(), OpenError> {
-    let mut builder = std::fs::DirBuilder::new();
-    builder.recursive(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::DirBuilderExt;
-        builder.mode(0o700);
-    }
-    builder
+    std::fs::DirBuilder::new()
+        .recursive(true)
         .create(path)
         .map_err(|_| OpenError::Io("could not create the output directory"))
 }
 
 #[cfg(unix)]
 mod imp {
-    use super::{OpenError, create_directory, reject_link_components};
+    use super::{OpenError, reject_link_components};
 
+    use std::ffi::OsStr;
     use std::fs::File;
     use std::io;
     use std::os::fd::OwnedFd;
-    use std::path::Path;
+    use std::path::{Component, Path};
 
     use rustix::fs::{AtFlags, FileType, Mode, OFlags};
 
@@ -108,23 +105,67 @@ mod imp {
         io::Error::from_raw_os_error(errno.raw_os_error())
     }
 
-    impl OutputDir {
-        pub fn open(path: &Path) -> Result<Self, OpenError> {
-            reject_link_components(path)?;
-            create_directory(path)?;
-            reject_link_components(path)?;
+    const DIRECTORY_FLAGS: OFlags = OFlags::RDONLY
+        .union(OFlags::DIRECTORY)
+        .union(OFlags::NOFOLLOW)
+        .union(OFlags::CLOEXEC);
 
-            let directory = rustix::fs::open(
-                path,
-                OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-                Mode::empty(),
-            )
-            .map_err(|errno| match errno {
+    fn open_component(parent: &OwnedFd, name: &OsStr) -> Result<OwnedFd, OpenError> {
+        rustix::fs::openat(parent, name, DIRECTORY_FLAGS, Mode::empty()).map_err(
+            |errno| match errno {
                 rustix::io::Errno::LOOP | rustix::io::Errno::NOTDIR => {
                     OpenError::Unsafe("output must be a real directory, not a symlink")
                 }
                 _ => OpenError::Io("could not inspect the output directory"),
-            })?;
+            },
+        )
+    }
+
+    /// Walk `path` one component at a time, creating missing directories with
+    /// mode `0700`, and return a descriptor for the final directory.
+    fn walk_and_create(path: &Path) -> Result<OwnedFd, OpenError> {
+        let mut current = rustix::fs::open(".", DIRECTORY_FLAGS, Mode::empty())
+            .map_err(|_| OpenError::Io("could not inspect the output directory"))?;
+        for component in path.components() {
+            let name: &OsStr = match component {
+                Component::RootDir => {
+                    current = rustix::fs::open("/", DIRECTORY_FLAGS, Mode::empty())
+                        .map_err(|_| OpenError::Io("could not inspect the output directory"))?;
+                    continue;
+                }
+                Component::CurDir => continue,
+                Component::ParentDir => OsStr::new(".."),
+                Component::Normal(name) => name,
+                Component::Prefix(_) => {
+                    return Err(OpenError::Unsafe("output directory path is not supported"));
+                }
+            };
+            current = match open_component(&current, name) {
+                Ok(next) => next,
+                Err(OpenError::Io(_)) if !exists_at(&current, name) => {
+                    rustix::fs::mkdirat(&current, name, Mode::RWXU)
+                        .map_err(|_| OpenError::Io("could not create the output directory"))?;
+                    open_component(&current, name)?
+                }
+                Err(error) => return Err(error),
+            };
+        }
+        Ok(current)
+    }
+
+    fn exists_at(parent: &OwnedFd, name: &OsStr) -> bool {
+        rustix::fs::statat(parent, name, AtFlags::SYMLINK_NOFOLLOW).is_ok()
+    }
+
+    impl OutputDir {
+        /// Open (creating if needed) the output directory without ever letting
+        /// the kernel follow a symlink in any path component. Each component is
+        /// opened relative to the previous descriptor with `O_NOFOLLOW`, so a
+        /// component swapped for a link after the path-based pre-checks is
+        /// rejected instead of being traversed.
+        pub fn open(path: &Path) -> Result<Self, OpenError> {
+            reject_link_components(path)?;
+            let directory = walk_and_create(path)?;
             let stat = rustix::fs::fstat(&directory)
                 .map_err(|_| OpenError::Io("could not inspect the output directory"))?;
             if !FileType::from_raw_mode(stat.st_mode).is_dir() {

@@ -320,6 +320,24 @@ fn encrypted_zip_members_are_reported_as_unsupported() {
 }
 
 #[test]
+fn non_deflate_zip_members_are_reported_as_unsupported() {
+    // Rewrite the compression method of a stored member to bzip2 (12) in the
+    // local header and the central directory.
+    let options =
+        zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+    let mut archive = single_member_zip("packed.bin", b"x", options);
+    archive[8..10].copy_from_slice(&12u16.to_le_bytes());
+    let central = archive
+        .windows(4)
+        .position(|window| window == b"PK\x01\x02")
+        .unwrap();
+    archive[central + 10..central + 12].copy_from_slice(&12u16.to_le_bytes());
+    let dossier = parse(zip_dossier(&archive, 1).as_bytes(), &Limits::default()).unwrap();
+    let error = dossier.decode_document(0, &Limits::default()).unwrap_err();
+    assert_eq!(error.code(), ErrorCode::UnsupportedZipMember);
+}
+
+#[test]
 fn stored_zip_members_decode() {
     let options =
         zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);

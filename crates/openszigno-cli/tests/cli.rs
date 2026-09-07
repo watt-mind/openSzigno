@@ -205,6 +205,33 @@ fn rejects_symlinked_output_directories() {
     assert_eq!(std::fs::read_dir(&real).unwrap().count(), 0);
 }
 
+#[cfg(unix)]
+#[test]
+fn rejects_symlinked_intermediate_output_components() {
+    use std::os::unix::fs::symlink;
+
+    let directory = tempdir().unwrap();
+    let real = directory.path().join("real");
+    let linked = directory.path().join("linked");
+    std::fs::create_dir(&real).unwrap();
+    symlink(&real, &linked).unwrap();
+    let nested = linked.join("nested").join("out");
+
+    let output = run(&[
+        "extract",
+        fixture("plain-base64.es3").to_str().unwrap(),
+        "--output",
+        nested.to_str().unwrap(),
+        "--json",
+    ]);
+    assert_eq!(output.status.code(), Some(5));
+    assert_eq!(
+        parse_json(&output)["errors"][0]["code"],
+        "unsafe_output_directory"
+    );
+    assert_eq!(std::fs::read_dir(&real).unwrap().count(), 0);
+}
+
 /// Build a dossier whose documents carry the given titles, reusing the plain
 /// Base64 fixture so payload and `SourceSize` stay consistent.
 fn dossier_with_titles(titles: &[String]) -> String {

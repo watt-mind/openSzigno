@@ -46,8 +46,8 @@ input passes through these stages, each with an explicit limit:
    UTF-8 and ISO-8859-2 are decoded strictly; anything else is
    `unsupported_encoding` or `invalid_encoding`.
 3. **Pre-parse scan.** A linear scan over the decoded text rejects any
-   `<!...>` construct outside comments and CDATA (`unsafe_xml`, which covers
-   DOCTYPE and entity declarations), element nesting deeper than
+   `<!...>` construct outside comments, CDATA sections, and processing
+   instructions (`unsafe_xml`, which covers DOCTYPE and entity declarations), element nesting deeper than
    `max_xml_depth` (128), and more than `max_xml_nodes` (1,000,000) elements.
    This runs before the recursive tree parser, so deep nesting cannot exhaust
    the stack.
@@ -87,7 +87,9 @@ All commands accept `--json`. In JSON mode, stdout contains exactly one JSON
 object and diagnostics go to stderr. Document ordering is the source XML
 order. No command writes XML payload bytes to stdout by default.
 
-Result envelope (from `inspect --json`; fields are always present):
+Result envelope (from `inspect --json`, abbreviated; the envelope fields are
+always present, and `inspect` reports the full `Limits` structure, every
+capability flag, and the dossier `category`, `namespace`, and `xml_encoding`):
 
 ```json
 {
@@ -98,8 +100,8 @@ Result envelope (from `inspect --json`; fields are always present):
   "data": {
     "dossier": { "title": "...", "documents": 1, "signatures_present": 0,
                  "timestamps_present": 0, "signatures_verified": false },
-    "limits": { "max_input_bytes": 67108864 },
-    "capabilities": { "cryptographic_verification": false }
+    "limits": { "max_input_bytes": 67108864, "...": "..." },
+    "capabilities": { "cryptographic_verification": false, "...": "..." }
   },
   "warnings": [],
   "errors": []
@@ -183,15 +185,19 @@ Warning codes (exit 0):
   Reject empty titles, `.` / `..`, path separators, absolute paths, control,
   format, bidirectional, and invisible characters, non-ASCII-space
   whitespace, leading `.` or `-`, trailing `.` or space, reserved Windows
-  device names, and over-long names. The MIME extension is appended only if
-  it is short and alphanumeric. Names are NFC-normalised and collisions are
-  detected case-insensitively on the normalised form.
+  device names, and over-long names. A declared MIME extension must be
+  short and alphanumeric or the document is rejected; it is appended when
+  the title does not already end with it. Names are NFC-normalised and
+  collisions are detected case-insensitively on the normalised form.
 - The output directory may be new or existing. Its path must not contain
   symlinks (or reparse points on Windows). A directory created by this run
   has mode `0700` on Unix; an existing directory keeps its mode.
-- On Unix, files are created relative to an open directory descriptor with
-  `O_CREAT|O_EXCL|O_NOFOLLOW` and mode `0600`, so swapping the output
-  directory for a symlink after the checks cannot redirect writes. On other
+- On Unix, the output path is opened one component at a time relative to
+  the previous directory descriptor with `O_NOFOLLOW`, missing components
+  are created relative to that descriptor, and files are created relative to
+  the final descriptor with `O_CREAT|O_EXCL|O_NOFOLLOW` and mode `0600`. No
+  component is ever resolved through a symlink, so swapping any part of the
+  path for a link after the checks cannot redirect writes. On other
   platforms files are created by path with no-clobber semantics; the
   directory-swap race remains a residual risk there.
 - Existing files are never overwritten. If creating or writing a later file
