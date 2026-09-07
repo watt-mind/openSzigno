@@ -4,6 +4,7 @@
 //! parsed dossier is not necessarily authentic.
 
 mod decode;
+mod decrypt;
 mod error;
 mod inventory;
 mod model;
@@ -12,7 +13,8 @@ mod scan;
 mod sniff;
 mod xml;
 
-pub use decode::{DecodeOutcome, DecodedDocument, UnsupportedReason};
+pub use decode::{DecodeOutcome, DecodedDocument, UnsupportedReason, decode_document_with};
+pub use decrypt::{DecryptOptions, RecipientKey};
 pub use error::{Error, ErrorCode};
 pub use model::{
     Document, Dossier, Limits, MAX_INVENTORIED_DIGEST_METHODS, MAX_INVENTORIED_REFERENCE_URIS,

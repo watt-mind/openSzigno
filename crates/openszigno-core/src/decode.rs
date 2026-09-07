@@ -4,18 +4,39 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde::Serialize;
 use zip::ZipArchive;
 
+use crate::decrypt::{CmsOutcome, DecryptOptions, decrypt_cms};
 use crate::{Document, Error, ErrorCode, Limits};
 
+/// Why a document that parsed could not be turned back into its source bytes.
+///
+/// Every variant is a reason to skip one document, never to fail a run: a
+/// dossier addressed to somebody else is a perfectly valid dossier.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum UnsupportedReason {
+    /// The document is encrypted and no decryption key was supplied.
     Encrypted,
+    /// The transform chain is not one this crate reverses.
     TransformChain,
+    /// The document is encrypted, a key was supplied, and no `RecipientInfo`
+    /// names that key's certificate.
+    NoMatchingRecipient,
+    /// The CMS message uses a key-transport or content-encryption algorithm
+    /// outside the supported subset. `oid` names it.
+    UnsupportedCipher { oid: String },
+    /// The content is encrypted with DES-EDE3-CBC and legacy ciphers were not
+    /// allowed. `oid` names it.
+    LegacyCipher { oid: String },
 }
 
 #[derive(Clone, Debug)]
 pub struct DecodedDocument {
     pub bytes: Vec<u8>,
+    /// Whether an `encrypt` transform was reversed to produce `bytes`.
+    ///
+    /// This says a supplied key unwrapped the content encryption key, and
+    /// nothing at all about who produced the document or whether it is signed.
+    pub decrypted: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -24,19 +45,28 @@ pub enum DecodeOutcome {
     Unsupported(UnsupportedReason),
 }
 
+/// Decode one document without any decryption key, the behaviour
+/// [`Dossier::decode_document`](crate::Dossier::decode_document) exposes.
 pub(crate) fn decode_document(
     document: &Document,
     limits: &Limits,
 ) -> Result<DecodeOutcome, Error> {
-    if document.transforms.iter().any(|item| item == "encrypt") {
-        return Ok(DecodeOutcome::Unsupported(UnsupportedReason::Encrypted));
-    }
+    decode_document_with_options(document, limits, &DecryptOptions::default())
+}
 
-    let decoded = match document.transforms.as_slice() {
-        [base64] if base64 == "base64" => decode_base64(&document.payload, limits)?,
-        [zip, base64] if zip == "zip" && base64 == "base64" => {
-            let archive = decode_base64(&document.payload, limits)?;
-            decode_zip(&archive, limits)?
+fn decode_document_with_options(
+    document: &Document,
+    limits: &Limits,
+    decrypt: &DecryptOptions<'_>,
+) -> Result<DecodeOutcome, Error> {
+    // The specification fixes the forward order as `zip? -> encrypt? ->
+    // base64`, so reversing it is base64, then decryption, then expansion.
+    let (encrypted, compressed) = match document.transforms.as_slice() {
+        [base64] if base64 == "base64" => (false, false),
+        [zip, base64] if zip == "zip" && base64 == "base64" => (false, true),
+        [encrypt, base64] if encrypt == "encrypt" && base64 == "base64" => (true, false),
+        [zip, encrypt, base64] if zip == "zip" && encrypt == "encrypt" && base64 == "base64" => {
+            (true, true)
         }
         _ => {
             return Ok(DecodeOutcome::Unsupported(
@@ -44,6 +74,34 @@ pub(crate) fn decode_document(
             ));
         }
     };
+
+    let mut decoded = decode_base64(&document.payload, limits)?;
+    if encrypted {
+        let Some(key) = decrypt.key else {
+            return Ok(DecodeOutcome::Unsupported(UnsupportedReason::Encrypted));
+        };
+        decoded = match decrypt_cms(&decoded, key, decrypt.allow_legacy_ciphers, limits)? {
+            CmsOutcome::Plaintext(plaintext) => plaintext,
+            CmsOutcome::NoMatchingRecipient => {
+                return Ok(DecodeOutcome::Unsupported(
+                    UnsupportedReason::NoMatchingRecipient,
+                ));
+            }
+            CmsOutcome::UnsupportedAlgorithm(oid) => {
+                return Ok(DecodeOutcome::Unsupported(
+                    UnsupportedReason::UnsupportedCipher { oid },
+                ));
+            }
+            CmsOutcome::LegacyCipher(oid) => {
+                return Ok(DecodeOutcome::Unsupported(
+                    UnsupportedReason::LegacyCipher { oid },
+                ));
+            }
+        };
+    }
+    if compressed {
+        decoded = decode_zip(&decoded, limits)?;
+    }
 
     // Without a declared size there is nothing to compare against; the
     // omission is reported as a structural warning when the dossier is parsed.
@@ -59,7 +117,34 @@ pub(crate) fn decode_document(
             ),
         ));
     }
-    Ok(DecodeOutcome::Decoded(DecodedDocument { bytes: decoded }))
+    Ok(DecodeOutcome::Decoded(DecodedDocument {
+        bytes: decoded,
+        decrypted: encrypted,
+    }))
+}
+
+/// Decode one document of `dossier`, decrypting it when the options allow.
+///
+/// This is [`Dossier::decode_document`](crate::Dossier::decode_document) with
+/// a decryption policy. With [`DecryptOptions::default`] the two behave
+/// identically: an encrypted document is reported as
+/// [`UnsupportedReason::Encrypted`] and skipped.
+pub fn decode_document_with(
+    dossier: &crate::Dossier,
+    index: usize,
+    limits: &Limits,
+    decrypt: &DecryptOptions<'_>,
+) -> Result<DecodeOutcome, Error> {
+    decode_document_with_options(
+        dossier.documents.get(index).ok_or_else(|| {
+            Error::new(
+                ErrorCode::InvalidAttribute,
+                "document index is out of range",
+            )
+        })?,
+        limits,
+        decrypt,
+    )
 }
 
 fn decode_base64(payload: &str, limits: &Limits) -> Result<Vec<u8>, Error> {

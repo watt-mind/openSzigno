@@ -114,12 +114,11 @@ fn a_payload_above_the_decoded_size_limit_is_too_large() {
 
 #[test]
 fn an_encrypt_transform_anywhere_in_the_chain_is_unsupported() {
-    for chain in [
-        vec!["encrypt"],
-        vec!["encrypt", "base64"],
-        vec!["zip", "encrypt", "base64"],
-        vec!["base64", "encrypt"],
-    ] {
+    // The specification fixes the order as `zip? -> encrypt? -> base64`, so
+    // only those two chains are encrypted documents. `encrypt` in any other
+    // position is not a chain this format defines, and is reported as such
+    // rather than as something a decryption key could open.
+    for chain in [vec!["encrypt", "base64"], vec!["zip", "encrypt", "base64"]] {
         let xml = dossier_with(&document(1, "secret.bin", Some("bin"), 1, &chain, "eA=="));
         assert!(
             matches!(
@@ -127,6 +126,16 @@ fn an_encrypt_transform_anywhere_in_the_chain_is_unsupported() {
                 DecodeOutcome::Unsupported(UnsupportedReason::Encrypted)
             ),
             "{chain:?} must be reported as encrypted"
+        );
+    }
+    for chain in [vec!["encrypt"], vec!["base64", "encrypt"]] {
+        let xml = dossier_with(&document(1, "secret.bin", Some("bin"), 1, &chain, "eA=="));
+        assert!(
+            matches!(
+                decode(&xml),
+                DecodeOutcome::Unsupported(UnsupportedReason::TransformChain)
+            ),
+            "{chain:?} must be reported as an unsupported chain"
         );
     }
 }
