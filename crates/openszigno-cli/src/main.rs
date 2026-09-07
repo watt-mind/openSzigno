@@ -78,7 +78,7 @@ fn parse_validation_time(value: &str) -> Result<ValidationTime, String> {
 
 #[derive(Clone, Debug, Args)]
 struct VerifyArgs {
-    /// Input .es3 dossier.
+    /// Input .es3 dossier, or `-` to read it from standard input.
     file: PathBuf,
     /// Emit one stable JSON object on stdout.
     #[arg(long)]
@@ -159,7 +159,7 @@ impl VerifyArgs {
 
 #[derive(Clone, Debug, Args)]
 struct InputArgs {
-    /// Input .es3 dossier.
+    /// Input .es3 dossier, or `-` to read it from standard input.
     file: PathBuf,
     /// Emit one stable JSON object on stdout.
     #[arg(long)]
@@ -172,18 +172,32 @@ struct InputArgs {
 
 #[derive(Clone, Debug, Args)]
 struct ExtractArgs {
-    /// Input .es3 dossier.
+    /// Input .es3 dossier, or `-` to read it from standard input.
     file: PathBuf,
     /// Destination directory. Existing files are never overwritten.
-    #[arg(short, long)]
-    output: PathBuf,
+    #[arg(
+        short,
+        long,
+        required_unless_present = "stdout",
+        conflicts_with = "stdout"
+    )]
+    output: Option<PathBuf>,
     /// Emit one stable JSON object on stdout.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "stdout")]
     json: bool,
     /// Also accept a dossier whose root Dossier element is in this namespace,
     /// in addition to the known-compatible ones. Repeatable.
     #[arg(long = "allow-namespace", value_name = "URI")]
     allow_namespace: Vec<String>,
+    /// Extract only this document, named by its `object_ref` (the ds:Object Id
+    /// its DocumentProfile OBJREF points at) or as `#<index>` in source order.
+    /// Repeatable. Selectors never reach into an embedded dossier.
+    #[arg(long = "document", value_name = "SELECTOR")]
+    document: Vec<String>,
+    /// Write the selected document's raw payload bytes to standard output and
+    /// nothing else. Requires exactly one resolved, decodable document.
+    #[arg(long = "stdout")]
+    stdout: bool,
     /// Write embedded dossiers as raw payload files without expanding them.
     #[arg(long)]
     no_recursive: bool,
@@ -321,13 +335,13 @@ fn main() -> ExitCode {
         }
         Command::Extract(args) => {
             let options = args.parse_options();
-            let result = extract(
-                &args.file,
-                &args.output,
-                &options,
-                !args.no_recursive,
-                args.max_depth.min(MAX_NESTING_DEPTH),
-            );
+            let request = ExtractRequest {
+                selectors: &args.document,
+                to_stdout: args.stdout,
+                recursive: !args.no_recursive,
+                max_depth: args.max_depth.min(MAX_NESTING_DEPTH),
+            };
+            let result = extract(&args.file, args.output.as_deref(), &options, &request);
             ("extract", args.json, result)
         }
         Command::ValidateStructure(args) => {
@@ -353,6 +367,17 @@ fn main() -> ExitCode {
             };
             let written = if json_mode {
                 write_json(&response)
+            } else if let Some(payload) = &success.payload {
+                // Payload mode: stdout carries the document's bytes and
+                // nothing else, so every diagnostic goes to stderr.
+                write_payload(payload).inspect(|()| {
+                    for warning in &response.warnings {
+                        write_diagnostic(&format!(
+                            "warning [{}]: {}",
+                            warning.code, warning.message
+                        ));
+                    }
+                })
             } else {
                 write_human_success(command, &response)
             };
@@ -433,6 +458,9 @@ struct Success {
     input: InputInfo,
     data: Value,
     warnings: Vec<Notice>,
+    /// Raw bytes to write to stdout instead of a human summary, set only by
+    /// `extract --stdout`. Never combined with `--json`, which `clap` refuses.
+    payload: Option<Vec<u8>>,
     /// The process exit status for a completed run. `0` for every command
     /// except `verify`, which reports its verdict through statuses 6 and 7.
     exit: u8,
@@ -462,6 +490,7 @@ fn inspect(path: &Path, options: &ParseOptions) -> CliResult {
             }
         }),
         warnings,
+        payload: None,
         exit: 0,
     })
 }
@@ -476,6 +505,7 @@ fn list(path: &Path, options: &ParseOptions) -> CliResult {
             "documents": dossier.documents,
         }),
         warnings,
+        payload: None,
         exit: 0,
     })
 }
@@ -492,6 +522,7 @@ fn validate_structure(path: &Path, options: &ParseOptions) -> CliResult {
             "cryptographic_verification_performed": false
         }),
         warnings,
+        payload: None,
         exit: 0,
     })
 }
@@ -692,6 +723,7 @@ fn verify_command(args: &VerifyArgs) -> CliResult {
         // `cryptographic_verification_not_performed` is deliberately absent:
         // verification *was* attempted here, and the verdict says how it went.
         warnings: structural_warnings(&dossier),
+        payload: None,
         exit,
     })
 }
@@ -792,6 +824,10 @@ struct Plan<'a> {
     options: &'a ParseOptions,
     recursive: bool,
     max_depth: u32,
+    /// Top-level document indices to extract, or `None` for all of them.
+    /// It applies at depth 0 only: `--document` never reaches into an
+    /// embedded dossier, so a selected nested dossier still expands whole.
+    selection: Option<Vec<usize>>,
     /// Decoded bytes across the whole tree, against `max_total_decoded_bytes`.
     total: u64,
     warnings: Vec<Notice>,
@@ -799,19 +835,132 @@ struct Plan<'a> {
     nested_dossiers: usize,
 }
 
-fn extract(
-    path: &Path,
-    output: &Path,
-    options: &ParseOptions,
+/// What one `extract` run was asked to do, apart from where it reads and
+/// writes.
+struct ExtractRequest<'a> {
+    selectors: &'a [String],
+    to_stdout: bool,
     recursive: bool,
     max_depth: u32,
+}
+
+/// One document a `--document` selector resolved to.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct Selected {
+    index: usize,
+    object_ref: String,
+}
+
+/// Resolve the `--document` selectors against one dossier's top-level
+/// documents.
+///
+/// A selector is either `#<index>` in source order or an exact `object_ref`.
+/// Prefixes are deliberately not accepted: a selector that identified a
+/// document only by a shorter string would silently change meaning when the
+/// dossier gains a document. The result is in source order, whatever order
+/// the selectors were given in, and a document named twice is listed once.
+fn resolve_selection(dossier: &Dossier, selectors: &[String]) -> Result<Vec<Selected>, CliError> {
+    let mut chosen: Vec<usize> = Vec::new();
+    for selector in selectors {
+        let index = resolve_selector(dossier, selector)?;
+        if !chosen.contains(&index) {
+            chosen.push(index);
+        }
+    }
+    chosen.sort_unstable();
+    Ok(chosen
+        .into_iter()
+        .map(|index| Selected {
+            index,
+            object_ref: dossier.documents[index].object_ref.clone(),
+        })
+        .collect())
+}
+
+/// Resolve one selector to a top-level document index.
+fn resolve_selector(dossier: &Dossier, selector: &str) -> Result<usize, CliError> {
+    // A `dossier_path` like `2/0` names a document inside an embedded dossier,
+    // which this flag deliberately cannot reach. Saying so beats letting it
+    // fall through to a bare "no such document".
+    if selector.contains('/') {
+        return Err(CliError::invalid(
+            "document_not_found",
+            "a --document selector cannot name a document inside an embedded dossier; extract the embedded dossier first and run extract on the file it produced",
+        ));
+    }
+    if let Some(digits) = selector.strip_prefix('#') {
+        let index: usize = digits.parse().map_err(|_| {
+            CliError::invalid(
+                "document_not_found",
+                "a #<index> --document selector must be a decimal document index",
+            )
+        })?;
+        return match dossier.documents.iter().any(|item| item.index == index) {
+            true => Ok(index),
+            false => Err(CliError::invalid(
+                "document_not_found",
+                format!("no document has index {index}"),
+            )),
+        };
+    }
+    let mut matches = dossier
+        .documents
+        .iter()
+        .filter(|document| document.object_ref == selector);
+    let first = matches.next().ok_or_else(|| {
+        // The selector is an XML ID from the caller's own dossier, not payload
+        // content, so echoing it is safe and makes the error usable.
+        CliError::invalid(
+            "document_not_found",
+            format!("no document has the object_ref {selector}"),
+        )
+    })?;
+    if matches.next().is_some() {
+        return Err(CliError::invalid(
+            "document_ambiguous",
+            format!("more than one document has the object_ref {selector}"),
+        ));
+    }
+    Ok(first.index)
+}
+
+fn extract(
+    path: &Path,
+    output: Option<&Path>,
+    options: &ParseOptions,
+    request: &ExtractRequest<'_>,
 ) -> CliResult {
     let (bytes, dossier) = load(path, options)?;
     let input = valid_input(bytes.len());
+
+    let selection = match request.selectors.is_empty() {
+        true => None,
+        false => Some(
+            resolve_selection(&dossier, request.selectors)
+                .map_err(|error| failure(input.clone(), error))?,
+        ),
+    };
+    let selected_json = match &selection {
+        Some(selected) => Value::Array(
+            selected
+                .iter()
+                .map(|item| json!({ "index": item.index, "object_ref": item.object_ref }))
+                .collect(),
+        ),
+        None => Value::Null,
+    };
+
+    if request.to_stdout {
+        return extract_to_stdout(&dossier, selection.as_deref(), options, request, input);
+    }
+
     let mut plan = Plan {
         options,
-        recursive,
-        max_depth,
+        recursive: request.recursive,
+        max_depth: request.max_depth,
+        selection: selection
+            .as_ref()
+            .map(|selected| selected.iter().map(|item| item.index).collect()),
         total: 0,
         warnings: dossier_warnings(&dossier),
         skipped: 0,
@@ -824,6 +973,7 @@ fn extract(
         .plan_dossier(&dossier, String::new(), "", String::new(), 0)
         .map_err(|error| failure(input.clone(), error))?;
 
+    let output = output.expect("clap requires --output unless --stdout is given");
     let directory =
         OutputDir::open(output).map_err(|error| failure(input.clone(), error.into()))?;
     for entry in &root.entries {
@@ -867,9 +1017,101 @@ fn extract(
             "extracted": writer.extracted,
             "extracted_count": writer.extracted.len(),
             "skipped_count": plan.skipped,
-            "nested_dossiers_extracted": plan.nested_dossiers
+            "nested_dossiers_extracted": plan.nested_dossiers,
+            "selected": selected_json
         }),
         warnings: plan.warnings,
+        payload: None,
+        exit: 0,
+    })
+}
+
+/// Decode exactly one document and hand its raw bytes to stdout.
+///
+/// Nothing is written to the filesystem and nothing but the payload reaches
+/// stdout, so a caller can redirect the stream straight into a file. Anything
+/// that would make "the payload" ambiguous — no document, several documents,
+/// or an embedded dossier that recursion would have turned into a directory —
+/// is refused rather than guessed at.
+fn extract_to_stdout(
+    dossier: &Dossier,
+    selection: Option<&[Selected]>,
+    options: &ParseOptions,
+    request: &ExtractRequest<'_>,
+    input: InputInfo,
+) -> CliResult {
+    let refuse = |message: &str| {
+        failure(
+            input.clone(),
+            CliError::invalid("stdout_requires_single_document", message.to_owned()),
+        )
+    };
+    let index = match selection {
+        Some([only]) => only.index,
+        Some(_) => {
+            return Err(refuse(
+                "--stdout needs exactly one document; the selectors resolved to a different number",
+            ));
+        }
+        None => match dossier.documents.as_slice() {
+            [only] => only.index,
+            _ => {
+                return Err(refuse(
+                    "--stdout needs exactly one document; select one with --document",
+                ));
+            }
+        },
+    };
+    let document = dossier
+        .documents
+        .iter()
+        .find(|item| item.index == index)
+        .expect("the selection names a document of this dossier");
+
+    let decoded = match dossier
+        .decode_document(index, &options.limits)
+        .map_err(|error| failure(input.clone(), CliError::extraction(error)))?
+    {
+        DecodeOutcome::Decoded(decoded) => decoded.bytes,
+        DecodeOutcome::Unsupported(reason) => {
+            let notice = skip_notice(&index.to_string(), reason);
+            return Err(failure(
+                input,
+                CliError {
+                    code: "document_not_extractable",
+                    message: notice.message,
+                    exit: 5,
+                },
+            ));
+        }
+    };
+
+    // An embedded dossier would normally become a payload file *and* a
+    // `<file>.d` directory. One byte stream cannot carry both, so the caller
+    // must say which they meant by passing --no-recursive.
+    if request.recursive
+        && (document.nested_dossier || openszigno_core::sniff(&decoded) == DetectedType::Dossier)
+    {
+        return Err(refuse(
+            "the selected document embeds a dossier; pass --no-recursive to write its raw payload, or extract to a directory",
+        ));
+    }
+
+    let selected_json = json!([{ "index": index, "object_ref": document.object_ref }]);
+    let detected = openszigno_core::sniff(&decoded);
+    Ok(Success {
+        input,
+        data: json!({
+            "extracted": [],
+            "extracted_count": 0,
+            "skipped_count": 0,
+            "nested_dossiers_extracted": 0,
+            "selected": selected_json,
+            "stdout_bytes": decoded.len(),
+            "detected_type": detected.as_str()
+        }),
+        warnings: dossier_warnings(dossier),
+        payload: Some(decoded),
         exit: 0,
     })
 }
@@ -892,6 +1134,15 @@ impl Plan<'_> {
         let mut entries = Vec::new();
         let mut names = HashSet::new();
         for document in &dossier.documents {
+            // The selection applies to the top level only. A document left out
+            // by it was never asked for, so it is not a skip: `skipped_count`
+            // stays a count of documents this tool could not decode.
+            if depth == 0
+                && let Some(selected) = &self.selection
+                && !selected.contains(&document.index)
+            {
+                continue;
+            }
             let dossier_path = format!("{prefix}{}", document.index);
             let decoded = match dossier
                 .decode_document(document.index, &self.options.limits)
@@ -1210,60 +1461,87 @@ impl Writer {
     }
 }
 
-fn load(path: &Path, options: &ParseOptions) -> Result<(Vec<u8>, Dossier), Failure> {
-    let limits = &options.limits;
-    let metadata = fs::metadata(path).map_err(|_| {
-        failure(
-            InputInfo {
-                format: None,
-                bytes: None,
-            },
-            CliError::io("could not inspect the input file"),
-        )
-    })?;
-    if !metadata.is_file() {
-        return Err(failure(
-            InputInfo {
-                format: None,
-                bytes: Some(metadata.len()),
-            },
-            CliError::io("input is not a regular file"),
-        ));
-    }
-    if metadata.len() > limits.max_input_bytes {
-        return Err(failure(
-            InputInfo {
-                format: None,
-                bytes: Some(metadata.len()),
-            },
-            CliError::invalid(
-                "input_too_large",
-                format!("input exceeds {} bytes", limits.max_input_bytes),
-            ),
-        ));
-    }
-
-    let file = fs::File::open(path).map_err(|_| {
-        failure(
-            InputInfo {
-                format: None,
-                bytes: Some(metadata.len()),
-            },
-            CliError::io("could not open the input file"),
-        )
-    })?;
-    let mut bytes = Vec::with_capacity(metadata.len().min(usize::MAX as u64) as usize);
-    file.take(limits.max_input_bytes.saturating_add(1))
-        .read_to_end(&mut bytes)
-        .map_err(|_| {
+/// The one bounded reader every command takes its input through.
+///
+/// `path` is either a regular file or `-`, which means standard input. Both
+/// paths read at most `max_input_bytes + 1` bytes and reject the input when
+/// that many arrive, so the cap holds without trusting filesystem metadata —
+/// which a pipe has none of, and which a file can change under us anyway. The
+/// whole dossier is buffered in memory either way; that is inherent to the
+/// format, whose XML must be parsed as one tree.
+fn read_input(path: &Path, limits: &Limits) -> Result<Vec<u8>, Failure> {
+    let unknown = || InputInfo {
+        format: None,
+        bytes: None,
+    };
+    let cap = limits.max_input_bytes.saturating_add(1);
+    let (mut source, declared): (Box<dyn Read>, Option<u64>) = if path == Path::new("-") {
+        (Box::new(io::stdin().lock()), None)
+    } else {
+        let metadata = fs::metadata(path)
+            .map_err(|_| failure(unknown(), CliError::io("could not inspect the input file")))?;
+        if !metadata.is_file() {
+            return Err(failure(
+                InputInfo {
+                    format: None,
+                    bytes: Some(metadata.len()),
+                },
+                CliError::io("input is not a regular file"),
+            ));
+        }
+        if metadata.len() > limits.max_input_bytes {
+            return Err(failure(
+                InputInfo {
+                    format: None,
+                    bytes: Some(metadata.len()),
+                },
+                too_large(limits),
+            ));
+        }
+        let file = fs::File::open(path).map_err(|_| {
             failure(
                 InputInfo {
                     format: None,
                     bytes: Some(metadata.len()),
                 },
-                CliError::io("could not read the input file"),
+                CliError::io("could not open the input file"),
             )
         })?;
+        (Box::new(file), Some(metadata.len()))
+    };
+
+    let mut bytes = Vec::with_capacity(declared.unwrap_or(0).min(1024 * 1024) as usize);
+    source
+        .by_ref()
+        .take(cap)
+        .read_to_end(&mut bytes)
+        .map_err(|_| {
+            failure(
+                InputInfo {
+                    format: None,
+                    bytes: declared,
+                },
+                CliError::io("could not read the input"),
+            )
+        })?;
+    if bytes.len() as u64 > limits.max_input_bytes {
+        // The true size is unknown: reading stopped one byte past the cap. The
+        // envelope says so rather than reporting the truncated length as if it
+        // were the input size.
+        return Err(failure(unknown(), too_large(limits)));
+    }
+    Ok(bytes)
+}
+
+fn too_large(limits: &Limits) -> CliError {
+    CliError::invalid(
+        "input_too_large",
+        format!("input exceeds {} bytes", limits.max_input_bytes),
+    )
+}
+
+fn load(path: &Path, options: &ParseOptions) -> Result<(Vec<u8>, Dossier), Failure> {
+    let bytes = read_input(path, &options.limits)?;
     let dossier = openszigno_core::parse_with_options(&bytes, options).map_err(|error| {
         failure(
             InputInfo {
@@ -1518,6 +1796,16 @@ fn write_json(response: &Response) -> io::Result<()> {
     let stdout = io::stdout();
     let mut stdout = stdout.lock();
     stdout.write_all(&bytes)?;
+    stdout.flush()
+}
+
+/// Write raw payload bytes to stdout, byte for byte and with nothing added.
+/// A closed or failing stdout is an I/O failure the caller turns into exit
+/// status 3, never a panic.
+fn write_payload(bytes: &[u8]) -> io::Result<()> {
+    let stdout = io::stdout();
+    let mut stdout = stdout.lock();
+    stdout.write_all(bytes)?;
     stdout.flush()
 }
 
@@ -2001,6 +2289,63 @@ mod tests {
         let error = claim_name(&mut names, "report.TXT").expect_err("names collide");
         assert_eq!(error.code, "output_name_collision");
         assert_eq!(error.exit, 5);
+    }
+
+    /// A dossier cannot reach this state through the parser, which refuses a
+    /// repeated XML ID, so the guard is exercised on a mutated model. It stays
+    /// because "pick one" would be the wrong answer if it ever could.
+    #[test]
+    fn two_documents_sharing_an_object_ref_are_ambiguous() {
+        let mut dossier = openszigno_core::parse(
+            std::fs::read(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../tests/fixtures/two-documents.es3"),
+            )
+            .expect("the fixture is readable")
+            .as_slice(),
+            &Limits::default(),
+        )
+        .expect("the fixture parses");
+        let shared = dossier.documents[0].object_ref.clone();
+        dossier.documents[1].object_ref = shared.clone();
+
+        let error = resolve_selector(&dossier, &shared).expect_err("the selector is ambiguous");
+        assert_eq!(error.code, "document_ambiguous");
+        assert_eq!(error.exit, 4);
+        // An index selector stays usable: it names exactly one document.
+        assert_eq!(resolve_selector(&dossier, "#1").expect("index resolves"), 1);
+    }
+
+    /// A selector is matched in full: a prefix of an `object_ref` names
+    /// nothing, so a selector cannot change meaning as a dossier grows.
+    #[test]
+    fn an_object_ref_selector_is_never_a_prefix_match() {
+        let dossier = openszigno_core::parse(
+            std::fs::read(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../tests/fixtures/two-documents.es3"),
+            )
+            .expect("the fixture is readable")
+            .as_slice(),
+            &Limits::default(),
+        )
+        .expect("the fixture parses");
+
+        assert_eq!(
+            resolve_selector(&dossier, "DocumentObject")
+                .expect_err("a prefix matches nothing")
+                .code,
+            "document_not_found"
+        );
+        assert_eq!(
+            resolve_selection(&dossier, &["#1".to_owned(), "DocumentObjectA".to_owned()])
+                .expect("both resolve")
+                .iter()
+                .map(|item| item.index)
+                .collect::<Vec<_>>(),
+            [0, 1],
+            "the selection is returned in source order"
+        );
     }
 
     #[test]

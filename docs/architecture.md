@@ -229,20 +229,103 @@ under `data.limits`. They are not yet configurable on the command line; see
 | `inspect FILE` | Identify the format; return dossier metadata, limits, and capability warnings. | No |
 | `list FILE` | Return deterministic document records and signature/timestamp presence. | No |
 | `extract FILE --output DIR` | Decode supported documents, and the dossiers they embed, into a new or existing directory without overwriting files. | No |
+| `extract FILE --document SEL --stdout` | Decode exactly one document and write its raw payload bytes to stdout. Writes no files. | No |
 | `validate-structure FILE` | Apply the project's strict structural rules without validating signatures. | No |
 | `verify FILE` | Verify every `ds:Signature`: canonicalization, reference digests, the signature value, the e-dossier reference-scope rules, and the certificate path. Cannot report a signature as `valid` in this release. | No |
+
+In every command `FILE` is either a path to a regular file or `-`, which
+reads the dossier from standard input; see [Reading from stdin](#reading-from-stdin).
 
 `verify` additionally accepts `--trust-store <DIR>` and `--at <RFC3339>`; see
 [The `verify` command](#the-verify-command).
 
 All commands accept `--json` and `--allow-namespace <URI>` (repeatable).
-`extract` additionally accepts `--no-recursive`, which writes an embedded
-dossier as a plain payload file instead of expanding it, and
-`--max-depth <N>` (default 3), which bounds the nesting levels expanded;
-values above the hard cap of 8 are clamped to 8. In JSON mode, stdout contains
-exactly one JSON
-object and diagnostics go to stderr. Document ordering is the source XML
-order. No command writes XML payload bytes to stdout.
+`extract` additionally accepts:
+
+| Flag | Meaning |
+| --- | --- |
+| `--no-recursive` | Write an embedded dossier as a plain payload file instead of expanding it. |
+| `--max-depth <N>` | Nesting levels of embedded dossiers to expand, default 3; values above the hard cap of 8 are clamped to 8. |
+| `--document <SELECTOR>` | Extract only the named documents. Repeatable. See [Selecting documents](#selecting-documents). |
+| `--stdout` | Write one document's raw payload bytes to stdout. See [The payload stdout mode](#the-payload-stdout-mode). |
+
+In JSON mode, stdout contains exactly one JSON object and diagnostics go to
+stderr. Document ordering is the source XML order. No command writes XML
+payload bytes to stdout except `extract --stdout`, which writes the selected
+document's payload and nothing else.
+
+### Reading from stdin
+
+`FILE` may be `-`, which reads the dossier from standard input instead of from
+a path. It works for every command, through the same bounded reader, and the
+envelope's `input.format` and `input.bytes` are reported exactly as they are
+for a file.
+
+- At most `max_input_bytes + 1` bytes are read. Arriving at that many is
+  `input_too_large` (exit 4), the same code a file over the cap produces, and
+  `input.bytes` is `null` because the true size of a stream that was not read
+  to its end is unknown.
+- The cap is enforced on the bytes actually read. No filesystem metadata is
+  consulted, because a pipe has none and a file's metadata can change between
+  the check and the read.
+- The dossier is buffered in memory in full. That is inherent to the format:
+  the XML must be parsed as one tree, and payloads are decoded from it.
+- Standard input and standard output are independent, so `-` combines with
+  `--stdout`: `openszigno extract - --document '#0' --stdout` is a valid
+  filter.
+
+### Selecting documents
+
+`--document <SELECTOR>` restricts `extract` to the documents it names. The
+flag is repeatable, and a selector is one of:
+
+| Form | Matches |
+| --- | --- |
+| `#<index>` | The top-level document at that source-order index. |
+| anything else | The document whose `object_ref` — the `ds:Object` `Id` its `DocumentProfile` `OBJREF` names — is exactly this string. |
+
+- Matching is exact. A prefix of an `object_ref` matches nothing, so a
+  selector cannot change meaning when a dossier gains a document.
+- A selector that matches nothing is `document_not_found` (exit 4); one that
+  matches more than one document is `document_ambiguous` (exit 4). The latter
+  is unreachable through a parsed dossier, whose XML IDs are unique, and is
+  kept because guessing would be the wrong answer.
+- Selectors never reach into an embedded dossier. A selector containing `/` —
+  the shape of a `dossier_path` such as `2/0` — is rejected as
+  `document_not_found` with a message saying to extract the embedded dossier
+  and run `extract` on the file that produced.
+- Recursion is unchanged for a selected document: a selected embedded dossier
+  is still written as a payload file *and* expanded into `<file>.d`, subject to
+  `--no-recursive` and `--max-depth` exactly as before.
+- The order of the selectors does not matter. The selection is resolved,
+  deduplicated, and extracted in source order, so naming a document twice
+  extracts it once.
+- Every other rule is unchanged: the limits, the naming and deduplication
+  rules, the no-clobber semantics, and the all-or-nothing rollback all apply
+  to the selected documents.
+- `skipped_count` counts only documents skipped for capability reasons —
+  encryption or an unsupported transform chain — *among the selection*. A
+  document that was simply not selected was never asked for and is not a skip.
+
+### The payload stdout mode
+
+`--stdout` writes one document's decoded payload bytes to standard output,
+byte for byte, with nothing added and nothing else on the stream. Diagnostics
+go to stderr. No file and no directory is created.
+
+- `--stdout` with `--json` is a usage error (exit 2), and so is `--stdout`
+  with `--output`. The JSON envelope is never redirected to stderr: exactly
+  one machine-readable stream per run stays the contract.
+- The run must resolve to exactly one document. Without `--document` that
+  means a dossier holding exactly one document; otherwise the selection must
+  name exactly one. Anything else is `stdout_requires_single_document`
+  (exit 4).
+- A selected document that embeds a dossier is also
+  `stdout_requires_single_document` while recursion is on, because a directory
+  cannot be written to a byte stream. `--no-recursive` writes its raw payload.
+- A selected document that is encrypted, or whose transform chain is
+  unsupported, is `document_not_extractable` (exit 5).
+- A closed or failing stdout is exit 3, as everywhere else.
 
 ## JSON envelope
 
@@ -315,7 +398,7 @@ writes one compact line; this is pretty-printed:
 | --- | --- |
 | `inspect` | `dossier`, `limits`, `capabilities`. |
 | `list` | `dossier`, plus `documents`: an array in source order with `index`, `title`, `creation_date`, `mime_type` (`media_type`, `subtype`, `extension`, `charset`), `source_size`, `object_ref`, `transforms`, and `nested_dossier`. `source_size` is `null` when the profile omits `SourceSize`. |
-| `extract` | `extracted` (array of `document_index`, `dossier_path`, `filename`, `path`, `bytes`, `detected_type`, `declared_type`), `extracted_count`, `skipped_count`, `nested_dossiers_extracted`. |
+| `extract` | `extracted` (array of `document_index`, `dossier_path`, `filename`, `path`, `bytes`, `detected_type`, `declared_type`), `extracted_count`, `skipped_count`, `nested_dossiers_extracted`, `selected`. |
 | `validate-structure` | `valid_structure`, `documents`, `conformance_warnings`, `cryptographic_verification_performed` (always `false`). |
 | `verify` | `verdict`, `verification_time`, `policy`, `limits`, `counts`, `checks`, `signatures`. See [The `verify` command](#the-verify-command). |
 
@@ -338,6 +421,12 @@ Each `extracted` entry describes one written file:
 `extracted_count` counts every file written across the tree, `skipped_count`
 every document skipped across the tree, and `nested_dossiers_extracted` the
 embedded dossiers that were expanded.
+
+`selected` is the resolved `--document` selection: an array of
+`{"index": <number>, "object_ref": <string>}` objects in source order, one per
+selected top-level document. It is `null` when no `--document` was given, so a
+consumer can tell "the whole dossier" apart from "these documents". The field
+is additive; `schema_version` stays `1`.
 
 The `dossier` object carries `title`, `category` (or `null`), `creation_date`
 (or `null`),
@@ -437,6 +526,10 @@ I/O and extraction policy.
 | `unsafe_output_name` | CLI | 5 | A document title or declared extension cannot be used as a filename, or the derived `<file>.d` directory name would be too long. |
 | `output_name_collision` | CLI | 5 | Residual: two outputs still map to the same name in one directory after deduplication. |
 | `output_exists` | CLI | 5 | A destination file already exists or cannot be created safely. |
+| `document_not_found` | CLI | 4 | A `--document` selector matches no document, is not a decimal index after `#`, or names a document inside an embedded dossier. |
+| `document_ambiguous` | CLI | 4 | A `--document` `object_ref` selector matches more than one document. Unreachable through a parsed dossier, whose XML IDs are unique. |
+| `stdout_requires_single_document` | CLI | 4 | `--stdout` did not resolve to exactly one document, or the one it resolved to embeds a dossier while recursion is on. |
+| `document_not_extractable` | CLI | 5 | The document `--stdout` selected is encrypted or uses an unsupported transform chain. |
 | `trust_store_invalid` | CLI | 3 | `--trust-store` does not name a readable directory, holds a file that is not PEM or DER certificate data, or holds no trust anchor. A partially loaded store would silently change what "trusted" means, so the run fails instead. |
 | `unsafe_output_directory` | CLI | 5 | The output path contains a symlink or reparse point, or is not a real directory. |
 | `total_size_limit` | CLI | 5 | Aggregate decoded size exceeds `max_total_decoded_bytes`. |
@@ -1923,6 +2016,13 @@ in its own right. A TSA certificate that was actually revoked makes the check
   fails, everything the same run created — files and the subdirectories it
   made, deepest first — is removed before the error is reported; the message
   says so if that clean-up itself fails.
+- Restrict the run to `--document` selectors when any are given. Selection
+  applies to the top level only, changes nothing about how a selected document
+  is decoded, named, deduplicated, or expanded, and is reported back as
+  `data.selected`. See [Selecting documents](#selecting-documents).
+- Write a payload to stdout only when `--stdout` names exactly one decodable
+  document, and then write nothing else to that stream. See
+  [The payload stdout mode](#the-payload-stdout-mode).
 - Enforce fixed limits for dossier bytes, document count, decoded bytes, ZIP
   member count, per-member bytes, total bytes, and compression ratio.
 - Report document encryption, missing payload references, and unsupported

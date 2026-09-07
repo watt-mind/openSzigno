@@ -12,6 +12,45 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
 
 ### Added (M3: container timestamps, online revocation, trusted-list identities)
 
+- **`extract --document <SELECTOR>`**, repeatable, extracts only the documents
+  it names. A selector is either `#<index>` in source XML order or an exact
+  `object_ref` — the `ds:Object` `Id` the `DocumentProfile` `OBJREF` points at.
+  Matching is exact; a prefix matches nothing, so a selector cannot change
+  meaning as a dossier grows. An unmatched selector is `document_not_found`
+  (exit 4) and one matching several documents is `document_ambiguous`
+  (exit 4). Selectors never reach into an embedded dossier: a selector shaped
+  like a `dossier_path` (`2/0`) is refused with a message saying to extract
+  the embedded dossier and run `extract` on the resulting file. Everything
+  else is unchanged for the selected documents — the limits, naming and
+  deduplication, no-clobber semantics, all-or-nothing rollback, and recursion
+  into a selected embedded dossier. `skipped_count` counts only documents
+  skipped for capability reasons among the selection.
+- **`extract --stdout`** writes one document's decoded payload bytes to
+  standard output, byte for byte, with nothing else on the stream and every
+  diagnostic on stderr; no file is written. It needs exactly one resolved,
+  decodable document: anything else is `stdout_requires_single_document`
+  (exit 4), including a selected embedded dossier while recursion is on, which
+  `--no-recursive` resolves. An encrypted or unsupported document is
+  `document_not_extractable` (exit 5). `--stdout` with `--json` or with
+  `--output` is a usage error (exit 2); the JSON envelope is never moved to
+  stderr. A closed stdout stays exit 3.
+
+  ```sh
+  openszigno extract file.es3 --document '#0' --stdout > payload.pdf
+  ```
+
+- **`FILE` may be `-`** on every command, reading the dossier from standard
+  input through the one bounded reader the CLI uses for files. At most
+  `max_input_bytes + 1` bytes are read and reaching that is the usual
+  `input_too_large` (exit 4), with `input.bytes` `null` because the true size
+  of a stream that was not read to its end is unknown. The cap no longer
+  relies on filesystem metadata for either input. The dossier is buffered in
+  memory in full, which the format requires. stdin and stdout are independent,
+  so `-` and `--stdout` combine.
+- **New JSON.** `extract` gains `data.selected`: the resolved selection as an
+  array of `{index, object_ref}` in source order, or `null` when no
+  `--document` was given. `schema_version` stays `1`; the field is additive.
+
 - **`--online` revocation fetching**, implemented in the CLI. The
   `openszigno-verify` crate stays network-free and structurally cannot open a
   socket; everything fetched reaches it through the same `RevocationSource` a

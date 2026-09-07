@@ -183,8 +183,22 @@ openszigno extract tests/fixtures/plain-base64.es3 --output ./out
 
 ```text
 Extracted 1 document(s).
-[0] hello.txt (41 B)
+[0] hello.txt (41 B, text)
 Extraction is not proof of signature validity.
+```
+
+One document straight to a file, without a scratch directory. `#0` is the
+first document in source XML order; `openszigno list` shows the indices and
+the `OBJREF` values a selector can use instead:
+
+```sh
+openszigno extract file.es3 --document '#0' --stdout > payload.pdf
+```
+
+The dossier itself can come from a pipe, on any command:
+
+```sh
+cat file.es3 | openszigno list - --json
 ```
 
 Agent mode. The tool writes one compact object; the example below is
@@ -300,7 +314,8 @@ openszigno inspect tests/fixtures/doctype.es3 --json
 | `openszigno inspect FILE` | Identifies the dossier and reports title, category, namespace, XML encoding, document count, embedded-dossier count, signature/timestamp presence, the active limits, and capability flags. | No |
 | `openszigno list FILE` | Lists document records in source XML order with title, creation date, MIME type, declared source size (`null`/`?` when the dossier omits it), `OBJREF`, transform chain, and whether the document embeds a dossier. | No |
 | `openszigno validate-structure FILE` | Applies the strict structural rules and reports `valid_structure`, `conformance_warnings`, plus `cryptographic_verification_performed: false`. | No |
-| `openszigno extract FILE --output DIR` | Decodes supported payloads into `DIR`, expanding embedded dossiers into `<file>.d` subdirectories, deduplicating repeated titles, never overwriting an existing file. | Yes |
+| `openszigno extract FILE --output DIR` | Decodes supported payloads into `DIR`, expanding embedded dossiers into `<file>.d` subdirectories, deduplicating repeated titles, never overwriting an existing file. Restrict it to named documents with `--document`. | Yes |
+| `openszigno extract FILE --document SEL --stdout` | Decodes exactly one document and writes its raw payload bytes to stdout, with diagnostics on stderr. | No |
 | `openszigno verify FILE` | Verifies every `ds:Signature`: canonicalization, reference digests, the signature value, the mandated e-dossier reference scope, the XAdES signed `SigningCertificate` binding, RFC 3161 signature timestamps, the certificate path against your trust store and any ETSI TS 119 612 trusted lists, and revocation from the signature's own `RevocationValues` and your revocation store. Reports a per-signature verdict of `valid`, `invalid`, or `indeterminate`. | No |
 
 Flags:
@@ -308,10 +323,13 @@ Flags:
 | Flag | Applies to | Meaning |
 | --- | --- | --- |
 | `--json` | all commands | Emit exactly one JSON object on stdout. |
+| `FILE` as `-` | all commands | Read the dossier from standard input instead of from a path. The stream is capped at `max_input_bytes` and buffered in memory. |
 | `--allow-namespace URI` | all commands | Also accept a dossier rooted in this namespace, in addition to the known-compatible ones. Repeatable. |
 | `-o`, `--output DIR` | `extract` | Destination directory; created if missing. |
 | `--no-recursive` | `extract` | Write an embedded dossier as a payload file instead of expanding it. |
 | `--max-depth N` | `extract` | Nesting levels of embedded dossiers to expand (default 3); values above the hard cap of 8 are clamped. |
+| `--document SELECTOR` | `extract` | Extract only this document, named by its `object_ref` (exact match) or as `#<index>` in source order. Repeatable. Selectors never reach into an embedded dossier; a selected embedded dossier still expands into `<file>.d`. An unmatched selector is `document_not_found` (exit 4). |
+| `--stdout` | `extract` | Write the selected document's raw payload bytes to stdout and nothing else; diagnostics go to stderr and no files are written. Needs exactly one resolved, decodable document. Cannot be combined with `--json` or `--output`. |
 | `--trust-store DIR` | `verify` | Directory of trust anchors (`anchors/*`, PEM or DER) and optional extra CA certificates (`intermediates/*`). A directory of certificates with no `anchors` subdirectory is read as anchors. Without it, every chain check is `unknown`. |
 | `--trust-list FILE` | `verify` | ETSI TS 119 612 trusted list (XML) to take trust anchors from. Repeatable. Its anchors join the `--trust-store` ones, each reported with its origin, and only these can make a chain `qualified`. Nothing is fetched; see [docs/trust.md](docs/trust.md). |
 | `--lotl FILE` | `verify` | EU list of trusted lists (XML). Its `PointersToOtherTSL` entries name the national lists' signing certificates, so one out-of-band certificate bootstraps every `--trust-list`. The LOTL is verified against `--trust-list-signer` first and contributes no trust anchors of its own. |
