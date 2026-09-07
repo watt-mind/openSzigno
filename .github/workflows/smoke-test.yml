@@ -1,0 +1,44 @@
+name: Release smoke test
+
+# Custom `dist` job, wired in as `global-artifacts-jobs` in
+# dist-workspace.toml. It runs after the platform binaries are built and
+# before the `host` job uploads them, so a binary that cannot read a
+# synthetic dossier never reaches a release.
+
+on:
+  workflow_call:
+    inputs:
+      plan:
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  smoke-test:
+    name: Smoke-test the Linux binary
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Fetch the built archives
+        uses: actions/download-artifact@v8
+        with:
+          pattern: artifacts-build-local-*
+          path: archives
+          merge-multiple: true
+      - name: Unpack the x86_64 musl archive
+        run: |
+          archive=archives/openszigno-cli-x86_64-unknown-linux-musl.tar.gz
+          test -f "$archive"
+          mkdir -p smoke
+          tar -C smoke -xzf "$archive"
+          echo "BIN=$PWD/smoke/openszigno-cli-x86_64-unknown-linux-musl/openszigno" >> "$GITHUB_ENV"
+      - name: Inspect a synthetic fixture
+        run: |
+          "$BIN" --version
+          "$BIN" inspect tests/fixtures/plain-base64.es3 --json | tee inspect.json
+          test "$(jq -r .ok inspect.json)" = "true"
+          test "$(jq -r .input.format inspect.json)" = "microsec-es3"

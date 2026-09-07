@@ -6,6 +6,11 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
+readme = "../../README.md"
+homepage = "https://github.com/watt-mind/openSzigno"
+documentation = "https://docs.rs/openszigno-core"
+keywords = ["e-szigno", "es3", "dossier", "xml", "microsec"]
+categories = ["parser-implementations", "encoding"]
 
 [dependencies]
 base64.workspace = true

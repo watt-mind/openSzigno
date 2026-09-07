@@ -21,3 +21,8 @@ tempfile = "3.23.0"
 thiserror = "2.0.17"
 unicode-normalization = "0.1"
 zip = { version = "8.1.0", default-features = false, features = ["deflate"] }
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"

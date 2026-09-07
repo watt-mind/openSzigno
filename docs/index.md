@@ -10,6 +10,7 @@ command reference.
 | [testing.md](testing.md) | Test layout, how to run tests and coverage, the public fixture policy, and the private opt-in smoke tests. |
 | [verify-design.md](verify-design.md) | M2 design proposal for XMLDSig/XAdES verification: Rust ecosystem survey, pipeline stages and stable check codes, JSON result shape, trust and revocation policy, phased delivery. |
 | [references.md](references.md) | Index of the primary specifications, standards, RFCs, trust-list and CA material the project relies on, with canonical links and checksums; the files themselves live in the gitignored `refs/` cache. |
+| [releasing.md](releasing.md) | How a release is cut: the branch and tag steps, what each release workflow produces, the distribution channels, the required secrets and organisation-side setup, and how to rehearse a release with a prerelease tag. |
 | [roadmap.md](roadmap.md) | Ordered milestones (custom namespaces, signature verification, timestamp verification, decryption), engineering items, residual risks, and the private-corpus policy for maintainers. |
 
 Project policies live at the repository root:

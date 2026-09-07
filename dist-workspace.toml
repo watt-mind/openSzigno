@@ -1,0 +1,46 @@
+[workspace]
+members = ["cargo:."]
+
+# Config for 'dist'. Regenerate .github/workflows/release.yml with
+# `dist init --yes` or `dist generate` after changing anything here.
+[dist]
+# The preferred dist version to use in CI (Cargo.toml SemVer syntax)
+cargo-dist-version = "0.32.0"
+# CI backends to support
+ci = "github"
+# The installers to generate for each app
+installers = ["shell", "powershell", "homebrew"]
+# Target platforms to build apps for (Rust target-triple syntax)
+targets = [
+    "x86_64-unknown-linux-musl",
+    "aarch64-unknown-linux-musl",
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+    "x86_64-pc-windows-msvc",
+]
+# Path that installers should place binaries in
+install-path = "CARGO_HOME"
+# Where to host releases
+hosting = "github"
+# Whether to install an updater program
+install-updater = false
+# Checksum algorithm published beside every archive
+checksum = "sha256"
+# Archive formats, kept as they were before dist was adopted
+unix-archive = ".tar.gz"
+windows-archive = ".zip"
+# On a pull request, only run the planning job
+pr-run-mode = "plan"
+# The Homebrew tap the formula is pushed to
+tap = "watt-mind/homebrew-tap"
+# Formula name in the tap, so the command is `brew install watt-mind/tap/openszigno`
+formula = "openszigno"
+# Publish the Homebrew formula after the artifacts are hosted
+publish-jobs = ["homebrew"]
+# Do not create the GitHub Release: a maintainer drafts it first and dist
+# undrafts it once every job has succeeded. dist 0.32 has no option that
+# leaves a release drafted at the end of a run.
+create-release = false
+# Smoke-test the built binary on a synthetic fixture before anything is
+# published.
+global-artifacts-jobs = ["./smoke-test"]
