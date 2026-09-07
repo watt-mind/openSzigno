@@ -169,16 +169,29 @@ jobs:
       # would be uploaded.
       - name: Package openszigno-core
         run: cargo package -p openszigno-core --no-verify --locked
-      - name: Package openszigno-verify
-        run: cargo package -p openszigno-verify --no-verify --locked
-      - name: Package openszigno-cli
-        run: cargo package -p openszigno-cli --no-verify --locked
+      # The dependent crates pin openszigno-core at the workspace version.
+      # Packaging them resolves that dependency against crates.io, which
+      # cannot succeed on a version-bump pull request until the release
+      # publishes core. Package them when the version exists, skip with a
+      # notice otherwise; the release workflow publishes in order.
+      - name: Package the dependent crates
+        run: |
+          version=$(cargo metadata --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.name == "openszigno-core") | .version')
+          if curl -sSf "https://index.crates.io/op/en/openszigno-core" \
+              | jq -e --arg v "$version" 'select(.vers == $v)' >/dev/null; then
+            cargo package -p openszigno-verify --no-verify --locked
+            cargo package -p openszigno-cli --no-verify --locked
+          else
+            echo "::notice::openszigno-core $version is not on crates.io yet; skipping the dependent crates until the release publishes it"
+          fi
       - name: List the packaged files
         run: |
           set -euo pipefail
-          for crate in openszigno-core openszigno-verify openszigno-cli; do
-            echo "== $crate"
-            tar -tzf "target/package/${crate}-"*.crate | sort
+          shopt -s nullglob
+          for archive in target/package/*.crate; do
+            echo "== $(basename "$archive")"
+            tar -tzf "$archive" | sort
           done
 
   container:

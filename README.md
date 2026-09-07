@@ -48,13 +48,13 @@ brew install watt-mind/tap/openszigno
 ### Shell installer (macOS and Linux)
 
 ```sh
-curl --proto '=https' --tlsv1.2 -LsSf https://github.com/watt-mind/openSzigno/releases/download/v0.2.0/openszigno-cli-installer.sh | sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/watt-mind/openSzigno/releases/download/v0.3.0/openszigno-cli-installer.sh | sh
 ```
 
 ### PowerShell installer (Windows)
 
 ```powershell
-powershell -ExecutionPolicy Bypass -c "irm https://github.com/watt-mind/openSzigno/releases/download/v0.2.0/openszigno-cli-installer.ps1 | iex"
+powershell -ExecutionPolicy Bypass -c "irm https://github.com/watt-mind/openSzigno/releases/download/v0.3.0/openszigno-cli-installer.ps1 | iex"
 ```
 
 Both installers place the binary in the Cargo home directory
@@ -83,7 +83,7 @@ nothing else, and it runs as the numeric user `65532`. Mount the directory
 holding the dossier and refer to the file by its path inside the container.
 
 ```sh
-docker run --rm -v "$PWD:/work" ghcr.io/watt-mind/openszigno:0.2.0 inspect /work/file.es3 --json
+docker run --rm -v "$PWD:/work" ghcr.io/watt-mind/openszigno:0.3.0 inspect /work/file.es3 --json
 ```
 
 Tags are the release tag (`v0.2.0`), the bare version (`0.2.0`), and
@@ -99,8 +99,8 @@ and unpack to a directory of the same name containing the binary, the
 `README.md`, the `CHANGELOG.md`, and the `LICENSE`.
 
 ```sh
-curl -LO https://github.com/watt-mind/openSzigno/releases/download/v0.2.0/openszigno-cli-x86_64-unknown-linux-musl.tar.gz
-curl -LO https://github.com/watt-mind/openSzigno/releases/download/v0.2.0/openszigno-cli-x86_64-unknown-linux-musl.tar.gz.sha256
+curl -LO https://github.com/watt-mind/openSzigno/releases/download/v0.3.0/openszigno-cli-x86_64-unknown-linux-musl.tar.gz
+curl -LO https://github.com/watt-mind/openSzigno/releases/download/v0.3.0/openszigno-cli-x86_64-unknown-linux-musl.tar.gz.sha256
 tar -xzf openszigno-cli-x86_64-unknown-linux-musl.tar.gz
 ```
 
