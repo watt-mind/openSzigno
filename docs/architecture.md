@@ -736,8 +736,8 @@ meaningless:
    present; the signature sits at `//es:Document/ds:Signature`,
    `//es:Dossier/ds:Signature`, or inside an `xades:CounterSignature` (see
    [Countersignatures](#countersignatures)); the canonicalization, signature,
-   and digest algorithms are inside the pinned allowlist; every transform is inside the
-   transform allowlist; every reference URI is `""` or `#id`; every `#id`
+   and digest algorithms are inside the pinned allowlist; every transform is
+   inside the transform allowlist; every reference URI is `""` or `#id`; every `#id`
    resolves to exactly one node in the ID space `openszigno-core` validated;
    and the mandated e-dossier reference set is covered. Any failure here makes
    the verdict `invalid` and the later stages are not attempted — there is no
