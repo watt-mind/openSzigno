@@ -48,6 +48,8 @@ pub const ENVELOPED_URI: &str = "http://www.w3.org/2000/09/xmldsig#enveloped-sig
 pub const XSLT_URI: &str = "http://www.w3.org/TR/1999/REC-xslt-19991116";
 pub const XPATH_URI: &str = "http://www.w3.org/TR/1999/REC-xpath-19991116";
 pub const SIGNED_PROPERTIES_TYPE: &str = "http://uri.etsi.org/01903#SignedProperties";
+/// ETSI EN 319 132-1 clause 5.2.7.1 / TS 101903 clause 7.2.4.1.
+pub const COUNTERSIGNED_SIGNATURE_TYPE: &str = "http://uri.etsi.org/01903#CountersignedSignature";
 
 /// A signing key in both the shapes the helper needs: `rcgen`'s, for issuing
 /// certificates, and the RustCrypto one, for signing `ds:SignedInfo`.
@@ -281,6 +283,22 @@ impl RefSpec {
         }
     }
 
+    /// A reference over a countersigned `ds:SignatureValue`, carrying the
+    /// `CountersignedSignature` `Type`. The attribute is corroboration only;
+    /// what the reference resolves to is what decides.
+    pub fn countersigned(uri: &str) -> Self {
+        Self {
+            reference_type: Some(COUNTERSIGNED_SIGNATURE_TYPE.to_owned()),
+            ..Self::to(uri)
+        }
+    }
+
+    /// Drop the `Type` attribute, so only resolution can decide.
+    pub fn untyped(mut self) -> Self {
+        self.reference_type = None;
+        self
+    }
+
     pub fn with_transforms(mut self, transforms: &[&str]) -> Self {
         self.transforms = transforms.iter().map(|value| (*value).to_owned()).collect();
         self
@@ -295,6 +313,10 @@ impl RefSpec {
 /// How one `ds:Signature` should look.
 pub struct SigSpec {
     pub id: String,
+    /// The placeholder tag `build` fills this signature's digests and value
+    /// under, and the suffix of its `sigobj-`/`sp-` element ids. Unique per
+    /// signature in one dossier.
+    pub tag: String,
     pub c14n: String,
     pub signature_method: String,
     pub references: Vec<RefSpec>,
@@ -332,8 +354,54 @@ pub struct SigSpec {
     pub revocation_in_validation_data: bool,
     /// Certificates to encapsulate inside the `TimeStampValidationData`.
     pub validation_data_certificates: Vec<Vec<u8>>,
-    /// An `Id` on `ds:SignatureValue`, so an `xades:Include` can name it.
+    /// An `Id` on `ds:SignatureValue`, so an `xades:Include` or a
+    /// countersignature's `ds:Reference` can name it.
     pub signature_value_id: Option<String>,
+    /// The `es:SignatureProfile/es:Type` value, `signature` by default and
+    /// `countersignature` for the e-dossier countersignature form
+    /// (e-dossier specification clause 3.2.1.3.4.1.3).
+    pub signature_profile_type: String,
+    /// Enveloped countersignatures placed in this signature's
+    /// `xades:UnsignedSignatureProperties`.
+    pub countersignatures: Vec<CounterSignatureSpec>,
+}
+
+/// One `xades:CounterSignature` element and the signatures inside it.
+///
+/// ETSI EN 319 132-1 clause 5.2.7.2 defines `CounterSignatureType` as a
+/// sequence of exactly one `ds:Signature`; holding two is the ambiguous shape
+/// the verifier must refuse rather than guess at.
+pub struct CounterSignatureSpec {
+    pub signatures: Vec<SigSpec>,
+    /// The element that holds them. `None` is `xades:CounterSignature`; any
+    /// other name is a nesting the e-dossier and XAdES rules do not describe.
+    pub wrapper: Option<String>,
+}
+
+impl CounterSignatureSpec {
+    pub fn new(signature: SigSpec) -> Self {
+        Self {
+            signatures: vec![signature],
+            wrapper: None,
+        }
+    }
+
+    /// Two nested signatures in one `xades:CounterSignature`.
+    pub fn ambiguous(first: SigSpec, second: SigSpec) -> Self {
+        Self {
+            signatures: vec![first, second],
+            wrapper: None,
+        }
+    }
+
+    /// A signature nested under something that is not an
+    /// `xades:CounterSignature`.
+    pub fn in_wrapper(signature: SigSpec, wrapper: &str) -> Self {
+        Self {
+            signatures: vec![signature],
+            wrapper: Some(wrapper.to_owned()),
+        }
+    }
 }
 
 /// How the signed `SigningCertificate` property should look.
@@ -546,6 +614,7 @@ impl Default for DossierSpec {
 pub fn document_signature(certificates: Vec<Vec<u8>>) -> SigSpec {
     SigSpec {
         id: "sig-doc".to_owned(),
+        tag: "doc".to_owned(),
         c14n: C14N_EXC.to_owned(),
         signature_method: RSA_SHA256_URI.to_owned(),
         references: vec![
@@ -571,6 +640,8 @@ pub fn document_signature(certificates: Vec<Vec<u8>>) -> SigSpec {
         revocation_in_validation_data: false,
         validation_data_certificates: Vec::new(),
         signature_value_id: None,
+        signature_profile_type: "signature".to_owned(),
+        countersignatures: Vec::new(),
     }
 }
 
@@ -578,6 +649,7 @@ pub fn document_signature(certificates: Vec<Vec<u8>>) -> SigSpec {
 pub fn dossier_signature(certificates: Vec<Vec<u8>>) -> SigSpec {
     SigSpec {
         id: "sig-frame".to_owned(),
+        tag: "frame".to_owned(),
         c14n: C14N_EXC.to_owned(),
         signature_method: RSA_SHA256_URI.to_owned(),
         references: vec![
@@ -603,6 +675,24 @@ pub fn dossier_signature(certificates: Vec<Vec<u8>>) -> SigSpec {
         revocation_in_validation_data: false,
         validation_data_certificates: Vec::new(),
         signature_value_id: None,
+        signature_profile_type: "signature".to_owned(),
+        countersignatures: Vec::new(),
+    }
+}
+
+/// An enveloped XAdES countersignature over the `ds:SignatureValue` whose `Id`
+/// is `parent_value_id`, for placement in that signature's
+/// `xades:UnsignedSignatureProperties`.
+pub fn countersignature(tag: &str, certificates: Vec<Vec<u8>>, parent_value_id: &str) -> SigSpec {
+    SigSpec {
+        id: format!("sig-{tag}"),
+        tag: tag.to_owned(),
+        references: vec![
+            RefSpec::countersigned(&format!("#{parent_value_id}")),
+            RefSpec::to(&format!("#sigobj-{tag}")),
+            RefSpec::signed_properties(&format!("#sp-{tag}")),
+        ],
+        ..document_signature(certificates)
     }
 }
 
@@ -615,7 +705,8 @@ pub fn dossier_signature(certificates: Vec<Vec<u8>>) -> SigSpec {
 /// signature, exactly as it would in a real countersigned dossier.
 pub fn build(spec: &DossierSpec, keys: &[(&str, &TestKey)]) -> String {
     let mut xml = render(spec);
-    for (tag, signature) in signatures(spec) {
+    for signature in signatures(spec) {
+        let tag = signature.tag.as_str();
         for (index, reference) in signature.references.iter().enumerate() {
             // A reference that resolves to nothing gets a syntactically valid
             // placeholder: the verifier must reject it long before any digest
@@ -956,7 +1047,7 @@ fn render(spec: &DossierSpec) -> String {
         spec.payload
     ));
     if let Some(signature) = &spec.document_signature {
-        out.push_str(&render_signature(signature, "doc", namespace));
+        out.push_str(&render_signature(signature, namespace));
     }
     if spec.dossier_timestamp {
         out.push_str(
@@ -1020,7 +1111,7 @@ fn render(spec: &DossierSpec) -> String {
         }
     }
     if let Some(signature) = &spec.dossier_signature {
-        out.push_str(&render_signature(signature, "frame", namespace));
+        out.push_str(&render_signature(signature, namespace));
     }
     out.push_str("</es:Dossier>");
     out
@@ -1090,7 +1181,8 @@ pub fn canonical_includes(xml: &str, spec: &ContainerTimestampSpec) -> Vec<u8> {
     octets
 }
 
-fn render_signature(spec: &SigSpec, tag: &str, namespace: &str) -> String {
+fn render_signature(spec: &SigSpec, namespace: &str) -> String {
+    let tag = spec.tag.as_str();
     let mut out = String::new();
     out.push_str(&format!("<ds:Signature Id=\"{}\">", spec.id));
     out.push_str("<ds:SignedInfo>");
@@ -1148,9 +1240,10 @@ fn render_signature(spec: &SigSpec, tag: &str, namespace: &str) -> String {
             "<ds:Object Id=\"sigobj-{tag}\">\
 <es:SignatureProfile xmlns:es=\"{namespace}\" Id=\"sigprof-{tag}\">\
 <es:SignerName>Synthetic Signer</es:SignerName>\
-<es:Type>signature</es:Type>\
+<es:Type>{}</es:Type>\
 <es:Generator>openSzigno test helper</es:Generator>\
-</es:SignatureProfile></ds:Object>"
+</es:SignatureProfile></ds:Object>",
+            spec.signature_profile_type
         )
     } else {
         String::new()
@@ -1252,6 +1345,20 @@ fn render_signature(spec: &SigSpec, tag: &str, namespace: &str) -> String {
     }
     if let Some(name) = &spec.extra_unsigned_property {
         unsigned.push_str(&format!("<xades:{name}/>"));
+    }
+    // Enveloped countersignatures. Everything here is unsigned qualifying
+    // material, so nesting one changes no digest of the signature it is
+    // nested in.
+    for element in &spec.countersignatures {
+        let wrapper = element
+            .wrapper
+            .as_deref()
+            .unwrap_or("xades:CounterSignature");
+        unsigned.push_str(&format!("<{wrapper}>"));
+        for nested in &element.signatures {
+            unsigned.push_str(&render_signature(nested, namespace));
+        }
+        unsigned.push_str(&format!("</{wrapper}>"));
     }
     let unsigned = if unsigned.is_empty() {
         String::new()
@@ -1407,15 +1514,30 @@ fn sign_signed_info(xml: &str, spec: &SigSpec, key: &TestKey) -> String {
     BASE64.encode(bytes)
 }
 
-fn signatures(spec: &DossierSpec) -> Vec<(&'static str, &SigSpec)> {
+/// Every signature in fill order: each signature before the countersignatures
+/// nested in it, and the document signature before the frame.
+///
+/// The order is load bearing. A countersignature digests the countersigned
+/// `ds:SignatureValue`, so that value must already be filled in; and the frame
+/// signature covers `es:Documents`, which holds both, so it is filled last.
+fn signatures(spec: &DossierSpec) -> Vec<&SigSpec> {
     let mut list = Vec::new();
-    if let Some(signature) = &spec.document_signature {
-        list.push(("doc", signature));
-    }
-    if let Some(signature) = &spec.dossier_signature {
-        list.push(("frame", signature));
+    for signature in [&spec.document_signature, &spec.dossier_signature]
+        .into_iter()
+        .flatten()
+    {
+        collect_signatures(signature, &mut list);
     }
     list
+}
+
+fn collect_signatures<'a>(signature: &'a SigSpec, into: &mut Vec<&'a SigSpec>) {
+    into.push(signature);
+    for element in &signature.countersignatures {
+        for nested in &element.signatures {
+            collect_signatures(nested, into);
+        }
+    }
 }
 
 /// A hand-encoded `nameConstraints` extension, so a test can express subtree
