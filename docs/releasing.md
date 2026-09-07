@@ -73,10 +73,11 @@ Put the `CHANGELOG.md` section for this version in `notes.md`.
 
 The release must exist as a draft first: `create-release = false` in
 `dist-workspace.toml`, so the workflow does not create the release. It
-uploads the artefacts into the draft and undrafts it only after every job
-has succeeded. dist 0.32 has no option that leaves a release drafted at
-the end of a run, so the human review happens on the draft body before the
-tag exists rather than after.
+uploads the artefacts into the draft and undrafts it only after every
+publish job has succeeded, because `github-release = "announce"` moves the
+upload and the undraft out of `host` and into `announce`. dist 0.32 has no
+option that leaves a release drafted at the end of a run, so the human
+review happens on the draft body before the tag exists rather than after.
 
 ### 4. Watch the run
 
@@ -88,15 +89,41 @@ tag exists rather than after.
 | `build-local-artifacts` | Builds the binary and archive for each of the five targets. |
 | `build-global-artifacts` | Builds the installers, the formula, the checksums, and the source tarball. |
 | `custom-smoke-test` | Unpacks the built `x86_64-unknown-linux-musl` archive and runs `openszigno inspect tests/fixtures/plain-base64.es3 --json` against it, so a binary that cannot read a synthetic dossier never reaches the release. |
-| `host` | Uploads everything into the draft release. |
+| `host` | Stages the artefacts and the manifest. It does not touch the release. |
 | `publish-homebrew-formula` | Commits `Formula/openszigno.rb` to `watt-mind/homebrew-tap`. |
-| `custom-publish-crates` | Publishes the three crates to crates.io. |
+| `custom-publish-crates` | Publishes the three crates to crates.io, skipping any version already there. |
 | `custom-container` | Builds and pushes the multi-arch GHCR image and attests its provenance. |
-| `announce` | Undrafts the release. |
+| `announce` | Uploads every asset into the draft release and undrafts it. |
 
 The three publish jobs run in parallel after `host`, and `announce` waits
-for all of them, so the release only becomes visible once every channel
-has actually published.
+for all of them, so the release page becomes public only once crates.io,
+GHCR, and the tap have all accepted their artefacts.
+
+### Why the upload happens in `announce`
+
+By default dist uploads the assets and undrafts the release at the end of
+`host`, which runs *before* the publish jobs. A failed crates.io or GHCR
+publish then left a public release that only some channels had. Setting
+
+```toml
+github-release = "announce"
+```
+
+in `dist-workspace.toml` moves both the `gh release upload` and the
+`gh release edit --draft=false` into the `announce` job, whose `needs:`
+already covers every publish job. Nothing about the release is visible
+until they have all succeeded, and a failure anywhere leaves the draft
+untouched with no assets on it. This is a supported dist 0.32 option, so
+`release.yml` is still fully generated and must not be hand-edited.
+
+One ordering consequence is worth knowing about. The Homebrew job runs
+before `announce`, so for the length of the `announce` job the tap
+contains a formula whose `url` points at release assets that are not
+uploaded yet. A `brew install watt-mind/tap/openszigno` issued inside that
+window fails to download. The window is the duration of one upload job,
+and it only affects a user who is installing at that exact moment; dist
+offers no way to order the tap commit after the upload, because the
+formula is a `publish-jobs` entry by construction.
 
 ### 5. Check the results
 
@@ -119,24 +146,38 @@ gh workflow run container.yml -f tag=vX.Y.Z
 Each job checks the tag out and works from that tree, so a manual rerun
 publishes exactly what the release built. `publish-crates.yml` re-checks
 that the tag equals the workspace version and skips with a notice if
-`CARGO_REGISTRY_TOKEN` is absent; a crate that is already on crates.io
-makes `cargo publish` fail, so rerun it only for a channel that genuinely
-did not publish.
+`CARGO_REGISTRY_TOKEN` is absent.
+
+Both jobs are safe to rerun after a partial success.
+`publish-crates.yml` looks each crate up in the crates.io sparse index
+(`https://index.crates.io/<prefix>/<name>`) before publishing it and skips
+the ones whose exact version is already there, so a rerun after
+`openszigno-core` published but `openszigno-verify` failed continues with
+`verify` instead of dying on "crate version is already uploaded". After
+each publish it polls the same index until the version is visible, because
+the next crate resolves its dependency through the index and not through
+the workspace. A `concurrency` group keyed on the tag serialises runs for
+the same release, so a manual rerun started while the workflow run is
+still going queues behind it rather than racing it. `container.yml` has
+the same guard for its tag pushes.
 
 Rerunning `gh workflow run` from the branch picker uses the workflow file
 on that branch. Run it from `master` after the release pull request has
 merged, so the workflow definition matches the released tag.
 
-If a job fails before `announce`, the release stays a draft. Fix the
-cause, rerun the failed job, and let the run finish; or, if the draft is
-known good and only the undraft is missing:
+If a job fails before `announce`, the release stays a draft *with no
+assets on it*, because the upload is part of `announce` too. Fix the
+cause, rerun the failed job, and let the run finish; or, if every channel
+did publish and only the final job is missing, rerun `announce` from the
+run page. Undrafting by hand is a last resort, and uploads nothing:
 
 ```sh
 gh release edit vX.Y.Z --draft=false
 ```
 
-That is now purely cosmetic. Nothing reacts to the release being
-published any more.
+Nothing reacts to the release being published any more, so this only
+changes the draft flag. The assets are uploaded by `announce`, so a
+release undrafted this way is empty unless that job ran.
 
 ## Why nothing reacts to `release: published`
 
@@ -171,8 +212,8 @@ depends on an event that a bot token raises.
 | Workflow | Trigger | Does |
 | --- | --- | --- |
 | `release.yml` | creation of a version tag; `pull_request` | Generated by `dist generate`. Plans, builds every target, builds installers and the formula, runs the smoke test, uploads to the draft release, calls the three publish jobs, then undrafts. On a pull request only the `plan` job runs (`pr-run-mode = "plan"`). |
-| `smoke-test.yml` | `workflow_call` from `release.yml` | Reusable workflow (`global-artifacts-jobs`). Downloads the built archives, unpacks the musl binary, and asserts that `inspect --json` reports `ok: true` on a synthetic fixture. |
-| `publish-crates.yml` | `workflow_call` from `release.yml`; `workflow_dispatch` | Reusable workflow (`publish-jobs`). Checks that the tag equals the workspace version, then publishes `openszigno-core`, `openszigno-verify`, and `openszigno-cli` in that order with `cargo publish --locked`, relying on cargo's own wait for each crate to appear in the index. Skips with a notice when `CARGO_REGISTRY_TOKEN` is absent. |
+| `smoke-test.yml` | `workflow_call` from `release.yml` | Reusable workflow (`global-artifacts-jobs`). Downloads the built archives, unpacks the musl binary, and runs `inspect`, `list`, `validate-structure`, `extract` (byte-checking the extracted payload) and `verify` (asserting exit status 7 and verdict `indeterminate`) against the packaged binary on the synthetic fixtures. |
+| `publish-crates.yml` | `workflow_call` from `release.yml`; `workflow_dispatch` | Reusable workflow (`publish-jobs`). Checks that the tag equals the workspace version, then publishes `openszigno-core`, `openszigno-verify`, and `openszigno-cli` in that order with `cargo publish --locked`, skipping any version already in the crates.io sparse index and waiting for each publish to become visible there. Skips with a notice when `CARGO_REGISTRY_TOKEN` is absent. |
 | `container.yml` | `workflow_call` from `release.yml`; `workflow_dispatch` | Reusable workflow (`publish-jobs`). Checks the tag out, builds the `Dockerfile` for `linux/amd64` and `linux/arm64`, pushes `ghcr.io/watt-mind/openszigno` tagged with the tag, the bare version, and `latest`, then attests build provenance on the pushed digest. |
 
 Both publish workflows take the same two inputs. `plan` is the dist plan
@@ -189,6 +230,31 @@ cargo install cargo-dist --locked   # installs the `dist` binary
 dist init --yes                     # or: dist generate
 dist plan
 ```
+
+### Pinned actions in the generated workflow
+
+The third-party actions in `release.yml` are pinned to full commit SHAs
+through dist rather than by hand:
+
+```toml
+[dist.github-action-commits]
+"actions/checkout" = "d23441a48e516b6c34aea4fa41551a30e30af803"
+"actions/upload-artifact" = "043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"
+"actions/download-artifact" = "3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c"
+```
+
+dist emits the `uses:` line without a trailing version comment, so
+Dependabot cannot see which release each SHA belongs to and will not open
+a pull request for them. The version each SHA corresponds to is recorded
+in a comment above the table in `dist-workspace.toml`; bump it there and
+run `dist generate`. Every other workflow in this repository carries the
+`# vX.Y.Z` comment inline and is updated by Dependabot as usual.
+
+dist also generates a single workflow-level `permissions: contents: write`
+for `release.yml`. Only the custom publish jobs take their permissions from
+configuration, through `[dist.github-custom-job-permissions]`; dist 0.32
+has no option for narrowing the permissions of its own `plan`, build,
+`host`, or `announce` jobs, so that block stays as generated.
 
 ### Permissions
 
@@ -264,6 +330,29 @@ One-time organisation setup:
   repository in the organisation's package settings, otherwise
   `docker pull` requires authentication.
 
-A publish job that fails now keeps the release a draft, because
-`announce` waits for all three. Without `CARGO_REGISTRY_TOKEN` the crates
-job skips itself rather than failing, so the release still completes.
+A publish job that fails now keeps the release a draft with no assets on
+it, because `announce` both uploads and undrafts and waits for all three.
+Without `CARGO_REGISTRY_TOKEN` the crates job skips itself rather than
+failing, so the release still completes.
+
+## What a pull request checks before a tag exists
+
+Three jobs in `ci.yml` exercise the release paths on every pull request,
+so a break shows up before a tag is cut rather than during a release:
+
+| Job | Does |
+| --- | --- |
+| `package` | Runs `cargo package --no-verify --locked` for all three crates and prints the packaged file list. A manifest a registry would reject fails here. |
+| `container` | Builds the release `Dockerfile` for `linux/amd64` and runs `inspect`, `list`, `validate-structure`, `extract`, and `verify` inside the scratch image against the synthetic fixtures. |
+| `test` | Runs the same subcommands against a locally built release binary on Linux, macOS, and Windows. |
+
+`cargo package` runs with `--no-verify` on purpose. Verification builds
+the packaged crate from its rewritten manifest, where the `path` on each
+intra-workspace dependency is stripped, so `openszigno-verify` and
+`openszigno-cli` would have to resolve `openszigno-core` at the new
+version from crates.io, which is exactly what the release has not
+published yet. `--no-verify` still checks every manifest field a registry
+validates and produces the exact file list that would be uploaded; it does
+not check that the packaged crate compiles standalone. The first thing
+that does is `cargo publish` itself during the release, which builds each
+crate against the version its predecessor just published.
