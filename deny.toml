@@ -27,6 +27,16 @@ allow = [
   "Unicode-3.0",
   "Zlib",
   "MPL-2.0",
+  # `webpki-roots`, which `ureq`'s rustls stack uses for the TLS trust anchors
+  # an `https://` CRL distribution point needs under `--online`. The crate is
+  # Mozilla's CA root *data*, redistributed under the Community Data License
+  # Agreement — Permissive, Version 2.0: no reciprocity, no source-disclosure
+  # obligation, and no restriction on use or redistribution beyond keeping the
+  # attribution. It is a data licence rather than an OSI-approved software
+  # licence because what it covers is a dataset, and it is the licence the
+  # major distributions already ship this bundle under. Nothing in the shipped
+  # code is derived from it; it is loaded at runtime as a root store.
+  "CDLA-Permissive-2.0",
 ]
 
 [bans]

@@ -29,6 +29,12 @@ sha2 = { version = "0.10.9", features = ["oid"] }
 tempfile = "3.23.0"
 thiserror = "2.0.17"
 unicode-normalization = "0.1"
+# HTTP client for `--online` revocation fetching, in the CLI only. MIT OR
+# Apache-2.0. Default features minus `gzip` and `win-system-proxy`: a CRL or an
+# OCSP response is DER, so content negotiation buys nothing and a transfer
+# encoding only widens the parser surface; the platform proxy is off because
+# `--online` must never pick a proxy up implicitly.
+ureq = { version = "3.4.1", default-features = false, features = ["rustls"] }
 x509-cert = "0.2.5"
 zip = { version = "8.1.0", default-features = false, features = ["deflate"] }
 

@@ -1,3 +1,4 @@
+mod online;
 mod output_dir;
 mod revocation_store;
 mod trust_store;
@@ -117,8 +118,27 @@ struct VerifyArgs {
     /// Do not check revocation at all. Documented as producing at most
     /// `indeterminate`: a signature whose certificate might have been revoked
     /// is not one this tool will call valid.
-    #[arg(long = "no-revocation")]
+    #[arg(long = "no-revocation", conflicts_with_all = ["online", "online_cache", "online_proxy"])]
     no_revocation: bool,
+    /// Fetch revocation data the offline material does not cover, from the CRL
+    /// distribution points and AIA OCSP responders the certificates themselves
+    /// publish. This is the only thing that makes openszigno touch the
+    /// network, and it never contacts a URL that did not come out of a
+    /// certificate. Timeouts, size caps and a refusal to follow a redirect to
+    /// another host are fixed; everything fetched is checked by exactly the
+    /// same rules as offline material, so `--online` can only add data, never
+    /// relax a rule.
+    #[arg(long = "online")]
+    online: bool,
+    /// Write everything `--online` fetched into this directory, laid out like
+    /// a `--revocation-store`, so a later offline run reproduces this result.
+    #[arg(long = "online-cache", value_name = "DIR", requires = "online")]
+    online_cache: Option<PathBuf>,
+    /// Route `--online` fetches through this proxy. Without it no proxy is
+    /// used at all — in particular, none from `HTTP_PROXY` or its relatives,
+    /// which are deliberately ignored.
+    #[arg(long = "online-proxy", value_name = "URL", requires = "online")]
+    online_proxy: Option<String>,
     /// Validation time as an RFC 3339 timestamp. Overrides everything: without
     /// it, a signature whose timestamp fully verified is validated at that
     /// token's genTime, and otherwise at the current time.
@@ -540,6 +560,10 @@ fn verify_command(args: &VerifyArgs) -> CliResult {
                     loaded.push_check(check);
                 }
                 loaded.extend_anchors(list.anchors);
+                // The `X509SKI` and `X509SubjectName` identities never become
+                // anchors, but they can still say that a chain some other
+                // anchor validated is covered by a granted CA/QC service.
+                loaded.extend_services(list.service_identities);
             }
             store = loaded;
             &store
@@ -559,10 +583,11 @@ fn verify_command(args: &VerifyArgs) -> CliResult {
 
     let disabled = NoRevocation;
     let offline;
+    let mut online_checks: Vec<openszigno_verify::Check> = Vec::new();
     let revocation: &dyn openszigno_verify::RevocationSource = if args.no_revocation {
         &disabled
     } else {
-        offline = match &args.revocation_store {
+        let mut store = match &args.revocation_store {
             Some(directory) => revocation_store::load(directory).map_err(|message| {
                 failure(
                     input.clone(),
@@ -575,6 +600,56 @@ fn verify_command(args: &VerifyArgs) -> CliResult {
             })?,
             None => MemoryRevocationStore::default(),
         };
+        if args.online {
+            // Everything the run already has, so that nothing is fetched for a
+            // certificate the caller's own material already answers for. The
+            // question is put to the verifier's own offline code path, not to
+            // a cheaper approximation of it.
+            let (embedded_crls, embedded_ocsp) =
+                openszigno_verify::embedded_revocation_values(&bytes, &options)
+                    .map_err(|error| failure(input.clone(), CliError::structure(error)))?;
+            let mut certificates = openszigno_verify::embedded_certificates(&bytes, &options)
+                .map_err(|error| failure(input.clone(), CliError::structure(error)))?;
+            certificates.extend(trust.anchors().iter().map(|anchor| anchor.der.clone()));
+            certificates.extend(trust.intermediates().iter().cloned());
+            let data = openszigno_verify::revocation::RevocationData {
+                embedded_crls: &embedded_crls,
+                embedded_ocsp: &embedded_ocsp,
+                store_crls: openszigno_verify::RevocationSource::crls(&store),
+                store_ocsp: openszigno_verify::RevocationSource::ocsp_responses(&store),
+                online_crls: &[],
+                online_ocsp: &[],
+            };
+            let fetcher =
+                online::Fetcher::new(args.online_proxy.as_deref()).map_err(|message| {
+                    failure(
+                        input.clone(),
+                        CliError {
+                            code: "online_options_invalid",
+                            message,
+                            exit: 3,
+                        },
+                    )
+                })?;
+            let limits = openszigno_verify::VerifyLimits::default();
+            let fetched = fetcher.fill_gaps(&certificates, &data, clock.unix_time(), &limits);
+            if let Some(directory) = &args.online_cache {
+                online::write_cache(directory, &fetched).map_err(|message| {
+                    failure(
+                        input.clone(),
+                        CliError {
+                            code: "online_cache_invalid",
+                            message,
+                            exit: 3,
+                        },
+                    )
+                })?;
+            }
+            online_checks = fetched.checks;
+            store.extend_online(fetched.crls, fetched.ocsp);
+            store = store.into_online();
+        }
+        offline = store;
         &offline
     };
     let mut verify_options = VerifyOptions::new(clock, trust, revocation, &backend);
@@ -585,6 +660,15 @@ fn verify_command(args: &VerifyArgs) -> CliResult {
     let mut report = verify_dossier(&bytes, &verify_options)
         .map_err(|error| failure(input.clone(), CliError::structure(error)))?;
     report.policy.trust_lists = snapshots;
+    // A fetch that did not happen leaves the certificate exactly as uncovered
+    // as it was, so these are `unknown` and they block. `--online` must never
+    // be able to turn an unanswered question into a passed one.
+    if !online_checks.is_empty() {
+        report.verdict = report
+            .verdict
+            .worst(openszigno_verify::codes::verdict_of(&online_checks));
+        report.checks.extend(online_checks);
+    }
     let exit = match report.verdict {
         Verdict::Invalid => 6,
         Verdict::Indeterminate => 7,
