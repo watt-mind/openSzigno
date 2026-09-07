@@ -167,6 +167,7 @@ check_codes! {
     RevocationDataStale => "revocation_data_stale",
     RevocationDataInvalid => "revocation_data_invalid",
     OcspResponderTrusted => "ocsp_responder_trusted",
+    OnlineFetchFailed => "online_fetch_failed",
 
     // Trusted lists (ETSI TS 119 612).
     TrustListLoaded => "trust_list_loaded",
@@ -271,6 +272,7 @@ impl CheckCode {
                 | Self::RevocationDataStale
                 | Self::RevocationDataInvalid
                 | Self::OcspResponderTrusted
+                | Self::OnlineFetchFailed
         )
     }
 }

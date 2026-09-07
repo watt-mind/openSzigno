@@ -666,15 +666,14 @@ fn verify_command(args: &VerifyArgs) -> CliResult {
     let mut report = verify_dossier(&bytes, &verify_options)
         .map_err(|error| failure(input.clone(), CliError::structure(error)))?;
     report.policy.trust_lists = snapshots;
-    // A fetch that did not happen leaves the certificate exactly as uncovered
-    // as it was, so these are `unknown` and they block. `--online` must never
-    // be able to turn an unanswered question into a passed one.
-    if !online_checks.is_empty() {
-        report.verdict = report
-            .verdict
-            .worst(openszigno_verify::codes::verdict_of(&online_checks));
-        report.checks.extend(online_checks);
-    }
+    // Informational, and deliberately not folded into the verdict. A fetch
+    // that did not happen leaves the certificate exactly as uncovered as it
+    // was, and that is reported — and blocks — on the chain that needed the
+    // data, by the verifier, which is the only thing that knows whether the
+    // gap mattered. Blocking here as well would let a fetch attempted for a
+    // certificate no verdict depended on sink a dossier whose every signature
+    // is valid.
+    report.checks.extend(online_checks);
     let exit = match report.verdict {
         Verdict::Invalid => 6,
         Verdict::Indeterminate => 7,

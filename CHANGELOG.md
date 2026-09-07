@@ -105,6 +105,24 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
   source answered instead, and the path summary repeats it. The
   `revocation_data_invalid` message now names the cause instead of listing
   every possible one.
+- **A failed `--online` fetch is now `online_fetch_failed` (`info`), not a
+  blocking dossier-level `revocation_status_unknown`.** A failed fetch is a
+  fact about the network, not about a certificate; whether the missing data
+  mattered is answered by the chain that needed it, which still reports
+  `revocation_status_unknown` and still blocks. Emitting a second blocking
+  check per URL added nothing there and did harm: a fetch attempted for a
+  certificate no verdict depended on — an over-fetch, or the timestamp
+  authority of a container `es:TimeStamp` — dragged dossiers whose every
+  signature was `valid` down to `indeterminate` and exit `7`.
+- **Container-timestamp findings never block the dossier verdict.** Revocation,
+  path and trust findings about a container `es:TimeStamp`'s timestamp
+  authority live on that timestamp's entry in `data.timestamps[]`, with its own
+  `checks` and `verified: false`, and surface at the dossier level only as
+  `dossier_timestamp_not_checked` / `document_timestamp_not_checked` (`info`)
+  naming the cause. The aggregation is now stated explicitly in
+  `docs/architecture.md`: `valid` when every signature is `valid`, `invalid`
+  when any signature is — or when a container timestamp's imprint or token
+  contradicts the container — and `indeterminate` otherwise.
 - Under `--online`, a fetched OCSP response no longer stops the CRL from being
   fetched. Obtaining a response is not the same as being answered by one, so
   coverage is re-tested with what was just fetched before the CRL is skipped.

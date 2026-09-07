@@ -443,12 +443,19 @@ never displace an answer you already had. `chain[].revocation.source` reads
 
 ### When a fetch fails
 
-Each failure adds one `revocation_status_unknown` naming the URL and the
-failure class — `timeout`, `http status <code>`, `too large`, `redirect`,
-`invalid`, or `transport`. It is `unknown`, so it blocks: a fetch that did not
-happen leaves the certificate exactly as uncovered as it was, and `--online`
-must never turn an unanswered question into a passed one. Nothing hangs and
-nothing panics.
+Each failure adds one `online_fetch_failed` naming the URL and the failure
+class — `timeout`, `http status <code>`, `too large`, `redirect`, `invalid`, or
+`transport`. Nothing hangs and nothing panics.
+
+That check is `info`, and it is not the thing that decides anything. A fetch
+that did not happen leaves the certificate exactly as uncovered as it was, and
+*that* is reported on the chain which needed the data, as
+`revocation_status_unknown`, which blocks. So `--online` still cannot turn an
+unanswered question into a passed one — the answer is the verifier's to give,
+not the fetcher's. The split matters in practice: a fetch attempted for a
+certificate no verdict depended on, such as the timestamp authority of a
+container `es:TimeStamp`, no longer drags a dossier whose every signature is
+`valid` down to `indeterminate`.
 
 The class tells you what to do next. A `timeout` or a `5xx` is the CA's outage;
 retry later. A `404` is a stale URL in an old certificate — fetch the CRL from

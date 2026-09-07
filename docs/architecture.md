@@ -1378,14 +1378,25 @@ answers with an HTML error page is `invalid`. Online material is consulted
 **last**, after the signature's own `RevocationValues` and the revocation
 store, so it can never displace an answer that was already to hand.
 
-**When it fails.** Each failure contributes one `revocation_status_unknown`
-(`unknown`, so it blocks) naming the URL and a failure class: `timeout`,
-`http status <code>`, `too large`, `redirect`, `invalid`, or `transport`. The
-class is reported because the remedies differ — a timeout is somebody else's
-outage, a `404` is a stale URL in an old certificate, and "not a CRL" is what a
-captive portal looks like from here. A URL is public CA material, so naming it
-is safe and is the one thing that makes the failure actionable. Nothing panics
-and nothing hangs.
+**When it fails.** Each failure contributes one `online_fetch_failed` (`info`)
+naming the URL and a failure class: `timeout`, `http status <code>`,
+`too large`, `redirect`, `invalid`, or `transport`. The class is reported
+because the remedies differ — a timeout is somebody else's outage, a `404` is a
+stale URL in an old certificate, and "not a CRL" is what a captive portal looks
+like from here. A URL is public CA material, so naming it is safe and is the
+one thing that makes the failure actionable. Nothing panics and nothing hangs.
+
+It is **informational, and that does not weaken anything.** A failed fetch is a
+fact about the network, not about a certificate. Whether a certificate ended up
+covered is decided by the verifier, from the data it actually holds, and a
+fetch that did not happen leaves it exactly as uncovered as it was — which the
+chain's own `revocation_status_unknown` reports, and which blocks. The blocking
+is therefore already done, once, by the check that knows *which* chain is short
+of data. Making the per-URL check block as well would add nothing there and
+would do harm: a fetch attempted for a certificate no verdict depended on — an
+over-fetch, or the TSA of a container `es:TimeStamp`, whose chain is
+deliberately not allowed to decide anything — would drag a dossier whose every
+signature is `valid` down to `indeterminate`.
 
 **Reproducibility.** `--online-cache DIR` writes every fetched artefact into
 `DIR/crls/` and `DIR/ocsp/`, named by the SHA-256 of its own bytes, which is
@@ -1732,9 +1743,10 @@ verify), and `revocation_not_checked` (the caller switched revocation off).
 | `revocation_ok` | `passed` | Every certificate in the path except the trust anchor has fresh, verified, non-revoked status. Emitted once per chain — the signer's and each timestamp authority's — and the message names which. |
 | `cert_revoked` | `failed` | A certificate in the path was revoked at or before the validation time. `certificateHold` counts. |
 | `cert_revoked_after_validation_time` | `info` / `unknown` | A certificate was revoked *after* the instant being validated, so that revocation did not apply then. `info` when the validation time was **proven** by a fully verified signature timestamp, `unknown` when it was merely asserted by `--at` or the clock. Never `passed`: the certificate really was revoked, and the message gives the time and reason. |
-| `revocation_status_unknown` | `unknown` | No usable revocation data covers a certificate in the path, or no path was built to ask about. Under `--online`, also emitted once per failed fetch, naming the URL and the failure class (`timeout`, `http status <code>`, `too large`, `redirect`, `invalid`, `transport`). Blocking either way: a fetch that did not happen leaves the certificate exactly as uncovered as it was. |
+| `revocation_status_unknown` | `unknown` | No usable revocation data covers a certificate in the path, or no path was built to ask about. Blocking. A failed `--online` fetch reaches a verdict through this check and not on its own; see `online_fetch_failed`. |
 | `revocation_data_stale` | `unknown` | The data's `nextUpdate` had passed at the validation time, or it carries none and its `thisUpdate` precedes it. Also the OCSP `unknown` status. |
 | `revocation_data_invalid` | `unknown` | Every source that covered a certificate was found but could not be used: signed by someone unauthorised, a delta or indirect CRL, an unimplemented `issuingDistributionPoint` form, a critical CRL extension this build does not implement, or an OCSP response whose status is not `successful`. The message names the cause. Emitted only after every tier has been tried. `unknown`, not `failed`: unusable data means the tool could not answer. |
+| `online_fetch_failed` | `info` | Under `--online`, one fetch did not produce a usable artefact. The message names the URL and the failure class. Informational: whether the missing data mattered is answered by the chain that needed it, through `revocation_status_unknown`, which blocks. |
 | `ocsp_responder_trusted` | `info` | An OCSP response was accepted under the RFC 6960 section 2.2 trusted-responder model: the responder is not the issuing CA and that CA did not delegate to it, but its certificate carries `id-kp-OCSPSigning` and chains to a configured anchor. Reported because this rests on the caller's trust store rather than on the issuing CA's word. |
 | `trust_list_loaded` | `info` | A `--trust-list` file was read; the message says how many anchors it contributed. |
 | `trust_list_unverified` | `unknown` | A trusted list was used without `--trust-list-signer`, so its own signature was not checked. Blocking. |
@@ -1799,6 +1811,26 @@ after it was stamped. That is a finding, so `dossier_timestamp_invalid` and
 `invalid`. They never touch a signature's own checks or verdict: the JSON keeps
 "this signature verifies" and "this container has been tampered with" apart,
 because they are different questions with different answers.
+
+Everything else a container timestamp produces stays off the verdict entirely.
+A revocation answer nobody could obtain for its timestamp authority, a TSA
+chain that reaches no configured anchor, a data-selection form this build does
+not implement: all of those are recorded **on the timestamp's own entry** in
+`data.timestamps[]`, with its own `checks` and `verified: false`, and surface
+at the dossier level only as `dossier_timestamp_not_checked` or
+`document_timestamp_not_checked` (`info`) naming the cause. They are never
+emitted as blocking dossier-level checks.
+
+That is not a convenience. A container timestamp is evidence laid *on top of*
+the signatures, and a dossier that carries one it could not finish checking has
+strictly more evidence than one that carries none — so letting it produce a
+worse verdict than the empty dossier would be exactly backwards. Concretely,
+the aggregation is:
+
+- **`valid`** when every signature is `valid` and nothing else failed;
+- **`invalid`** when any signature is `invalid`, or a container timestamp's
+  imprint or token contradicts the container;
+- **`indeterminate`** otherwise.
 
 **Only checks about the signature itself can make it `invalid`:** the
 reference digests, the signature value, the algorithm policy, the reference

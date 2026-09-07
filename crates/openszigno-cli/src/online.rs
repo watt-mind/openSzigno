@@ -328,14 +328,30 @@ fn classify_transport(error: ureq::Error) -> FailureClass {
 
 /// The check a failed fetch contributes.
 ///
-/// It is `unknown`, which blocks: a fetch that did not happen leaves the
-/// certificate exactly as uncovered as it was, and `--online` must never be
-/// able to turn an unanswered question into a passed one. The URL is public
-/// CA material — it came out of a certificate — so naming it is safe and is
-/// the one thing that makes the failure actionable.
+/// It is **`info`**, and the reason is worth being precise about, because the
+/// obvious alternative is wrong in a way that took a corpus run to notice.
+///
+/// A failed fetch is a fact about the network, not about any certificate. It
+/// cannot make a verdict better: whether a certificate ended up covered is
+/// decided by the verifier, from the data it actually holds, and a fetch that
+/// did not happen leaves it exactly as uncovered as it was — which the chain's
+/// own `revocation_status_unknown` reports, and which blocks. So the blocking
+/// is already done, in the right place, by the check that knows *which* chain
+/// is short of data.
+///
+/// Emitting a second, blocking check per failed URL at the **dossier** level
+/// adds nothing there and does real harm: a fetch attempted for a certificate
+/// no verdict depended on — an over-fetch, or the TSA of a container
+/// `es:TimeStamp`, whose chain is deliberately not allowed to decide anything
+/// — would drag a dossier whose every signature is `valid` down to
+/// `indeterminate`. That is exactly backwards: it makes carrying more evidence
+/// cost a dossier its verdict.
+///
+/// The URL is public CA material — it came out of a certificate — so naming it
+/// is safe and is the one thing that makes the failure actionable.
 fn failure(url: &str, class: FailureClass) -> Check {
-    Check::unknown(
-        CheckCode::RevocationStatusUnknown,
+    Check::info(
+        CheckCode::OnlineFetchFailed,
         format!(
             "fetching revocation data from {} failed ({})",
             sanitize_url(url),
@@ -490,7 +506,10 @@ mod tests {
     #[test]
     fn a_failure_names_the_url_and_its_class() {
         let check = failure("http://crl.example/ca.crl", FailureClass::Timeout);
-        assert_eq!(check.code, CheckCode::RevocationStatusUnknown);
+        assert_eq!(check.code, CheckCode::OnlineFetchFailed);
+        // Informational: whether the certificate ended up covered is the
+        // verifier's answer to give, on the chain that needed the data.
+        assert_eq!(check.status, openszigno_verify::CheckStatus::Info);
         assert!(check.message.contains("http://crl.example/ca.crl"));
         assert!(check.message.contains("timeout"));
         let check = failure("http://crl.example/ca.crl", FailureClass::HttpStatus(404));

@@ -526,6 +526,36 @@ fn a_server_that_never_answers_is_bounded_rather_than_hung() {
     );
 }
 
+/// A failed fetch is a fact about the network, not about a certificate, so it
+/// is reported as `info` and decides nothing on its own. Whether the gap
+/// mattered is answered by the chain that needed the data — here it did, and
+/// the signature says so.
+#[test]
+fn a_failed_fetch_is_informational_and_the_chain_reports_the_gap() {
+    let (_pki, dossier_path, store, _fixture) = with_urls(Some("/ca.crl"), None, |_| {
+        vec![("/ca.crl", Reply::Status(503))]
+    });
+
+    let report = verify_online(&dossier_path, &store, &[]);
+    let checks = checks(&report);
+    assert!(
+        checks
+            .iter()
+            .any(|check| check.starts_with("online_fetch_failed=info")
+                && check.contains("http status 503")),
+        "{checks:?}"
+    );
+    // The blocking is done once, in the right place: on the chain that is
+    // short of data.
+    assert!(
+        checks
+            .iter()
+            .any(|check| check.starts_with("revocation_status_unknown=unknown")),
+        "{checks:?}"
+    );
+    assert_eq!(report["data"]["verdict"].as_str(), Some("indeterminate"));
+}
+
 #[test]
 fn an_http_error_is_reported_with_its_status() {
     let (_pki, dossier_path, store, _fixture) = with_urls(Some("/ca.crl"), None, |_| {
