@@ -10,6 +10,13 @@ use serde::Serialize;
 /// `unknown` means the tool could not determine the answer; it is never a
 /// substitute for `failed`, because "I do not know" and "this is forged" are
 /// different statements.
+///
+/// `info` is the one status that does not block: it exists so that a check
+/// which only *reports* something — a certificate's loosely filled
+/// `extendedKeyUsage`, the presence of a claimed signing time — can be emitted
+/// without pretending the tool failed to determine anything. Every other
+/// non-`passed` status keeps the verdict below `valid`, which is what makes
+/// "`unknown` always blocks" true without exception.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CheckStatus {
@@ -17,6 +24,8 @@ pub enum CheckStatus {
     Failed,
     Skipped,
     Unknown,
+    /// Purely informational, and deliberately non-blocking.
+    Info,
 }
 
 impl CheckStatus {
@@ -26,7 +35,13 @@ impl CheckStatus {
             Self::Failed => "failed",
             Self::Skipped => "skipped",
             Self::Unknown => "unknown",
+            Self::Info => "info",
         }
+    }
+
+    /// Whether this status keeps the verdict below `valid`.
+    pub const fn blocks(self) -> bool {
+        matches!(self, Self::Failed | Self::Skipped | Self::Unknown)
     }
 }
 
@@ -35,7 +50,7 @@ impl CheckStatus {
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Verdict {
-    /// TOTAL-PASSED. Unreachable in phase 1 by construction.
+    /// TOTAL-PASSED.
     Valid,
     /// INDETERMINATE.
     Indeterminate,
@@ -142,8 +157,25 @@ check_codes! {
     CertNameConstraintViolation => "cert_name_constraint_violation",
     CertUnsupportedCriticalExtension => "cert_unsupported_critical_extension",
 
-    // Stage E: out of phase-2 scope, reported rather than ignored.
+    // Stage E: revocation.
+    RevocationPolicy => "revocation_policy",
     RevocationNotChecked => "revocation_not_checked",
+    RevocationOk => "revocation_ok",
+    CertRevoked => "cert_revoked",
+    CertRevokedAfterValidationTime => "cert_revoked_after_validation_time",
+    RevocationStatusUnknown => "revocation_status_unknown",
+    RevocationDataStale => "revocation_data_stale",
+    RevocationDataInvalid => "revocation_data_invalid",
+
+    // Trusted lists (ETSI TS 119 612).
+    TrustListLoaded => "trust_list_loaded",
+    TrustListUnverified => "trust_list_unverified",
+    TrustListSignatureOk => "trust_list_signature_ok",
+    TrustListSignatureInvalid => "trust_list_signature_invalid",
+    TrustListServiceNotGranted => "trust_list_service_not_granted",
+    CertificateQualified => "certificate_qualified",
+    CertificateNotQualified => "certificate_not_qualified",
+    CertificateQualifiedUnknown => "certificate_qualified_unknown",
 
     // Stage F: RFC 3161 signature timestamps.
     SignatureTimestampPresent => "signature_timestamp_present",
@@ -207,18 +239,45 @@ impl Check {
     pub fn unknown(code: CheckCode, message: impl Into<String>) -> Self {
         Self::new(code, CheckStatus::Unknown, message)
     }
+
+    /// A check that reports rather than decides. It never blocks a verdict.
+    pub fn info(code: CheckCode, message: impl Into<String>) -> Self {
+        Self::new(code, CheckStatus::Info, message)
+    }
+}
+
+impl CheckCode {
+    /// Whether this code reports a revocation answer.
+    ///
+    /// Revocation is folded into a verdict once, at the signature level, so a
+    /// timestamp token's own summary must not fold it in a second time — and a
+    /// token whose TSA's revocation status is merely *unknown* still proves
+    /// when the signature existed.
+    pub const fn is_revocation(self) -> bool {
+        matches!(
+            self,
+            Self::RevocationPolicy
+                | Self::RevocationNotChecked
+                | Self::RevocationOk
+                | Self::CertRevoked
+                | Self::CertRevokedAfterValidationTime
+                | Self::RevocationStatusUnknown
+                | Self::RevocationDataStale
+                | Self::RevocationDataInvalid
+        )
+    }
 }
 
 /// Fold a list of checks into a verdict.
 ///
-/// One `failed` makes the verdict `invalid`. Anything that is not `passed`
-/// keeps it below `valid`. The function is monotone: adding a check can only
-/// lower the verdict.
+/// One `failed` makes the verdict `invalid`. Anything that is neither `passed`
+/// nor `info` keeps it below `valid`. The function is monotone: adding a check
+/// can only lower the verdict.
 pub fn verdict_of(checks: &[Check]) -> Verdict {
     let mut verdict = Verdict::Valid;
     for check in checks {
         verdict = verdict.worst(match check.status {
-            CheckStatus::Passed => Verdict::Valid,
+            CheckStatus::Passed | CheckStatus::Info => Verdict::Valid,
             CheckStatus::Failed => Verdict::Invalid,
             CheckStatus::Skipped | CheckStatus::Unknown => Verdict::Indeterminate,
         });

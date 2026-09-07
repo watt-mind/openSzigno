@@ -103,7 +103,13 @@ const PROCESSED_PROPERTIES: &[&str] = &[
     "SignatureTimeStamp",
     "ArchiveTimeStamp",
     "CertificateValues",
+    "RevocationValues",
 ];
+
+/// The largest number of encapsulated CRLs or OCSP responses read from one
+/// signature's `xades:RevocationValues`. The property is attacker-controlled,
+/// and each entry costs a signature verification per certificate in the path.
+const MAX_REVOCATION_VALUES: usize = 64;
 
 /// Read the qualifying properties of one `ds:Signature`.
 pub fn parse<'a, 'input>(signature: Node<'a, 'input>) -> XadesProperties<'a, 'input> {
@@ -173,6 +179,44 @@ pub fn parse<'a, 'input>(signature: Node<'a, 'input>) -> XadesProperties<'a, 'in
     properties.unprocessed_properties = unprocessed;
 
     properties
+}
+
+/// The DER-encoded CRLs and OCSP responses a signature carries in
+/// `xades:RevocationValues`.
+///
+/// These are **untrusted inputs**, exactly like the certificates in
+/// `CertificateValues`: a signer supplies them, so each one is signature-checked
+/// against the path before it is believed. Taking them at face value would let a
+/// signer prove its own certificate was never revoked.
+///
+/// Every XAdES namespace is accepted, because dossiers in the wild use v1.1.1
+/// through v1.4.1 and a CRL is a CRL in all of them.
+pub fn revocation_values(signature: Node<'_, '_>) -> (Vec<Vec<u8>>, Vec<Vec<u8>>) {
+    let mut crls = Vec::new();
+    let mut ocsp = Vec::new();
+    for values in signature.descendants().filter(|node| {
+        node.is_element()
+            && node.tag_name().name() == "RevocationValues"
+            && node
+                .tag_name()
+                .namespace()
+                .is_some_and(|namespace| XADES_NAMESPACES.contains(&namespace))
+    }) {
+        for node in values.descendants().filter(|node| node.is_element()) {
+            let target = match node.tag_name().name() {
+                "EncapsulatedCRLValue" => &mut crls,
+                "EncapsulatedOCSPValue" => &mut ocsp,
+                _ => continue,
+            };
+            if target.len() >= MAX_REVOCATION_VALUES {
+                continue;
+            }
+            if let Some(der) = decode_base64(&text_of(node)) {
+                target.push(der);
+            }
+        }
+    }
+    (crls, ocsp)
 }
 
 fn collect_unprocessed(container: Node<'_, '_>, into: &mut Vec<String>) {

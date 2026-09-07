@@ -28,7 +28,23 @@ unicode-normalization.workspace = true
 rustix.workspace = true
 
 [dev-dependencies]
+# The end-to-end tests need a dossier that actually verifies, so they reuse the
+# synthetic PKI and XMLDSig signer under `crates/openszigno-verify/tests/common`
+# rather than keeping a second copy. Signing is a permanent non-goal of the
+# shipped tool; none of this reaches a shipped crate.
+base64.workspace = true
+cms = "0.2"
+const-oid.workspace = true
+der.workspace = true
+p256.workspace = true
+p384.workspace = true
+rcgen = { workspace = true, features = ["x509-parser"] }
+rsa.workspace = true
+sha1.workspace = true
+sha2.workspace = true
 tempfile.workspace = true
+x509-cert.workspace = true
+x509-ocsp = "0.2.1"
 
 # Archive layout produced by the dist release workflow, so that
 # `cargo binstall openszigno-cli` finds the prebuilt binaries:

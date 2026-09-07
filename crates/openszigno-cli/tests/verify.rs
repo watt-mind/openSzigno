@@ -201,7 +201,9 @@ fn a_signature_that_does_not_verify_exits_six() {
         .map(|check| check["code"].as_str().expect("a string"))
         .collect();
     assert!(codes.contains(&"reference_digest_mismatch"));
-    assert!(codes.contains(&"revocation_not_checked"));
+    // No trust anchors, so no path, so nothing to ask a CRL about: the tool
+    // says it does not know rather than skipping the stage silently.
+    assert!(codes.contains(&"revocation_status_unknown"));
     // The signature carries no timestamp, which is reported rather than
     // assumed away.
     assert!(codes.contains(&"signature_timestamp_absent"));
@@ -238,8 +240,8 @@ fn the_signature_object_carries_the_phase_two_fields() {
     );
 }
 
-/// Human output must never contain the word "valid" as a verdict, and must say
-/// out loud what this phase does not check.
+/// Human output must state the verdict it reached and the revocation policy it
+/// reached it under, and must not call an invalid signature valid.
 #[test]
 fn human_output_never_claims_validity() {
     let directory = scratch();
@@ -248,7 +250,7 @@ fn human_output_never_claims_validity() {
     let output = run(&["verify", path.to_str().unwrap()]);
     let text = String::from_utf8(output.stdout).expect("UTF-8");
     assert!(text.contains("Verification verdict: invalid"));
-    assert!(text.contains("Revocation is not checked"));
+    assert!(text.contains("Revocation policy: offline"));
     assert!(text.contains("validation time:"));
     assert!(!text.contains("verdict: valid"));
 }

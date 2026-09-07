@@ -172,6 +172,9 @@ pub struct VerifyLimits {
     pub max_timestamps_per_signature: usize,
     pub max_chain_length: usize,
     pub max_paths: usize,
+    /// The largest number of CRLs or OCSP responses consulted from any one
+    /// source while answering about a single certificate.
+    pub max_revocation_items: usize,
 }
 
 impl Default for VerifyLimits {
@@ -184,6 +187,7 @@ impl Default for VerifyLimits {
             max_timestamps_per_signature: 8,
             max_chain_length: 8,
             max_paths: 32,
+            max_revocation_items: 256,
         }
     }
 }
@@ -193,6 +197,9 @@ impl Default for VerifyLimits {
 pub struct PolicyReport {
     pub revocation: &'static str,
     pub trust_store: &'static str,
+    /// The trusted lists the run used, if any: territory, sequence number, and
+    /// issue date, so a result can cite exactly which snapshot it relied on.
+    pub trust_lists: Vec<TrustListSnapshot>,
     pub trust_snapshot: Option<String>,
     pub legacy_algorithms_allowed: bool,
     pub digest_algorithms: Vec<&'static str>,
@@ -201,8 +208,25 @@ pub struct PolicyReport {
     pub transforms: Vec<&'static str>,
 }
 
+/// One trusted list a run consulted, as the report cites it.
+#[derive(Clone, Debug, Serialize)]
+pub struct TrustListSnapshot {
+    pub territory: Option<String>,
+    pub sequence_number: Option<u64>,
+    pub issue_date: Option<String>,
+    pub next_update: Option<String>,
+    pub anchors: usize,
+    /// Whether the list's own XMLDSig signature was verified against a
+    /// caller-supplied signer certificate.
+    pub signature_verified: bool,
+}
+
 impl PolicyReport {
-    pub fn new(trust_store_configured: bool, legacy_algorithms_allowed: bool) -> Self {
+    pub fn new(
+        trust_store_configured: bool,
+        legacy_algorithms_allowed: bool,
+        revocation: crate::trust::RevocationPolicy,
+    ) -> Self {
         let mut digest_algorithms = vec!["sha256", "sha384", "sha512"];
         let mut signature_algorithms = vec![
             "rsa-pkcs1-sha256",
@@ -221,7 +245,8 @@ impl PolicyReport {
             signature_algorithms.insert(0, "rsa-pkcs1-sha1");
         }
         Self {
-            revocation: "offline",
+            revocation: revocation.as_str(),
+            trust_lists: Vec::new(),
             trust_store: if trust_store_configured {
                 "configured"
             } else {

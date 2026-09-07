@@ -1,4 +1,5 @@
 mod output_dir;
+mod revocation_store;
 mod trust_store;
 
 use std::collections::HashSet;
@@ -17,7 +18,8 @@ use serde_json::{Value, json};
 use unicode_normalization::UnicodeNormalization;
 
 use openszigno_verify::{
-    NoRevocation, RoxmltreeC14n, Verdict, VerifyOptions, parse_rfc3339, verify as verify_dossier,
+    MemoryRevocationStore, NoRevocation, RoxmltreeC14n, TrustListSnapshot, Verdict, VerifyOptions,
+    parse_rfc3339, verify as verify_dossier,
 };
 
 use crate::output_dir::{OpenError, OutputDir};
@@ -32,8 +34,8 @@ const MAX_NESTING_DEPTH: u32 = 8;
 #[command(
     name = "openszigno",
     version,
-    about = "Inspect and extract Microsec e-Szigno dossiers",
-    long_about = "Inspect and extract Microsec e-Szigno dossiers. This tool does not verify XMLDSig/XAdES signatures or legal authenticity."
+    about = "Inspect, extract, and verify Microsec e-Szigno dossiers",
+    long_about = "Inspect, extract, and verify Microsec e-Szigno dossiers. `verify` checks XMLDSig/XAdES signatures, certificate paths, and revocation against trust material you supply; it never judges legal authenticity."
 )]
 struct Cli {
     #[command(subcommand)]
@@ -50,7 +52,7 @@ enum Command {
     Extract(ExtractArgs),
     /// Apply strict structural checks (not cryptographic verification).
     ValidateStructure(InputArgs),
-    /// Verify XMLDSig signatures. Cannot report a signature as valid yet.
+    /// Verify XMLDSig/XAdES signatures, certificate paths, and revocation.
     Verify(VerifyArgs),
 }
 
@@ -89,6 +91,27 @@ struct VerifyArgs {
     /// check is `unknown`.
     #[arg(long = "trust-store", value_name = "DIR")]
     trust_store: Option<PathBuf>,
+    /// ETSI TS 119 612 trusted list to take trust anchors from, as XML.
+    /// Repeatable. Its anchors join the `--trust-store` ones, each reported
+    /// with its origin, and only these can make a chain `qualified`.
+    #[arg(long = "trust-list", value_name = "FILE")]
+    trust_list: Vec<PathBuf>,
+    /// Certificate, PEM or DER, that must have signed every `--trust-list`.
+    /// Obtain it out of band: for the EU list of trusted lists, from the
+    /// Official Journal. Without it the lists are read but reported as
+    /// unverified, which caps the verdict at `indeterminate`.
+    #[arg(long = "trust-list-signer", value_name = "CERT")]
+    trust_list_signer: Option<PathBuf>,
+    /// Directory of CRLs (`crls/`) and OCSP responses (`ocsp/`) to check
+    /// revocation against, in addition to the signature's own
+    /// `xades:RevocationValues`. Nothing is ever fetched.
+    #[arg(long = "revocation-store", value_name = "DIR")]
+    revocation_store: Option<PathBuf>,
+    /// Do not check revocation at all. Documented as producing at most
+    /// `indeterminate`: a signature whose certificate might have been revoked
+    /// is not one this tool will call valid.
+    #[arg(long = "no-revocation")]
+    no_revocation: bool,
     /// Validation time as an RFC 3339 timestamp. Overrides everything: without
     /// it, a signature whose timestamp fully verified is validated at that
     /// token's genTime, and otherwise at the current time.
@@ -450,32 +473,77 @@ fn validate_structure(path: &Path, options: &ParseOptions) -> CliResult {
 ///
 /// A structural failure still exits 4, so a caller can tell "this is not a
 /// dossier" apart from "this dossier's signatures do not verify". A completed
-/// run exits 6 when any signature is `invalid` and 7 when the overall verdict
-/// is `indeterminate`; this phase cannot reach exit 0 for a dossier that holds
-/// signatures, because revocation is not checked.
+/// run exits 0 when every signature is `valid`, 6 when any signature is
+/// `invalid`, and 7 when the overall verdict is `indeterminate`.
 fn verify_command(args: &VerifyArgs) -> CliResult {
     let options = args.parse_options();
     let (bytes, dossier) = load(&args.file, &options)?;
     let input = valid_input(bytes.len());
 
+    let backend = RoxmltreeC14n;
     let store;
     let empty = openszigno_verify::NoTrust;
-    let trust: &dyn openszigno_verify::TrustSource = match &args.trust_store {
-        Some(directory) => {
-            store = trust_store::load(directory).map_err(|message| {
-                failure(
-                    input.clone(),
-                    CliError {
-                        code: "trust_store_invalid",
-                        message,
-                        exit: 3,
-                    },
-                )
-            })?;
+    let mut snapshots: Vec<TrustListSnapshot> = Vec::new();
+    let trust: &dyn openszigno_verify::TrustSource =
+        if args.trust_store.is_some() || !args.trust_list.is_empty() {
+            let mut loaded = match &args.trust_store {
+                Some(directory) => trust_store::load(directory).map_err(|message| {
+                    failure(
+                        input.clone(),
+                        CliError {
+                            code: "trust_store_invalid",
+                            message,
+                            exit: 3,
+                        },
+                    )
+                })?,
+                None => openszigno_verify::MemoryTrustStore::default(),
+            };
+            let signer = match &args.trust_list_signer {
+                Some(path) => Some(load_signer(path).map_err(|message| {
+                    failure(
+                        input.clone(),
+                        CliError {
+                            code: "trust_list_invalid",
+                            message,
+                            exit: 3,
+                        },
+                    )
+                })?),
+                None => None,
+            };
+            for path in &args.trust_list {
+                let list =
+                    load_trust_list(path, signer.as_deref(), &backend).map_err(|message| {
+                        failure(
+                            input.clone(),
+                            CliError {
+                                code: "trust_list_invalid",
+                                message,
+                                exit: 3,
+                            },
+                        )
+                    })?;
+                snapshots.push(TrustListSnapshot {
+                    territory: list.territory.clone(),
+                    sequence_number: list.sequence_number,
+                    issue_date: list.issue_date.clone(),
+                    next_update: list.next_update.clone(),
+                    anchors: list.anchors.len(),
+                    signature_verified: list.checks.iter().any(|check| {
+                        check.code == openszigno_verify::CheckCode::TrustListSignatureOk
+                    }),
+                });
+                for check in list.checks {
+                    loaded.push_check(check);
+                }
+                loaded.extend_anchors(list.anchors);
+            }
+            store = loaded;
             &store
-        }
-        None => &empty,
-    };
+        } else {
+            &empty
+        };
 
     let system = openszigno_verify::SystemClock;
     let fixed;
@@ -487,15 +555,34 @@ fn verify_command(args: &VerifyArgs) -> CliResult {
         None => &system,
     };
 
-    let revocation = NoRevocation;
-    let backend = RoxmltreeC14n;
-    let mut verify_options = VerifyOptions::new(clock, trust, &revocation, &backend);
+    let disabled = NoRevocation;
+    let offline;
+    let revocation: &dyn openszigno_verify::RevocationSource = if args.no_revocation {
+        &disabled
+    } else {
+        offline = match &args.revocation_store {
+            Some(directory) => revocation_store::load(directory).map_err(|message| {
+                failure(
+                    input.clone(),
+                    CliError {
+                        code: "revocation_store_invalid",
+                        message,
+                        exit: 3,
+                    },
+                )
+            })?,
+            None => MemoryRevocationStore::default(),
+        };
+        &offline
+    };
+    let mut verify_options = VerifyOptions::new(clock, trust, revocation, &backend);
     verify_options.parse = options;
     verify_options.requested_time = args.at.as_ref().map(|time| time.text.clone());
     verify_options.allow_legacy_algorithms = args.allow_legacy_algorithms;
 
-    let report = verify_dossier(&bytes, &verify_options)
+    let mut report = verify_dossier(&bytes, &verify_options)
         .map_err(|error| failure(input.clone(), CliError::structure(error)))?;
+    report.policy.trust_lists = snapshots;
     let exit = match report.verdict {
         Verdict::Invalid => 6,
         Verdict::Indeterminate => 7,
@@ -516,6 +603,46 @@ fn verify_command(args: &VerifyArgs) -> CliResult {
         warnings: structural_warnings(&dossier),
         exit,
     })
+}
+
+/// Read a `--trust-list-signer` certificate, PEM or DER.
+///
+/// Exactly one certificate: a file holding several would leave "which one
+/// signed the list" ambiguous, and a verifier must not pick.
+fn load_signer(path: &Path) -> Result<Vec<u8>, String> {
+    let bytes = read_bounded(path, 4 * 1024 * 1024)?;
+    let certificates = openszigno_verify::certs::certificates_from_bytes(&bytes)
+        .map_err(|reason| format!("the trust-list signer certificate is not usable: {reason}"))?;
+    match certificates.len() {
+        1 => Ok(certificates.into_iter().next().expect("one certificate")),
+        _ => Err("the trust-list signer file must hold exactly one certificate".to_owned()),
+    }
+}
+
+fn load_trust_list(
+    path: &Path,
+    signer: Option<&[u8]>,
+    backend: &RoxmltreeC14n,
+) -> Result<openszigno_verify::TrustList, String> {
+    let bytes = read_bounded(
+        path,
+        openszigno_verify::trustlist::MAX_TRUST_LIST_BYTES as u64,
+    )?;
+    openszigno_verify::trustlist::load(&bytes, signer, backend)
+}
+
+/// Read a regular file, refusing symlinks and anything over `limit` bytes.
+/// The message never names the path, because it may be private.
+fn read_bounded(path: &Path, limit: u64) -> Result<Vec<u8>, String> {
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|_| "a trust material file could not be inspected".to_owned())?;
+    if !metadata.is_file() {
+        return Err("a trust material path is not a regular file".to_owned());
+    }
+    if metadata.len() > limit {
+        return Err("a trust material file is too large".to_owned());
+    }
+    fs::read(path).map_err(|_| "a trust material file could not be read".to_owned())
 }
 
 /// What one planned output file will become.
@@ -1427,11 +1554,11 @@ fn write_human_success(command: &str, response: &Response) -> io::Result<()> {
                     )?;
                 }
             }
-            // The boundary, restated on every run: this phase does not check
-            // revocation, so it can never conclude more than "nothing failed".
+            // The boundary, restated on every run.
             writeln!(
                 out,
-                "Revocation is not checked in this release, so no signature can be reported as valid."
+                "Revocation policy: {}. A verdict of `valid` means every check passed at the stated validation time; it is not a legal opinion.",
+                display_json_string(&data["policy"]["revocation"])
             )?;
         }
         "validate-structure" => {

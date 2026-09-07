@@ -627,12 +627,16 @@ fn finish(
     // The claimed signing time is read and reported, never believed: it is a
     // claim until a verified timestamp token orders it, and it never becomes a
     // validation time.
+    // Informational on purpose: a claimed signing time is unauthenticated
+    // whether it is there or not, so its presence decides nothing. What does
+    // decide is the validation time, which only `--at`, a verified timestamp,
+    // and the clock can set.
     match &header.signing_time {
-        Some(_) => checks.push(Check::unknown(
+        Some(_) => checks.push(Check::info(
             CheckCode::SigningTimePresent,
             "a claimed xades:SigningTime was read; it is unauthenticated and is never used as a validation time",
         )),
-        None => checks.push(Check::unknown(
+        None => checks.push(Check::info(
             CheckCode::SigningTimePresent,
             "no usable xades:SigningTime was found",
         )),
@@ -649,6 +653,8 @@ fn finish(
             signing_time: header.signing_time,
             signing_certificate_index: signer_index,
             signing_certificate: signer.as_ref().map(ParsedCertificate::summary),
+            qualified: None,
+            qualified_signature_device: None,
             chain: Vec::new(),
             references,
             xades: stage_c.report,

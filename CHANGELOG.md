@@ -10,6 +10,94 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
 
 ## [Unreleased]
 
+### Added (M2 phase 3: revocation and EU trusted lists)
+
+- **`verify` can now report a signature `valid`, and exits `0` when it does.**
+  Reaching it needs all of: a structurally sound signature whose references and
+  signature value verify under the pinned policy, a signed
+  `SigningCertificate` binding, a path to a configured anchor at the validation
+  time, a fully verified `xades:SignatureTimeStamp`, and fresh non-revoked
+  status for every non-anchor certificate on both the signer's and each
+  timestamp authority's chain. `valid` means every check this build makes
+  passed at the stated validation time; it is not a legal opinion. See
+  `SECURITY.md` and `docs/architecture.md`.
+- Offline revocation checking (stage E). Data is taken from the signature's own
+  `xades:RevocationValues` (`CRLValues`/`EncapsulatedCRLValue` and
+  `OCSPValues`/`EncapsulatedOCSPValue`, in every recognised XAdES namespace)
+  and from `--revocation-store DIR`, in that order, with OCSP asked before CRLs
+  within each tier. Embedded data is untrusted input: every CRL and every OCSP
+  response is signature-checked against an authorised issuer before it is
+  believed.
+  - CRLs per RFC 5280 section 6.3: issuer match, signature by the issuing CA or
+    by a delegate that CA issued which asserts `cRLSign`, `thisUpdate` and
+    `nextUpdate` against the validation time with **no grace period**, and
+    scope via `issuingDistributionPoint`. Delta CRLs, indirect CRLs, scopes
+    restricted to reasons or attribute certificates, partitioned CRLs the
+    certificate does not name, entries carrying `certificateIssuer`, and any
+    other critical CRL extension all fail closed. `certificateHold` counts as
+    revoked.
+  - OCSP per RFC 6960: response status, responder identity `byName` or `byKey`,
+    authorisation as the issuing CA or a delegate carrying `id-kp-OCSPSigning`,
+    signature under the pinned allowlist, `certID` matching, and freshness. The
+    nonce is deliberately ignored, because offline validation replays a
+    response produced for someone else's request. SHA-1 is accepted in the
+    `certID` and nowhere else, documented in `docs/architecture.md`.
+  - A revocation dated *after* the validation time yields the distinct
+    `cert_revoked_after_validation_time` (`unknown`), not `cert_revoked`.
+  - New codes: `revocation_policy` (`info`), `revocation_ok` (`passed`),
+    `cert_revoked` (`failed`), `cert_revoked_after_validation_time`,
+    `revocation_status_unknown`, `revocation_data_stale`,
+    `revocation_data_invalid` (all `unknown`). `revocation_not_checked` now
+    means only "the caller passed `--no-revocation`".
+- ETSI TS 119 612 trusted lists via `--trust-list FILE` (repeatable). Every
+  `X509Certificate` in the service digital identity of a granted CA/QC or
+  TSA/QTST service becomes a trust anchor carrying the service's status
+  timeline, and the status **in force at the validation time** decides whether
+  a path ending there is trusted. `--trust-list-signer CERT` verifies the
+  list's own enveloped XMLDSig signature with the same core, backend and
+  allowlists a dossier gets; without it `trust_list_unverified` (`unknown`)
+  blocks a `valid` verdict. Nothing is fetched. New codes:
+  `trust_list_loaded`, `trust_list_unverified`, `trust_list_signature_ok`,
+  `trust_list_signature_invalid`, `certificate_qualified`,
+  `certificate_not_qualified`, `certificate_qualified_unknown`.
+- Qualified status: `qualified` and `qualified_signature_device` per signature,
+  `true` only when a trusted list grants the anchor's CA/QC service at the
+  validation time **and**, for a certificate issued on or after 2016-07-01, the
+  certificate asserts `QcCompliance`. `null`, never `false`, when no trusted
+  list covers the anchor.
+- New flags: `--trust-list FILE`, `--trust-list-signer CERT`,
+  `--revocation-store DIR`, `--no-revocation`. New error codes
+  `trust_list_invalid` and `revocation_store_invalid` (exit 3).
+- New JSON fields: `policy.trust_lists[]` (territory, sequence number, issue
+  date, next update, anchor count, whether the list's signature was verified);
+  `signatures[].qualified` and `signatures[].qualified_signature_device`;
+  `chain[].trust_anchor_origin` (`trust_store` or `trust_list`); and
+  `chain[].revocation` with `status`, `code`, `source` (`embedded_crl`,
+  `embedded_ocsp`, `store_crl`, `store_ocsp`), `revocation_time`, `reason`,
+  `this_update`, `next_update`, and `produced_at`. `schema_version` stays `1`:
+  these are additions, and no existing field's contract changed.
+- `docs/trust.md`: how to obtain, pin and lay out trust anchors, trusted lists,
+  CRLs and OCSP responses, how qualified status is decided, and what makes
+  revocation data unusable.
+
+### Changed (M2 phase 3)
+
+- **New check status `info`**, for checks that report rather than decide. It is
+  the only non-blocking status, which makes "`unknown` always blocks" true
+  without exception. `signing_time_present`, `cert_key_usage_advisory` and
+  `signature_timestamp_present` moved from `unknown` to `info`; consumers must
+  treat an unrecognised code as blocking unless its status is `passed` or
+  `info`.
+- `timestamp_verified` now summarises a token's checks **excluding** its
+  revocation checks, which are folded into the signature's verdict separately
+  so they are counted once. An unobtainable revocation answer for a TSA no
+  longer stops its `genTime` from becoming the validation time; a TSA
+  certificate that was actually revoked still sinks the signature.
+- `TrustSource::anchors` now yields `TrustAnchor` values carrying their origin
+  and any trusted-list service record, and `RevocationSource` gained `crls`
+  and `ocsp_responses`. Both are breaking changes to the `openszigno-verify`
+  public API.
+
 ### Added (M2 phase 2: XAdES signed properties and RFC 3161 timestamps)
 
 - `crates/openszigno-verify/tests/vectors.rs` and
@@ -146,8 +234,9 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
 - The Conventional Commits scope allowlist gains `verify`, in
   `CONTRIBUTING.md` and `scripts/commit-msg.sh`.
 
-`valid` remains unreachable: `revocation_not_checked` is still emitted as a
-blocking `skipped` check on every signature, and a test asserts it.
+`valid` remained unreachable at that point: `revocation_not_checked` was still
+emitted as a blocking `skipped` check on every signature, and a test asserted
+it. Phase 3 lifted that.
 
 ### Changed
 
