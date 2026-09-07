@@ -1,0 +1,55 @@
+name: Feature request
+description: Propose a focused improvement to openSzigno
+title: "feat: "
+labels:
+  - type:feature
+  - source:human
+body:
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched existing issues and pull requests for this proposal.
+          required: true
+        - label: I am describing the problem before prescribing an implementation.
+          required: true
+        - label: This proposal does not ask openSzigno to assert signature, certificate, timestamp, or legal validity (see the verification boundary in docs/architecture.md).
+          required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: Who encounters this problem, in what workflow, and what does it cost today?
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Desired outcome
+      description: Describe observable behavior (commands, JSON fields, exit statuses) and how a maintainer could verify it.
+    validations:
+      required: true
+  - type: textarea
+    id: approach
+    attributes:
+      label: Proposed approach
+      description: Optional. Include alternatives and trade-offs if you have explored them.
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Dossier parsing and format compatibility
+        - Extraction and filesystem safety
+        - JSON protocol and exit statuses
+        - Packaging and distribution
+        - Documentation
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Link examples, prior art, or related issues. Do not include secrets, real dossiers, or private data.

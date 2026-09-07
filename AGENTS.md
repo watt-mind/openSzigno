@@ -15,6 +15,19 @@ Team **`LAB`**, project **`openSzigno`**. Full protocol:
 Follow-ups discovered mid-work → file a Linear issue in `Triage` (do not expand the
 current ticket's scope). PR body: `Fixes LAB-XX`.
 
+## Public intake (GitHub Issues)
+
+This is a public repo: external contributors file GitHub Issues (templates in
+`.github/ISSUE_TEMPLATE/`, auto-labeled `type:*` + `source:human`).
+Maintainers mirror accepted public issues into Linear (same team/project as
+above, `source:human`, link back to the GitHub issue) and work them there.
+The GitHub issue stays the public face — close it with a link when done, and
+never paste Linear internals, private paths, or maintainer-local details into
+GitHub comments, commits, or PR descriptions (Linear protocol §11).
+Triage rule: vulnerability → the `SECURITY.md` private flow, never a public
+issue; anything involving a real dossier → ask for a synthetic reproducer
+before anything else.
+
 ## Non-negotiables
 
 - **Private-data boundary.** `samples/` holds private real-world dossiers and is
