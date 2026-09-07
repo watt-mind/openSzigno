@@ -13,6 +13,7 @@ pub mod keys;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
+use der::Decode as _;
 use openszigno_core::{Limits, XmlSource};
 use openszigno_verify::c14n::{C14nAlgorithm, C14nBackend, NodeSet, RoxmltreeC14n};
 use rcgen::{
@@ -308,6 +309,95 @@ pub struct SigSpec {
     /// Certificates to place in `xades:CertificateValues`, which is where real
     /// dossiers carry the intermediates and usually the root.
     pub certificate_values: Vec<Vec<u8>>,
+    /// The signed `SigningCertificate` / `SigningCertificateV2` property.
+    pub signing_certificate: Option<SigningCertificateSpec>,
+    /// Emit `xades:SignaturePolicyIdentifier/xades:SignaturePolicyImplied`.
+    pub signature_policy_implied: bool,
+    /// A signature timestamp over this signature's `ds:SignatureValue`.
+    pub timestamp: Option<TimestampSpec>,
+    /// Emit an `xades:ArchiveTimeStamp`, which is out of scope and must be
+    /// reported as such.
+    pub archive_timestamp: bool,
+    /// An unsigned property this build does not validate, by element name.
+    pub extra_unsigned_property: Option<String>,
+}
+
+/// How the signed `SigningCertificate` property should look.
+pub struct SigningCertificateSpec {
+    /// The certificate the property designates.
+    pub certificate: Vec<u8>,
+    /// `true` for `SigningCertificateV2`, `false` for the 1.3.2 form.
+    pub v2: bool,
+    pub digest_uri: String,
+    /// Corrupt the digest, so nothing matches it.
+    pub wrong_digest: bool,
+    /// Emit `IssuerSerial` (v1) or `IssuerSerialV2` (v2).
+    pub issuer_serial: bool,
+    /// Emit an issuer and serial that do not belong to the certificate.
+    pub wrong_issuer_serial: bool,
+}
+
+impl SigningCertificateSpec {
+    pub fn v1(certificate: Vec<u8>) -> Self {
+        Self {
+            certificate,
+            v2: false,
+            digest_uri: SHA256_URI.to_owned(),
+            wrong_digest: false,
+            issuer_serial: true,
+            wrong_issuer_serial: false,
+        }
+    }
+
+    pub fn v2(certificate: Vec<u8>) -> Self {
+        Self {
+            v2: true,
+            ..Self::v1(certificate)
+        }
+    }
+}
+
+/// How the signature timestamp and its token should look.
+pub struct TimestampSpec {
+    /// The key the timestamp authority signs with.
+    pub tsa_key: TestKey,
+    /// The TSA certificate, which the token carries.
+    pub tsa_der: Vec<u8>,
+    /// Further certificates to place in the token, such as the issuing CA.
+    pub token_certificates: Vec<Vec<u8>>,
+    /// `genTime`, as an RFC 3339 timestamp.
+    pub gen_time: String,
+    pub accuracy_seconds: Option<i32>,
+    /// Digest something other than the canonicalized `ds:SignatureValue`.
+    pub wrong_imprint: bool,
+    /// The `ds:CanonicalizationMethod` of the timestamp element, if any.
+    pub c14n: Option<String>,
+    /// Replace the token with these bytes, for the malformed cases.
+    pub raw_token: Option<Vec<u8>>,
+    /// Emit an `xades:Include`, a data-selection form this build refuses.
+    pub include_element: bool,
+    /// Emit the token twice, which this build does not process.
+    pub duplicate_token: bool,
+    /// Emit a token that is not decodable Base64.
+    pub undecodable_token: bool,
+}
+
+impl TimestampSpec {
+    pub fn new(tsa_key: TestKey, tsa_der: Vec<u8>, gen_time: &str) -> Self {
+        Self {
+            tsa_key,
+            tsa_der,
+            token_certificates: Vec::new(),
+            gen_time: gen_time.to_owned(),
+            accuracy_seconds: Some(1),
+            wrong_imprint: false,
+            c14n: None,
+            raw_token: None,
+            include_element: false,
+            duplicate_token: false,
+            undecodable_token: false,
+        }
+    }
 }
 
 /// The whole synthetic dossier.
@@ -319,6 +409,9 @@ pub struct DossierSpec {
     /// An extra copy of the payload object, placed outside the signed document,
     /// for the signature-wrapping cases.
     pub decoy_object: Option<(String, String)>,
+    /// Emit a dossier-level `es:TimeStamp`, which M3 validates and this
+    /// release only reports.
+    pub dossier_timestamp: bool,
 }
 
 impl Default for DossierSpec {
@@ -329,6 +422,7 @@ impl Default for DossierSpec {
             document_signature: None,
             dossier_signature: None,
             decoy_object: None,
+            dossier_timestamp: false,
         }
     }
 }
@@ -352,6 +446,11 @@ pub fn document_signature(certificates: Vec<Vec<u8>>) -> SigSpec {
         xades_namespace: XADES_NS.to_owned(),
         objects_reversed: false,
         certificate_values: Vec::new(),
+        signing_certificate: None,
+        signature_policy_implied: false,
+        timestamp: None,
+        archive_timestamp: false,
+        extra_unsigned_property: None,
     }
 }
 
@@ -374,6 +473,11 @@ pub fn dossier_signature(certificates: Vec<Vec<u8>>) -> SigSpec {
         xades_namespace: XADES_NS.to_owned(),
         objects_reversed: false,
         certificate_values: Vec::new(),
+        signing_certificate: None,
+        signature_policy_implied: false,
+        timestamp: None,
+        archive_timestamp: false,
+        extra_unsigned_property: None,
     }
 }
 
@@ -401,8 +505,263 @@ pub fn build(spec: &DossierSpec, keys: &[(&str, &TestKey)]) -> String {
             .map(|(_, key)| sign_signed_info(&xml, signature, key))
             .unwrap_or_default();
         xml = xml.replace(&format!("@@SIGNATURE-{tag}@@"), &value);
+        // The token is built last, because a signature timestamp covers the
+        // canonicalized `ds:SignatureValue` element, which only exists once the
+        // signature value has been filled in.
+        if let Some(timestamp) = &signature.timestamp {
+            let imprint = canonical_signature_value(&xml, signature);
+            let token = match &timestamp.raw_token {
+                Some(bytes) => bytes.clone(),
+                None => build_timestamp_token(timestamp, &imprint),
+            };
+            xml = xml.replace(&format!("@@TIMESTAMP-{tag}@@"), &BASE64.encode(&token));
+        }
     }
     xml
+}
+
+/// The octets a `xades:SignatureTimeStamp` covers: the canonicalized
+/// `ds:SignatureValue` element, start tag to end tag.
+pub fn canonical_signature_value(xml: &str, spec: &SigSpec) -> Vec<u8> {
+    let source = XmlSource::decode(xml.as_bytes(), &Limits::default()).expect("decodes");
+    let tree = source.parse_tree(&Limits::default()).expect("parses");
+    let signature_node = tree
+        .descendants()
+        .find(|node| node.attribute("Id") == Some(spec.id.as_str()))
+        .expect("the signature element exists");
+    let value = signature_node
+        .children()
+        .find(|node| node.is_element() && node.tag_name().name() == "SignatureValue")
+        .expect("ds:SignatureValue exists");
+    let algorithm = spec
+        .timestamp
+        .as_ref()
+        .and_then(|timestamp| timestamp.c14n.as_deref())
+        .and_then(C14nAlgorithm::from_uri)
+        .unwrap_or(C14nAlgorithm::Inclusive { comments: false });
+    RoxmltreeC14n
+        .canonicalize(source.text(), &NodeSet::subtree(value), algorithm, &[])
+        .expect("canonicalizes")
+}
+
+/// The `xades:SigningCertificate` or `SigningCertificateV2` property.
+fn render_signing_certificate(spec: &SigningCertificateSpec) -> String {
+    use der::Encode as _;
+
+    let mut digest = match spec.digest_uri.as_str() {
+        SHA1_URI => sha1::Sha1::digest(&spec.certificate).to_vec(),
+        SHA512_URI => Sha512::digest(&spec.certificate).to_vec(),
+        _ => Sha256::digest(&spec.certificate).to_vec(),
+    };
+    if spec.wrong_digest {
+        digest[0] ^= 0xff;
+    }
+    let certificate =
+        x509_cert::Certificate::from_der(&spec.certificate).expect("the certificate parses");
+    let mut serial = serial_decimal(certificate.tbs_certificate.serial_number.as_bytes());
+    if spec.wrong_issuer_serial {
+        serial.push('7');
+    }
+
+    let issuer_serial = if !spec.issuer_serial {
+        String::new()
+    } else if spec.v2 {
+        let issuer = if spec.wrong_issuer_serial {
+            x509_cert::name::Name::default()
+        } else {
+            certificate.tbs_certificate.issuer.clone()
+        };
+        let value = IssuerSerialV2 {
+            issuer: vec![x509_cert::ext::pkix::name::GeneralName::DirectoryName(
+                issuer,
+            )],
+            serial_number: certificate.tbs_certificate.serial_number.clone(),
+        };
+        format!(
+            "<xades:IssuerSerialV2>{}</xades:IssuerSerialV2>",
+            BASE64.encode(value.to_der().expect("IssuerSerial encodes"))
+        )
+    } else {
+        format!(
+            "<xades:IssuerSerial>\
+<ds:X509IssuerName>CN=openSzigno Test Root,O=openSzigno synthetic test PKI,C=HU</ds:X509IssuerName>\
+<ds:X509SerialNumber>{serial}</ds:X509SerialNumber>\
+</xades:IssuerSerial>"
+        )
+    };
+    let element = if spec.v2 {
+        "SigningCertificateV2"
+    } else {
+        "SigningCertificate"
+    };
+    format!(
+        "<xades:{element}><xades:Cert><xades:CertDigest>\
+<ds:DigestMethod Algorithm=\"{}\"/><ds:DigestValue>{}</ds:DigestValue>\
+</xades:CertDigest>{issuer_serial}</xades:Cert></xades:{element}>",
+        spec.digest_uri,
+        BASE64.encode(&digest)
+    )
+}
+
+/// `IssuerSerial`, as `IssuerSerialV2` carries it.
+#[derive(der::Sequence)]
+struct IssuerSerialV2 {
+    issuer: Vec<x509_cert::ext::pkix::name::GeneralName>,
+    serial_number: x509_cert::serial_number::SerialNumber,
+}
+
+/// A certificate serial number as the decimal string XMLDSig writes.
+fn serial_decimal(bytes: &[u8]) -> String {
+    let mut digits: Vec<u8> = vec![0];
+    for byte in bytes {
+        let mut carry = u32::from(*byte);
+        for digit in digits.iter_mut().rev() {
+            let value = u32::from(*digit) * 256 + carry;
+            *digit = (value % 10) as u8;
+            carry = value / 10;
+        }
+        while carry > 0 {
+            digits.insert(0, (carry % 10) as u8);
+            carry /= 10;
+        }
+    }
+    while digits.len() > 1 && digits[0] == 0 {
+        digits.remove(0);
+    }
+    digits
+        .into_iter()
+        .map(|digit| char::from(b'0' + digit))
+        .collect()
+}
+
+/// Build one RFC 3161 token over `imprint_input`, signed by a synthetic TSA.
+///
+/// This is test material only. It exists so the verifier meets tokens it did
+/// not itself produce the verification logic for, and it must never move into
+/// a shipped crate.
+pub fn build_timestamp_token(spec: &TimestampSpec, imprint_input: &[u8]) -> Vec<u8> {
+    use cms::cert::{CertificateChoices, IssuerAndSerialNumber};
+    use cms::content_info::{CmsVersion, ContentInfo};
+    use cms::signed_data::{
+        CertificateSet, EncapsulatedContentInfo, SignedData, SignerIdentifier, SignerInfo,
+        SignerInfos,
+    };
+    use der::asn1::{Any, OctetString, SetOfVec};
+    use der::{Encode as _, Tag};
+    use openszigno_verify::tsa::{Accuracy, MessageImprint, TstInfo};
+    use x509_cert::attr::{Attribute, Attributes};
+    use x509_cert::spki::AlgorithmIdentifierOwned;
+
+    let oid = |text: &str| const_oid::ObjectIdentifier::new_unwrap(text);
+    let sha256_algorithm = AlgorithmIdentifierOwned {
+        oid: oid("2.16.840.1.101.3.4.2.1"),
+        parameters: None,
+    };
+
+    let mut imprint = Sha256::digest(imprint_input).to_vec();
+    if spec.wrong_imprint {
+        imprint[0] ^= 0xff;
+    }
+    let gen_time = openszigno_verify::parse_rfc3339(&spec.gen_time).expect("the genTime parses");
+    let tst_info = TstInfo {
+        version: 1,
+        policy: oid("1.3.6.1.4.1.99999.1"),
+        message_imprint: MessageImprint {
+            hash_algorithm: sha256_algorithm.clone(),
+            hashed_message: OctetString::new(imprint).expect("the imprint encodes"),
+        },
+        serial_number: x509_cert::serial_number::SerialNumber::new(&[0x2a])
+            .expect("the serial encodes"),
+        gen_time: der::asn1::GeneralizedTime::from_unix_duration(std::time::Duration::from_secs(
+            u64::try_from(gen_time).expect("the genTime is after the epoch"),
+        ))
+        .expect("the genTime encodes"),
+        accuracy: spec.accuracy_seconds.map(|seconds| Accuracy {
+            seconds: Some(seconds),
+            millis: None,
+            micros: None,
+        }),
+        ordering: None,
+        nonce: None,
+        tsa: None,
+        extensions: None,
+    };
+    let econtent = tst_info.to_der().expect("the TSTInfo encodes");
+
+    let tsa = x509_cert::Certificate::from_der(&spec.tsa_der).expect("the TSA certificate parses");
+    let attribute = |oid_text: &str, value: Any| Attribute {
+        oid: oid(oid_text),
+        values: SetOfVec::try_from(vec![value]).expect("one attribute value"),
+    };
+    let signed_attrs: Attributes = SetOfVec::try_from(vec![
+        attribute(
+            "1.2.840.113549.1.9.3",
+            Any::encode_from(&oid("1.2.840.113549.1.9.16.1.4")).expect("the content type encodes"),
+        ),
+        attribute(
+            "1.2.840.113549.1.9.4",
+            Any::encode_from(
+                &OctetString::new(Sha256::digest(&econtent).to_vec()).expect("encodes"),
+            )
+            .expect("the message digest encodes"),
+        ),
+    ])
+    .expect("the signed attributes encode");
+
+    let message = signed_attrs.to_der().expect("the signed attributes encode");
+    let signature = match &spec.tsa_key.signing {
+        SigningKey::Rsa(private) => {
+            use rsa::signature::{SignatureEncoding as _, Signer as _};
+            rsa::pkcs1v15::SigningKey::<Sha256>::new((**private).clone())
+                .sign(&message)
+                .to_vec()
+        }
+        _ => panic!("the synthetic TSA signs with RSA"),
+    };
+
+    let mut certificates = vec![CertificateChoices::Certificate(tsa.clone())];
+    for der in &spec.token_certificates {
+        certificates.push(CertificateChoices::Certificate(
+            x509_cert::Certificate::from_der(der).expect("the certificate parses"),
+        ));
+    }
+    let signed_data = SignedData {
+        version: CmsVersion::V3,
+        digest_algorithms: SetOfVec::try_from(vec![sha256_algorithm.clone()])
+            .expect("one digest algorithm"),
+        encap_content_info: EncapsulatedContentInfo {
+            econtent_type: oid("1.2.840.113549.1.9.16.1.4"),
+            econtent: Some(Any::new(Tag::OctetString, econtent).expect("the eContent encodes")),
+        },
+        certificates: Some(CertificateSet(
+            SetOfVec::try_from(certificates).expect("the certificate set encodes"),
+        )),
+        crls: None,
+        signer_infos: SignerInfos(
+            SetOfVec::try_from(vec![SignerInfo {
+                version: CmsVersion::V1,
+                sid: SignerIdentifier::IssuerAndSerialNumber(IssuerAndSerialNumber {
+                    issuer: tsa.tbs_certificate.issuer.clone(),
+                    serial_number: tsa.tbs_certificate.serial_number.clone(),
+                }),
+                digest_alg: sha256_algorithm,
+                signed_attrs: Some(signed_attrs),
+                signature_algorithm: AlgorithmIdentifierOwned {
+                    oid: oid("1.2.840.113549.1.1.1"),
+                    parameters: Some(Any::null()),
+                },
+                signature: OctetString::new(signature).expect("the signature encodes"),
+                unsigned_attrs: None,
+            }])
+            .expect("one SignerInfo"),
+        ),
+    };
+    ContentInfo {
+        content_type: oid("1.2.840.113549.1.7.2"),
+        content: Any::encode_from(&signed_data).expect("the SignedData encodes"),
+    }
+    .to_der()
+    .expect("the token encodes")
 }
 
 fn render(spec: &DossierSpec) -> String {
@@ -434,6 +793,11 @@ fn render(spec: &DossierSpec) -> String {
     ));
     if let Some(signature) = &spec.document_signature {
         out.push_str(&render_signature(signature, "doc", namespace));
+    }
+    if spec.dossier_timestamp {
+        out.push_str(
+            "<es:TimeStamp><xades:EncapsulatedTimeStamp xmlns:xades=\"http://uri.etsi.org/01903/v1.3.2#\">AA==</xades:EncapsulatedTimeStamp></es:TimeStamp>",
+        );
     }
     out.push_str("</es:Document>");
     if let Some((id, payload)) = &spec.decoy_object {
@@ -519,31 +883,80 @@ fn render_signature(spec: &SigSpec, tag: &str, namespace: &str) -> String {
     } else {
         String::new()
     };
-    // `xades:CertificateValues` lives in the *unsigned* properties, so adding
-    // certificates never changes a digest.
-    let certificate_values = if spec.certificate_values.is_empty() {
-        String::new()
-    } else {
-        let mut values = String::from(
-            "<xades:UnsignedProperties><xades:UnsignedSignatureProperties><xades:CertificateValues>",
-        );
+    // Everything under `xades:UnsignedProperties` lives outside the signed
+    // properties, so adding any of it never changes a digest.
+    let mut unsigned = String::new();
+    if !spec.certificate_values.is_empty() {
+        unsigned.push_str("<xades:CertificateValues>");
         for certificate in &spec.certificate_values {
-            values.push_str(&format!(
+            unsigned.push_str(&format!(
                 "<xades:EncapsulatedX509Certificate>{}</xades:EncapsulatedX509Certificate>",
                 BASE64.encode(certificate)
             ));
         }
-        values.push_str("</xades:CertificateValues></xades:UnsignedSignatureProperties></xades:UnsignedProperties>");
-        values
+        unsigned.push_str("</xades:CertificateValues>");
+    }
+    if let Some(timestamp) = &spec.timestamp {
+        unsigned.push_str("<xades:SignatureTimeStamp>");
+        if let Some(c14n) = &timestamp.c14n {
+            unsigned.push_str(&format!(
+                "<ds:CanonicalizationMethod Algorithm=\"{c14n}\"/>"
+            ));
+        }
+        if timestamp.include_element {
+            unsigned.push_str(&format!("<xades:Include URI=\"#{}\"/>", spec.id));
+        }
+        if timestamp.undecodable_token {
+            unsigned.push_str(
+                "<xades:EncapsulatedTimeStamp>not base64!!</xades:EncapsulatedTimeStamp>",
+            );
+        } else {
+            unsigned.push_str(&format!(
+                "<xades:EncapsulatedTimeStamp>@@TIMESTAMP-{tag}@@</xades:EncapsulatedTimeStamp>"
+            ));
+            if timestamp.duplicate_token {
+                unsigned.push_str(&format!(
+                    "<xades:EncapsulatedTimeStamp>@@TIMESTAMP-{tag}@@</xades:EncapsulatedTimeStamp>"
+                ));
+            }
+        }
+        unsigned.push_str("</xades:SignatureTimeStamp>");
+    }
+    if spec.archive_timestamp {
+        unsigned.push_str(
+            "<xades:ArchiveTimeStamp><xades:EncapsulatedTimeStamp>AA==</xades:EncapsulatedTimeStamp></xades:ArchiveTimeStamp>",
+        );
+    }
+    if let Some(name) = &spec.extra_unsigned_property {
+        unsigned.push_str(&format!("<xades:{name}/>"));
+    }
+    let unsigned = if unsigned.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "<xades:UnsignedProperties><xades:UnsignedSignatureProperties>{unsigned}</xades:UnsignedSignatureProperties></xades:UnsignedProperties>"
+        )
     };
+
+    let mut signed_properties =
+        String::from("<xades:SigningTime>2020-01-01T00:00:00Z</xades:SigningTime>");
+    if let Some(certificate) = &spec.signing_certificate {
+        signed_properties.push_str(&render_signing_certificate(certificate));
+    }
+    if spec.signature_policy_implied {
+        signed_properties.push_str(
+            "<xades:SignaturePolicyIdentifier><xades:SignaturePolicyImplied/></xades:SignaturePolicyIdentifier>",
+        );
+    }
+
     let xades_object = if spec.include_xades {
         format!(
             "<ds:Object><xades:QualifyingProperties xmlns:xades=\"{}\" Target=\"#{}\">\
 <xades:SignedProperties Id=\"sp-{tag}\"><xades:SignedSignatureProperties>\
-<xades:SigningTime>2020-01-01T00:00:00Z</xades:SigningTime>\
-</xades:SignedSignatureProperties></xades:SignedProperties>{}\
+{signed_properties}\
+</xades:SignedSignatureProperties></xades:SignedProperties>{unsigned}\
 </xades:QualifyingProperties></ds:Object>",
-            spec.xades_namespace, spec.id, certificate_values
+            spec.xades_namespace, spec.id
         )
     } else {
         String::new()

@@ -169,6 +169,7 @@ pub struct VerifyLimits {
     pub max_references_per_signature: usize,
     pub max_transforms_per_reference: usize,
     pub max_certificates: usize,
+    pub max_timestamps_per_signature: usize,
     pub max_chain_length: usize,
     pub max_paths: usize,
 }
@@ -180,6 +181,7 @@ impl Default for VerifyLimits {
             max_references_per_signature: 32,
             max_transforms_per_reference: 8,
             max_certificates: 64,
+            max_timestamps_per_signature: 8,
             max_chain_length: 8,
             max_paths: 32,
         }

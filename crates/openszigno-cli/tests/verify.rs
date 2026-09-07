@@ -1,5 +1,5 @@
 //! CLI-level tests for `openszigno verify`: the envelope, the exit statuses,
-//! and the rule that phase 1 never reports a signature as valid.
+//! and the rule that no release so far reports a signature as valid.
 //!
 //! Cryptographically correct signatures are covered by the verify crate's own
 //! suite, which owns the in-tests signer. What matters here is the process
@@ -202,7 +202,40 @@ fn a_signature_that_does_not_verify_exits_six() {
         .collect();
     assert!(codes.contains(&"reference_digest_mismatch"));
     assert!(codes.contains(&"revocation_not_checked"));
-    assert!(codes.contains(&"timestamp_not_checked"));
+    // The signature carries no timestamp, which is reported rather than
+    // assumed away.
+    assert!(codes.contains(&"signature_timestamp_absent"));
+}
+
+/// The signature object carries the phase-2 fields, so a consumer can read the
+/// XAdES view, the timestamps, and the validation time without re-deriving
+/// them from the check list.
+#[test]
+fn the_signature_object_carries_the_phase_two_fields() {
+    let directory = scratch();
+    let path = directory.path().join("unverifiable.es3");
+    std::fs::write(&path, unverifiable_dossier()).expect("the fixture is written");
+    let output = run(&[
+        "verify",
+        path.to_str().unwrap(),
+        "--json",
+        "--at",
+        "2020-06-01T00:00:00Z",
+    ]);
+    let response = parse_json(&output);
+    let signature = &response["data"]["signatures"][0];
+    assert_eq!(signature["validation_time"], "2020-06-01T00:00:00Z");
+    assert_eq!(signature["validation_time_source"], "at_flag");
+    assert_eq!(signature["timestamps"], Value::Array(Vec::new()));
+    // This fixture carries no XAdES at all, which the report states rather
+    // than omitting.
+    assert_eq!(signature["xades"]["present"], false);
+    assert_eq!(signature["xades"]["signing_certificate"], Value::Null);
+    assert_eq!(signature["xades"]["signature_timestamps"], 0);
+    assert_eq!(
+        signature["xades"]["unvalidated_properties"],
+        Value::Array(Vec::new())
+    );
 }
 
 /// Human output must never contain the word "valid" as a verdict, and must say
@@ -215,7 +248,8 @@ fn human_output_never_claims_validity() {
     let output = run(&["verify", path.to_str().unwrap()]);
     let text = String::from_utf8(output.stdout).expect("UTF-8");
     assert!(text.contains("Verification verdict: invalid"));
-    assert!(text.contains("Revocation and timestamps are not checked"));
+    assert!(text.contains("Revocation is not checked"));
+    assert!(text.contains("validation time:"));
     assert!(!text.contains("verdict: valid"));
 }
 

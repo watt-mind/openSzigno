@@ -38,6 +38,9 @@ const OID_ECDSA_SHA384: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840
 
 const OID_EXT_KEY_USAGE: ObjectIdentifier = ObjectIdentifier::new_unwrap("2.5.29.37");
 const OID_ANY_EXTENDED_KEY_USAGE: ObjectIdentifier = ObjectIdentifier::new_unwrap("2.5.29.37.0");
+/// `id-kp-timeStamping`, RFC 3161 section 2.3.
+pub const OID_KP_TIME_STAMPING: ObjectIdentifier =
+    ObjectIdentifier::new_unwrap("1.3.6.1.5.5.7.3.8");
 
 /// Critical extensions whose semantics this validator actually implements.
 ///
@@ -100,6 +103,22 @@ pub enum CertificateSource {
     CertificateValues,
     /// A file in the `--trust-store` directory.
     TrustStore,
+    /// The `certificates` set of an RFC 3161 timestamp token.
+    TimestampToken,
+}
+
+/// What a built path is being validated *for*.
+///
+/// The purpose decides which critical `extendedKeyUsage` a certificate in the
+/// path may carry. It never relaxes anything else: every other rule in
+/// [`check_path`] applies identically.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PathPurpose {
+    /// A signing certificate for a `ds:Signature`.
+    Signing,
+    /// A timestamp authority certificate, which RFC 3161 requires to carry a
+    /// critical `extendedKeyUsage` of exactly `id-kp-timeStamping`.
+    TimeStamping,
 }
 
 /// One link of a reported chain.
@@ -219,7 +238,7 @@ impl ParsedCertificate {
             .map_err(|_| ())
     }
 
-    fn is_critical(&self, oid: ObjectIdentifier) -> bool {
+    pub(crate) fn is_critical(&self, oid: ObjectIdentifier) -> bool {
         self.certificate
             .tbs_certificate
             .extensions
@@ -244,7 +263,7 @@ impl ParsedCertificate {
     }
 
     /// The extended key usages, if the extension is present.
-    fn extended_key_usages(&self) -> Result<Option<Vec<ObjectIdentifier>>, ()> {
+    pub(crate) fn extended_key_usages(&self) -> Result<Option<Vec<ObjectIdentifier>>, ()> {
         let Some(extensions) = self.certificate.tbs_certificate.extensions.as_ref() else {
             return Ok(None);
         };
@@ -324,6 +343,7 @@ pub fn validate_path(
     anchors: &[ParsedCertificate],
     time: UnixTime,
     limits: &VerifyLimits,
+    purpose: PathPurpose,
 ) -> PathOutcome {
     let leaf_only = vec![leaf.chain_entry(false)];
     if anchors.is_empty() {
@@ -394,7 +414,7 @@ pub fn validate_path(
                 certificate.chain_entry(position + 1 == certificates.len())
             })
             .collect();
-        match check_path(&certificates, time) {
+        match check_path(&certificates, time, purpose) {
             Ok(()) => {
                 return PathOutcome {
                     code: CheckCode::CertPathOk,
@@ -502,7 +522,11 @@ fn dangling_issuer(
 ///
 /// `path[0]` is the end-entity certificate and the last element is the trust
 /// anchor. Every rule is explicit and every unimplemented case fails closed.
-fn check_path(path: &[&ParsedCertificate], time: UnixTime) -> Result<(), (CheckCode, String)> {
+fn check_path(
+    path: &[&ParsedCertificate],
+    time: UnixTime,
+    purpose: PathPurpose,
+) -> Result<(), (CheckCode, String)> {
     let malformed = || {
         (
             CheckCode::CertMalformed,
@@ -541,7 +565,14 @@ fn check_path(path: &[&ParsedCertificate], time: UnixTime) -> Result<(), (CheckC
                 .extended_key_usages()
                 .map_err(|()| malformed())?
                 .unwrap_or_default();
-            if !usages.contains(&OID_ANY_EXTENDED_KEY_USAGE) {
+            // A timestamp authority certificate is *required* by RFC 3161 to
+            // carry a critical `id-kp-timeStamping`, so that one purpose is
+            // admitted when the path is being validated for a TSA. The
+            // stricter "and nothing else" rule is checked separately, on the
+            // token's own certificate, so a CA above it is not caught by it.
+            let permitted = usages.contains(&OID_ANY_EXTENDED_KEY_USAGE)
+                || (purpose == PathPurpose::TimeStamping && usages.contains(&OID_KP_TIME_STAMPING));
+            if !permitted {
                 return Err((
                     CheckCode::CertKeyUsageInvalid,
                     "a certificate in the path has a critical extendedKeyUsage that does not permit signing".to_owned(),
