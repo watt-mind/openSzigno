@@ -60,27 +60,89 @@ Residuals deliberately left out of M1:
   Every level is decoded in memory before anything is written, so peak memory
   grows with the size of the whole tree, not of the largest single dossier.
 
-### M2: `verify` for XMLDSig/XAdES signatures
+### M2: `verify` for XMLDSig/XAdES signatures — phase 1 done
 
-Add a `verify` command that validates signature material. Scope:
+The design is [verify-design.md](verify-design.md), which splits M2 into three
+phases. **Phase 1 has shipped**; phases 2 and 3 remain.
 
-- strict same-document ID resolution and duplicate-ID rejection, reusing the
-  existing ID space rules;
-- reference-scope enforcement against the e-dossier placement rules in the
-  primary specification, plus canonicalization;
-- a pinned algorithm policy, with weak digests and signature algorithms
-  rejected rather than warned about;
-- configurable trust store, and an explicit online/offline certificate
-  revocation policy with the chosen policy reported in the result;
-- certificate-path validation to a configured trust anchor;
-- distinct stable codes and a distinct exit-status category for a
-  cryptographic failure, so a caller can tell it apart from a structural one.
+#### Phase 1 (shipped): the XMLDSig core and certificate paths
 
-Until this ships, `signatures_present` is a count and nothing more.
+- new `openszigno-verify` crate: pure Rust, `forbid(unsafe_code)`, no network,
+  and no I/O except through the injected `Clock`, `TrustSource`, and
+  `RevocationSource` traits;
+- Canonical XML 1.0 and Exclusive C14N 1.0 (each with and without comments)
+  implemented in-tree behind a `C14nBackend` trait, over the same `roxmltree`
+  tree the structural parser built. Canonical XML 1.1 and everything else is
+  refused with `c14n_unsupported` rather than approximated;
+- strict same-document reference resolution through the existing ID space, so
+  duplicate IDs remain a parse error and no reference can reach the network or
+  the filesystem;
+- a pinned algorithm policy: SHA-256/384/512, RSA PKCS#1 v1.5 and PSS at 2048
+  bits or more, ECDSA P-256/P-384 with a matching digest. SHA-1, MD5, DSA,
+  HMAC, and short RSA keys are rejected rather than warned about;
+- an allowlist of transforms; XSLT, XPath, and XPath Filter 2.0 refused
+  unconditionally;
+- reference-scope enforcement against the e-dossier placement rules, which is
+  the container-aware defence against signature wrapping;
+- reference digests, `ds:SignedInfo` canonicalization, and `ds:SignatureValue`
+  verification;
+- hand-written RFC 5280 path validation on `x509-cert`: link signatures,
+  validity at the validation time, `basicConstraints`, `pathLenConstraint`,
+  `keyUsage`, name constraints, and rejection of unrecognised critical
+  extensions, bounded by chain length and candidate count;
+- `--trust-store DIR` with a documented `anchors/` and `intermediates/`
+  layout, `--at <RFC3339>`, the `verify` JSON shape, and exit statuses 6 and 7.
+
+Deliberately left to later phases, and the reason the verdict can never be
+`valid`: revocation is reported as `revocation_not_checked` and timestamps as
+`timestamp_not_checked`, both blocking `skipped` checks.
+
+#### Phase 2 (remaining): XAdES qualifying properties and timestamps
+
+Stage C in full — `SigningCertificate`/`SigningCertificateV2` digest binding,
+so the signing certificate is determined by *signed* data rather than by
+whatever `ds:KeyInfo` happens to hold; `SigningTime`; signature policy; level
+detection (B-B, B-T, B-LT, B-LTA) — plus RFC 3161 token parsing, imprint
+binding over the canonicalized `ds:SignatureValue`, TSA EKU and chain checks,
+and moving the effective validation time to `genTime`. `ArchiveTimeStamp`
+stays out of scope and is reported as `skipped`.
+
+#### Phase 3 (remaining): revocation and the EU trusted lists
+
+Stage E in full — CRL and OCSP verification, embedded `RevocationValues`,
+freshness rules, and `--online` fetching under a strict transport policy — plus
+importing a pinned LOTL and Hungarian trusted-list snapshot into the trust
+store so that `certificate_qualified_status` can be determined and cited.
+
+#### Residual risks carried by phase 1
+
+- **The path validator is hand-written.** There is no general RFC 5280 path
+  validator in Rust that fits eIDAS certificates, so this is net-new
+  cryptographic logic. The implemented subset is narrow and documented, and
+  every rule has a negative test, but it is the largest correctness risk in
+  the project after canonicalization. A differential CI check against
+  `openssl verify` on generated chains is not yet in place.
+- **Canonicalization is also in-tree.** It matches the W3C examples and the
+  hand-computed cases in `crates/openszigno-verify/tests/c14n.rs`, but the
+  differential backend the design calls for (`xml_c14n` or `bergshamra` as a
+  CI oracle) has not been added, so there is no independent check.
+- **Distinguished names are compared by DER**, with no RFC 4518 string
+  preparation. That is conservative: it can only reject a chain a lenient
+  comparison would have accepted, never the other way round.
+- **`ds:KeyInfo` is trusted to name the signer** until phase 2 adds the signed
+  `SigningCertificate` binding. The reference-scope check is what limits the
+  damage: a signature that does not cover what the container mandates fails
+  regardless of which certificate it names.
+- **No real-dossier interoperability evidence.** Everything is tested against
+  synthetic material generated in `tests/`; whether real Microsec dossiers
+  verify is only knowable through the private opt-in smoke tests.
+
+Until phases 2 and 3 land, `verify` reports `invalid` or `indeterminate` and
+nothing else.
 
 ### M3: timestamp verification
 
-Validate `es:TimeStamp` material once M2 provides the trust and algorithm
+Validate `es:TimeStamp` material once M2 phase 2 provides the RFC 3161
 machinery. Scope: timestamp token parsing, imprint comparison against the
 signed data, timestamp authority certificate validation, and a reported
 verification time. `timestamps_present` remains presence-only until then.
@@ -127,6 +189,23 @@ identified.
 - Inputs with the `.es3` suffix that are not XML at all occur in practice
   (tiny Base64-like text fragments); the `invalid_xml` rejection is correct.
 
+### Verification evidence from the private corpus
+
+Aggregate results of `verify` phase 1 over the maintainers' private corpus
+(62 signed dossiers, one signature each, no individual dossier identified):
+
+- With the strict algorithm policy, 56 signatures pass reference digests,
+  `SignedInfo` canonicalization, and signature-value verification; with
+  `--allow-legacy-algorithms` all 62 digests and 60 signature values pass,
+  and the remaining 2 are 1024-bit RSA signers, refused by policy.
+- Intermediates and roots travel in XAdES `CertificateValues`, not in
+  `KeyInfo`; with the two current Microsec roots as anchors, 53 chains build
+  to three or four certificates and 13 validate fully at the current time.
+  40 fail only on expiry, which is expected for historical dossiers until
+  phase 2 binds the validation time to a trusted timestamp. 9 chain to CAs
+  outside the two-root store (NetLock, KGYHSZ, and the pre-2009 Microsec
+  root), which the trusted-list work in phase 3 will cover.
+
 ## Engineering items
 
 These are not format milestones; they can land in any order.
@@ -158,9 +237,12 @@ These are not format milestones; they can land in any order.
   unsupported transform chains are rejected or skipped. A rejection is not
   evidence that a dossier is malformed; it may simply be out of the currently
   supported profile.
-- **No cryptographic assurance at all.** A dossier that parses cleanly may be
-  entirely forged. This is the single most important thing for a downstream
-  caller to internalise.
+- **No positive cryptographic assurance.** `verify` can now say that a
+  signature is `invalid`, which is a real finding, but it cannot say that one
+  is valid: revocation, timestamps, and the XAdES signing-certificate binding
+  are not checked. A dossier that parses cleanly, or that reaches
+  `indeterminate`, may still be forged. This is the single most important
+  thing for a downstream caller to internalise.
 
 ## Private-corpus policy for maintainers
 

@@ -1,4 +1,5 @@
 mod output_dir;
+mod trust_store;
 
 use std::collections::HashSet;
 use std::fs;
@@ -14,6 +15,10 @@ use openszigno_core::{
 use serde::Serialize;
 use serde_json::{Value, json};
 use unicode_normalization::UnicodeNormalization;
+
+use openszigno_verify::{
+    NoRevocation, RoxmltreeC14n, Verdict, VerifyOptions, parse_rfc3339, verify as verify_dossier,
+};
 
 use crate::output_dir::{OpenError, OutputDir};
 
@@ -45,6 +50,59 @@ enum Command {
     Extract(ExtractArgs),
     /// Apply strict structural checks (not cryptographic verification).
     ValidateStructure(InputArgs),
+    /// Verify XMLDSig signatures. Cannot report a signature as valid yet.
+    Verify(VerifyArgs),
+}
+
+/// A validation time from `--at`, kept in both the shape the report needs and
+/// the shape the clock needs.
+#[derive(Clone, Debug)]
+struct ValidationTime {
+    text: String,
+    unix: i64,
+}
+
+/// Parse `--at` during command-line parsing, so an unusable value is a usage
+/// error (exit 2) rather than a half-run verification.
+fn parse_validation_time(value: &str) -> Result<ValidationTime, String> {
+    parse_rfc3339(value)
+        .map(|unix| ValidationTime {
+            text: value.to_owned(),
+            unix,
+        })
+        .ok_or_else(|| "expected an RFC 3339 timestamp".to_owned())
+}
+
+#[derive(Clone, Debug, Args)]
+struct VerifyArgs {
+    /// Input .es3 dossier.
+    file: PathBuf,
+    /// Emit one stable JSON object on stdout.
+    #[arg(long)]
+    json: bool,
+    /// Also accept a dossier whose root Dossier element is in this namespace,
+    /// in addition to the known-compatible ones. Repeatable.
+    #[arg(long = "allow-namespace", value_name = "URI")]
+    allow_namespace: Vec<String>,
+    /// Directory holding trust anchors (`anchors/`) and optional extra CA
+    /// certificates (`intermediates/`), as PEM or DER. Without it every chain
+    /// check is `unknown`.
+    #[arg(long = "trust-store", value_name = "DIR")]
+    trust_store: Option<PathBuf>,
+    /// Validation time as an RFC 3339 timestamp. Defaults to now.
+    #[arg(long, value_name = "TIME", value_parser = parse_validation_time)]
+    at: Option<ValidationTime>,
+    /// Admit SHA-1 digests and RSA-SHA1 signature methods for diagnosis only.
+    /// The verdict is capped at `indeterminate` and no failed check can become
+    /// a passed one. MD5, HMAC, DSA, and RSA keys below 2048 bits stay refused.
+    #[arg(long = "allow-legacy-algorithms")]
+    allow_legacy_algorithms: bool,
+}
+
+impl VerifyArgs {
+    fn parse_options(&self) -> ParseOptions {
+        parse_options(&self.allow_namespace)
+    }
 }
 
 #[derive(Clone, Debug, Args)]
@@ -224,6 +282,10 @@ fn main() -> ExitCode {
             let result = validate_structure(&args.file, &args.parse_options());
             ("validate-structure", args.json, result)
         }
+        Command::Verify(args) => {
+            let result = verify_command(&args);
+            ("verify", args.json, result)
+        }
     };
 
     match result {
@@ -243,7 +305,7 @@ fn main() -> ExitCode {
                 write_human_success(command, &response)
             };
             match written {
-                Ok(()) => ExitCode::SUCCESS,
+                Ok(()) => ExitCode::from(success.exit),
                 Err(_) => ExitCode::from(3),
             }
         }
@@ -319,6 +381,9 @@ struct Success {
     input: InputInfo,
     data: Value,
     warnings: Vec<Notice>,
+    /// The process exit status for a completed run. `0` for every command
+    /// except `verify`, which reports its verdict through statuses 6 and 7.
+    exit: u8,
 }
 
 struct Failure {
@@ -345,6 +410,7 @@ fn inspect(path: &Path, options: &ParseOptions) -> CliResult {
             }
         }),
         warnings,
+        exit: 0,
     })
 }
 
@@ -358,6 +424,7 @@ fn list(path: &Path, options: &ParseOptions) -> CliResult {
             "documents": dossier.documents,
         }),
         warnings,
+        exit: 0,
     })
 }
 
@@ -373,6 +440,79 @@ fn validate_structure(path: &Path, options: &ParseOptions) -> CliResult {
             "cryptographic_verification_performed": false
         }),
         warnings,
+        exit: 0,
+    })
+}
+
+/// Verify the XMLDSig signatures of a dossier.
+///
+/// A structural failure still exits 4, so a caller can tell "this is not a
+/// dossier" apart from "this dossier's signatures do not verify". A completed
+/// run exits 6 when any signature is `invalid` and 7 when the overall verdict
+/// is `indeterminate`; phase 1 cannot reach exit 0 for a dossier that holds
+/// signatures, because revocation and timestamps are not checked.
+fn verify_command(args: &VerifyArgs) -> CliResult {
+    let options = args.parse_options();
+    let (bytes, dossier) = load(&args.file, &options)?;
+    let input = valid_input(bytes.len());
+
+    let store;
+    let empty = openszigno_verify::NoTrust;
+    let trust: &dyn openszigno_verify::TrustSource = match &args.trust_store {
+        Some(directory) => {
+            store = trust_store::load(directory).map_err(|message| {
+                failure(
+                    input.clone(),
+                    CliError {
+                        code: "trust_store_invalid",
+                        message,
+                        exit: 3,
+                    },
+                )
+            })?;
+            &store
+        }
+        None => &empty,
+    };
+
+    let system = openszigno_verify::SystemClock;
+    let fixed;
+    let clock: &dyn openszigno_verify::Clock = match &args.at {
+        Some(time) => {
+            fixed = openszigno_verify::FixedClock(time.unix);
+            &fixed
+        }
+        None => &system,
+    };
+
+    let revocation = NoRevocation;
+    let backend = RoxmltreeC14n;
+    let mut verify_options = VerifyOptions::new(clock, trust, &revocation, &backend);
+    verify_options.parse = options;
+    verify_options.requested_time = args.at.as_ref().map(|time| time.text.clone());
+    verify_options.allow_legacy_algorithms = args.allow_legacy_algorithms;
+
+    let report = verify_dossier(&bytes, &verify_options)
+        .map_err(|error| failure(input.clone(), CliError::structure(error)))?;
+    let exit = match report.verdict {
+        Verdict::Invalid => 6,
+        Verdict::Indeterminate => 7,
+        Verdict::Valid => 0,
+    };
+    let data = serde_json::to_value(&report).map_err(|_| {
+        failure(
+            input.clone(),
+            CliError::io("the result could not be serialised"),
+        )
+    })?;
+
+    Ok(Success {
+        input,
+        data,
+        // `cryptographic_verification_not_performed` is deliberately absent:
+        // verification *was* attempted here, and the verdict says how it went.
+        warnings: structural_warnings(&dossier),
+        exit,
     })
 }
 
@@ -494,6 +634,7 @@ fn extract(
             "nested_dossiers_extracted": plan.nested_dossiers
         }),
         warnings: plan.warnings,
+        exit: 0,
     })
 }
 
@@ -1212,6 +1353,58 @@ fn write_human_success(command: &str, response: &Response) -> io::Result<()> {
                 )?;
             }
             writeln!(out, "Extraction is not proof of signature validity.")?;
+        }
+        "verify" => {
+            let data = &response.data;
+            writeln!(
+                out,
+                "Verification verdict: {}",
+                display_json_string(&data["verdict"])
+            )?;
+            writeln!(
+                out,
+                "Validation time: {}",
+                display_json_string(&data["verification_time"]["effective"])
+            )?;
+            writeln!(out, "Signatures: {}", data["counts"]["signatures"])?;
+            if data["policy"]["legacy_algorithms_allowed"] == Value::Bool(true) {
+                writeln!(
+                    out,
+                    "Legacy algorithms were admitted for diagnosis; their strength is not vouched for."
+                )?;
+            }
+            for check in data["checks"].as_array().into_iter().flatten() {
+                writeln!(
+                    out,
+                    "  {}: {}",
+                    display_json_string(&check["code"]),
+                    display_json_string(&check["status"])
+                )?;
+            }
+            for signature in data["signatures"].as_array().into_iter().flatten() {
+                writeln!(
+                    out,
+                    "[{}] {} signature: {}",
+                    signature["index"],
+                    display_json_string(&signature["scope"]),
+                    display_json_string(&signature["verdict"])
+                )?;
+                for check in signature["checks"].as_array().into_iter().flatten() {
+                    writeln!(
+                        out,
+                        "  {}: {}",
+                        display_json_string(&check["code"]),
+                        display_json_string(&check["status"])
+                    )?;
+                }
+            }
+            // The boundary, restated on every run: this phase checks neither
+            // revocation nor timestamps, so it can never conclude more than
+            // "nothing failed".
+            writeln!(
+                out,
+                "Revocation and timestamps are not checked in this release, so no signature can be reported as valid."
+            )?;
         }
         "validate-structure" => {
             writeln!(

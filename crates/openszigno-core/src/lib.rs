@@ -9,6 +9,7 @@ mod model;
 mod parse;
 mod scan;
 mod sniff;
+mod xml;
 
 pub use decode::{DecodeOutcome, DecodedDocument, UnsupportedReason};
 pub use error::{Error, ErrorCode};
@@ -16,6 +17,11 @@ pub use model::{
     Document, Dossier, Limits, MimeType, ParseOptions, StructuralWarning, StructuralWarningCode,
 };
 pub use sniff::{DetectedType, sniff};
+pub use xml::{XmlSource, id_map};
+
+/// The XML parser this crate builds every tree with. Re-exported so that a
+/// verifier operates on exactly the same tree the structural parser saw.
+pub use roxmltree;
 
 pub const ESZIGNO_NAMESPACE: &str = "https://www.microsec.hu/ds/e-szigno30#";
 pub const XMLDSIG_NAMESPACE: &str = "http://www.w3.org/2000/09/xmldsig#";

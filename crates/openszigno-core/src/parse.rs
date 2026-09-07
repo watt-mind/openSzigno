@@ -1,8 +1,6 @@
-use std::collections::HashSet;
+use roxmltree::Node;
 
-use encoding_rs::Encoding;
-use roxmltree::{Document as XmlDocument, Node, ParsingOptions};
-
+use crate::xml::{XmlSource, id_map};
 use crate::{
     Document, Dossier, Error, ErrorCode, Limits, MimeType, ParseOptions, StructuralWarning,
     StructuralWarningCode, XMLDSIG_NAMESPACE,
@@ -10,26 +8,9 @@ use crate::{
 
 pub(crate) fn parse(bytes: &[u8], options: &ParseOptions) -> Result<Dossier, Error> {
     let limits = &options.limits;
-    if bytes.len() as u64 > limits.max_input_bytes {
-        return Err(Error::new(
-            ErrorCode::InputTooLarge,
-            format!("input exceeds {} bytes", limits.max_input_bytes),
-        ));
-    }
-
-    let (xml, encoding) = decode_xml(bytes)?;
-    // Reject DTDs, deep nesting, and huge node counts before the recursive
-    // tree parser runs; see `scan.rs` for why this cannot be delegated.
-    crate::scan::prescan(&xml, limits)?;
-
-    let parsing = ParsingOptions {
-        allow_dtd: false,
-        // The pre-scan bounds elements; the parser also counts text and
-        // comment nodes, so its backstop limit is proportionally larger.
-        nodes_limit: u32::try_from(limits.max_xml_nodes.saturating_mul(4)).unwrap_or(u32::MAX),
-        ..ParsingOptions::default()
-    };
-    let tree = XmlDocument::parse_with_options(&xml, parsing).map_err(xml_error)?;
+    let source = XmlSource::decode(bytes, limits)?;
+    let encoding = source.encoding().to_owned();
+    let tree = source.parse_tree(limits)?;
     let root = tree.root_element();
     if root.tag_name().name() != "Dossier" {
         return Err(Error::new(
@@ -274,95 +255,6 @@ fn is_nested_dossier(mime: &MimeType) -> bool {
             .is_some_and(|extension| extension.eq_ignore_ascii_case("dosszie"))
 }
 
-fn decode_xml(bytes: &[u8]) -> Result<(String, String), Error> {
-    let bytes = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(bytes);
-    let label = declared_encoding(bytes).unwrap_or_else(|| "UTF-8".to_owned());
-    let normalized = label.to_ascii_lowercase().replace('_', "-");
-    if normalized == "utf-8" || normalized == "utf8" {
-        return String::from_utf8(bytes.to_vec())
-            .map(|text| (text, "UTF-8".to_owned()))
-            .map_err(|_| Error::new(ErrorCode::InvalidEncoding, "input is not valid UTF-8"));
-    }
-    if normalized != "iso-8859-2" && normalized != "iso8859-2" {
-        return Err(Error::new(
-            ErrorCode::UnsupportedEncoding,
-            "only UTF-8 and ISO-8859-2 XML encodings are supported",
-        ));
-    }
-    let encoding = Encoding::for_label(b"iso-8859-2").expect("encoding_rs has ISO-8859-2");
-    let (decoded, _, had_errors) = encoding.decode(bytes);
-    if had_errors {
-        return Err(Error::new(
-            ErrorCode::InvalidEncoding,
-            "input is not valid ISO-8859-2",
-        ));
-    }
-    Ok((decoded.into_owned(), "ISO-8859-2".to_owned()))
-}
-
-/// Read the `encoding` pseudo-attribute of the XML declaration only. The
-/// search is bounded to the declaration itself so that comments or content
-/// later in the prolog cannot choose how the document is decoded.
-fn declared_encoding(bytes: &[u8]) -> Option<String> {
-    let prefix = &bytes[..bytes.len().min(512)];
-    if !prefix.starts_with(b"<?xml") || !prefix.get(5..)?.first()?.is_ascii_whitespace() {
-        return None;
-    }
-    let end = prefix.windows(2).position(|window| window == b"?>")?;
-    let declaration = std::str::from_utf8(&prefix[5..end]).ok()?;
-    let mut rest = declaration;
-    while let Some(position) = rest.find("encoding") {
-        let preceded_by_space = rest[..position]
-            .chars()
-            .next_back()
-            .is_some_and(char::is_whitespace);
-        rest = &rest[position + "encoding".len()..];
-        if !preceded_by_space {
-            continue;
-        }
-        let after = rest.trim_start();
-        let Some(value) = after.strip_prefix('=') else {
-            continue;
-        };
-        let value = value.trim_start();
-        let quote = value.chars().next()?;
-        if quote != '\'' && quote != '"' {
-            return None;
-        }
-        let value = &value[quote.len_utf8()..];
-        let close = value.find(quote)?;
-        return Some(value[..close].to_owned());
-    }
-    None
-}
-
-/// Map a parser error to a stable code without echoing document content.
-/// `roxmltree` error messages include element, attribute, and entity names,
-/// which may be confidential; only the position is kept.
-fn xml_error(error: roxmltree::Error) -> Error {
-    match error {
-        roxmltree::Error::DtdDetected => Error::new(
-            ErrorCode::UnsafeXml,
-            "DTD and entity declarations are not allowed",
-        ),
-        roxmltree::Error::NodesLimitReached
-        | roxmltree::Error::AttributesLimitReached
-        | roxmltree::Error::NamespacesLimitReached => {
-            Error::new(ErrorCode::UnsafeXml, "XML exceeds the node limit")
-        }
-        other => {
-            let position = other.pos();
-            Error::new(
-                ErrorCode::InvalidXml,
-                format!(
-                    "XML parsing failed at line {} column {}",
-                    position.row, position.col
-                ),
-            )
-        }
-    }
-}
-
 /// Check the XML ID space and every `OBJREF`.
 ///
 /// A duplicate or empty ID stays a hard error, and so does an `OBJREF` on a
@@ -375,31 +267,14 @@ fn validate_ids_and_objrefs(
     namespace: &str,
     warnings: &mut Vec<StructuralWarning>,
 ) -> Result<(), Error> {
-    let mut ids = HashSet::new();
-    for node in root.descendants().filter(Node::is_element) {
-        // Only unprefixed attributes take part in the ID space, matching the
-        // lookups in `id_attribute` and `require_objref`.
-        for attribute in node
-            .attributes()
-            .filter(|attribute| attribute.namespace().is_none())
-        {
-            if matches!(attribute.name(), "Id" | "ID" | "id")
-                && (attribute.value().is_empty() || !ids.insert(attribute.value().to_owned()))
-            {
-                return Err(Error::new(
-                    ErrorCode::DuplicateId,
-                    "XML IDs must be non-empty and unique",
-                ));
-            }
-        }
-    }
+    let ids = id_map(root)?;
 
     for node in root.descendants().filter(Node::is_element) {
         for attribute in node
             .attributes()
             .filter(|attribute| attribute.namespace().is_none() && attribute.name() == "OBJREF")
         {
-            if ids.contains(normalize_reference(attribute.value())) {
+            if ids.contains_key(normalize_reference(attribute.value())) {
                 continue;
             }
             let local = node.tag_name().name();

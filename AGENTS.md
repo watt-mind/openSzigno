@@ -1,9 +1,11 @@
 # openSzigno
 
 openSzigno is an open-source, agent-first Rust CLI for inspecting, listing,
-structurally validating, and extracting Hungarian Microsec e-Szignó
-`.es3` e-dossiers. Two-crate workspace: `crates/openszigno-core` (bounded
-XML parsing, dossier model, Base64/ZIP decoding, limits) and
+structurally validating, extracting, and verifying the signatures of Hungarian
+Microsec e-Szignó `.es3` e-dossiers. Three-crate workspace:
+`crates/openszigno-core` (bounded XML parsing, dossier model, Base64/ZIP
+decoding, limits), `crates/openszigno-verify` (canonicalization, XMLDSig,
+certificate paths; no I/O except through injected traits), and
 `crates/openszigno-cli` (the `openszigno` binary, human + stable `--json`
 output, safe extraction). See `README.md`, `docs/architecture.md`,
 `docs/roadmap.md`, `CONTRIBUTING.md`, and `SECURITY.md`.
@@ -35,10 +37,15 @@ before anything else.
   patches, or chat: private paths/filenames, titles, metadata, payload contents
   or hashes, certificate subjects, signer data, or signature values. Report
   private-corpus results as aggregate counts and stable error-code buckets only.
-- **Verification boundary.** This tool performs structural validation and bounded
-  extraction only. It does **not** verify XMLDSig/XAdES signatures, timestamps,
-  certificate trust, or legal authenticity — never claim a signature or dossier
-  is valid (see `docs/architecture.md#verification-boundary`).
+- **Verification boundary.** `verify` (M2 phase 1) checks XMLDSig
+  canonicalization, reference digests, signature values, the e-dossier
+  reference-scope rules, and certificate paths against a user-supplied trust
+  store. It does **not** check revocation, timestamps, or XAdES qualifying
+  properties, so it can report `invalid` but **never `valid`** — the ceiling is
+  `indeterminate`. The other four commands verify nothing at all. Never claim a
+  signature, certificate, timestamp, or dossier is valid, and never let a code
+  change lift that ceiling without the phase-2 and phase-3 work behind it (see
+  `docs/architecture.md#verification-boundary`).
 - **Synthetic fixtures only.** Public fixtures under `tests/fixtures/` are
   unsigned, redistributable, and covered by `tests/fixtures/LICENSE`. Never
   derive public fixtures from private files.
@@ -74,7 +81,9 @@ ES3_TEST_CORPUS_DIR=/private/corpus cargo test \
 | Path | What lives there |
 | :--- | :--- |
 | `crates/openszigno-core/src/` | `parse.rs`, `decode.rs`, `model.rs`, `scan.rs`, `error.rs` |
-| `crates/openszigno-cli/src/` | `main.rs` (commands, JSON protocol), `output_dir.rs` (safe extraction) |
+| `crates/openszigno-verify/src/` | `c14n.rs`, `dsig.rs`, `certs.rs`, `policy.rs`, `codes.rs`, `trust.rs`, `report.rs` |
+| `crates/openszigno-verify/tests/` | Synthetic PKI and the in-tests XMLDSig signer (`common/`), which must never move into a shipped crate |
+| `crates/openszigno-cli/src/` | `main.rs` (commands, JSON protocol), `output_dir.rs` (safe extraction), `trust_store.rs` (`--trust-store` loader) |
 | `tests/fixtures/` | Synthetic `.es3` fixtures + `LICENSE` + `README.md` |
 | `docs/` | `architecture.md` (CLI contract), `research.md` (sources), `testing.md` (fixture policy), `roadmap.md` (milestones, risks) |
 | `samples/` | Private dossiers, ignored — see boundary above |
