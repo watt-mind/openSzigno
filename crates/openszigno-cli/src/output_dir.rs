@@ -231,6 +231,15 @@ mod imp {
     impl OutputDir {
         pub fn open(path: &Path) -> Result<Self, OpenError> {
             reject_link_components(path)?;
+            // Match the Unix walk, which reports an existing non-directory as
+            // unsafe rather than as a creation failure.
+            if let Ok(existing) = std::fs::symlink_metadata(path)
+                && !existing.file_type().is_dir()
+            {
+                return Err(OpenError::Unsafe(
+                    "output must be a real directory, not a symlink",
+                ));
+            }
             create_directory(path)?;
             reject_link_components(path)?;
 
