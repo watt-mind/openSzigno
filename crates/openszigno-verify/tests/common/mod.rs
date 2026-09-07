@@ -381,6 +381,9 @@ pub struct TimestampSpec {
     pub includes: Vec<String>,
     /// Emit an `xades:ReferenceInfo`, a form this build does not implement.
     pub reference_info: bool,
+    /// Wrap the token in an RFC 3161 `TimeStampResp` carrying this
+    /// `PKIStatus`, as XAdES 1.2.2-era producers did.
+    pub wrap_in_response: Option<i32>,
     /// Emit the token twice, which this build does not process.
     pub duplicate_token: bool,
     /// Emit a token that is not decodable Base64.
@@ -400,6 +403,7 @@ impl TimestampSpec {
             raw_token: None,
             includes: Vec::new(),
             reference_info: false,
+            wrap_in_response: None,
             duplicate_token: false,
             undecodable_token: false,
         }
@@ -764,12 +768,25 @@ pub fn build_timestamp_token(spec: &TimestampSpec, imprint_input: &[u8]) -> Vec<
             .expect("one SignerInfo"),
         ),
     };
-    ContentInfo {
+    let token = ContentInfo {
         content_type: oid("1.2.840.113549.1.7.2"),
         content: Any::encode_from(&signed_data).expect("the SignedData encodes"),
+    };
+    match spec.wrap_in_response {
+        None => token.to_der().expect("the token encodes"),
+        Some(status) => openszigno_verify::tsa::TimeStampResp {
+            status: openszigno_verify::tsa::PkiStatusInfo {
+                status,
+                status_string: None,
+                fail_info: None,
+            },
+            // A rejection carries no token at all, which is the shape a real
+            // TSA returns and the one a verifier must not read past.
+            time_stamp_token: (status <= 1).then_some(token),
+        }
+        .to_der()
+        .expect("the response encodes"),
     }
-    .to_der()
-    .expect("the token encodes")
 }
 
 fn render(spec: &DossierSpec) -> String {

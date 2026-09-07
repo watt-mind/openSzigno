@@ -103,6 +103,36 @@ pub struct TstInfo {
     pub extensions: Option<x509_cert::ext::Extensions>,
 }
 
+/// `PKIStatusInfo`, RFC 3161 section 2.4.2 (from RFC 2510).
+///
+/// `statusString` and `failInfo` are decoded but not interpreted: only the
+/// status itself decides whether the enclosed token may be looked at.
+#[derive(Clone, Debug, Eq, PartialEq, Sequence)]
+pub struct PkiStatusInfo {
+    pub status: i32,
+    #[asn1(optional = "true")]
+    pub status_string: Option<Any>,
+    #[asn1(optional = "true")]
+    pub fail_info: Option<der::asn1::BitString>,
+}
+
+/// `TimeStampResp`, RFC 3161 section 2.4.2: the whole response a TSA returns,
+/// of which the token is one field.
+///
+/// XAdES asks for the bare `TimeStampToken`, but producers of the 1.2.2 era
+/// embedded the entire response in `xades:EncapsulatedTimeStamp`, and those
+/// dossiers still have to verify.
+#[derive(Clone, Debug, Eq, PartialEq, Sequence)]
+pub struct TimeStampResp {
+    pub status: PkiStatusInfo,
+    #[asn1(optional = "true")]
+    pub time_stamp_token: Option<ContentInfo>,
+}
+
+/// `PKIStatus` values that mean a token was issued (RFC 3161 section 2.4.2).
+const PKI_STATUS_GRANTED: i32 = 0;
+const PKI_STATUS_GRANTED_WITH_MODS: i32 = 1;
+
 /// What kind of timestamp a token was found as.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -188,8 +218,9 @@ pub fn verify_token(input: &TokenInput<'_>) -> TokenOutcome {
             "the timestamp token is larger than this build will parse",
         );
     }
-    let Ok(content) = ContentInfo::from_der(&input.token) else {
-        return TokenOutcome::failed(input.kind, "the timestamp token is not a CMS ContentInfo");
+    let content = match content_info(&input.token) {
+        Ok(content) => content,
+        Err(message) => return TokenOutcome::failed(input.kind, message),
     };
     if content.content_type != OID_SIGNED_DATA {
         return TokenOutcome::failed(input.kind, "the timestamp token is not a CMS SignedData");
@@ -343,6 +374,7 @@ pub fn verify_token(input: &TokenInput<'_>) -> TokenOutcome {
             _ => (CheckCode::TimestampTsaPathUntrusted, CheckStatus::Failed),
         };
         checks.push(Check::new(code, status, path.message));
+        checks.extend(path.advisories);
 
         // --- Ordering against the claimed signing time ----------------------
         if let Some(claimed) = input.claimed_signing_time {
@@ -388,6 +420,58 @@ pub fn verify_token(input: &TokenInput<'_>) -> TokenOutcome {
         },
         gen_time: Some(gen_time),
     }
+}
+
+/// The `ContentInfo` inside an `xades:EncapsulatedTimeStamp`.
+///
+/// XAdES prescribes a bare RFC 3161 `TimeStampToken`, which is a CMS
+/// `ContentInfo`. Older producers embedded the whole `TimeStampResp` instead,
+/// so that shape is accepted too — but only after its `PKIStatus` says a token
+/// was actually issued: a response that reports a rejection carries no
+/// timestamp to believe, and reading its token field anyway would turn a
+/// refusal into a verification.
+fn content_info(der: &[u8]) -> Result<ContentInfo, String> {
+    if let Ok(content) = ContentInfo::from_der(der) {
+        return Ok(content);
+    }
+    let Ok(response) = TimeStampResp::from_der(der) else {
+        return Err(format!(
+            "the timestamp is neither a CMS ContentInfo nor an RFC 3161 TimeStampResp; its outermost DER tag is {}",
+            outer_tag(der)
+        ));
+    };
+    match response.status.status {
+        PKI_STATUS_GRANTED | PKI_STATUS_GRANTED_WITH_MODS => {}
+        status => {
+            return Err(format!(
+                "the RFC 3161 response reports PKIStatus {status}, which is neither granted nor grantedWithMods"
+            ));
+        }
+    }
+    response
+        .time_stamp_token
+        .ok_or_else(|| "the RFC 3161 response carries no timestamp token".to_owned())
+}
+
+/// The outermost DER tag, named where this build knows the name. The tag of
+/// attacker-supplied bytes is public information and is the one thing that
+/// makes "this did not parse" actionable.
+fn outer_tag(der: &[u8]) -> String {
+    let Some(byte) = der.first() else {
+        return "absent (the input is empty)".to_owned();
+    };
+    let name = match byte {
+        0x02 => " (INTEGER)",
+        0x03 => " (BIT STRING)",
+        0x04 => " (OCTET STRING)",
+        0x05 => " (NULL)",
+        0x06 => " (OBJECT IDENTIFIER)",
+        0x0c => " (UTF8String)",
+        0x30 => " (SEQUENCE)",
+        0x31 => " (SET)",
+        _ => "",
+    };
+    format!("0x{byte:02x}{name}")
 }
 
 /// The one check that summarises a token, so a signature's own check list says

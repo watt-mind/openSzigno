@@ -717,6 +717,18 @@ digest. The algorithm is the one the timestamp's own
 `ds:CanonicalizationMethod` names, defaulting to inclusive C14N 1.0 as XAdES
 prescribes.
 
+Two container shapes are accepted. XAdES prescribes a bare RFC 3161
+`TimeStampToken`, which is a CMS `ContentInfo`; producers of the XAdES 1.2.2
+era instead embedded the entire `TimeStampResp` — `SEQUENCE { status
+PKIStatusInfo, timeStampToken ContentInfo OPTIONAL }` — and those dossiers
+still have to verify. A `TimeStampResp` is unwrapped only when its `PKIStatus`
+is `granted` (0) or `grantedWithMods` (1); any other status, or a response with
+no token, is `timestamp_token_parsed` (`failed`) with the status named, because
+reading the token field of a rejection would turn a refusal into a
+verification. DER that is neither shape fails with its outermost tag named,
+which is public information and the one thing that makes the failure
+actionable.
+
 Data selection comes in two forms. The **implicit** form has no selection
 child at all and means the `ds:SignatureValue` element. The **explicit**
 `xades:Include` form (EN 319 132-1, XAdES 1.3.2 and 1.4.1) is accepted for
@@ -865,17 +877,35 @@ accepted; a present one must name a purpose that covers this use:
 | absent | yes | no — RFC 3161 requires the extension |
 | `anyExtendedKeyUsage` (2.5.29.37.0) | yes | no — RFC 3161 wants exactly `id-kp-timeStamping` |
 | `id-kp-documentSigning` (1.3.6.1.5.5.7.3.36, RFC 9336) | yes | no |
-| `id-kp-timeStamping` (1.3.6.1.5.5.7.3.8) | no | required, alone and critical |
-| `id-kp-emailProtection`, `serverAuth`, `clientAuth`, `codeSigning`, `OCSPSigning` | no | no |
+| `szOID_KP_DOCUMENT_SIGNING` (1.3.6.1.4.1.311.10.3.12) | yes | no |
+| `id-kp-timeStamping` (1.3.6.1.5.5.7.3.8) | see below | required, alone and critical |
+| `id-kp-emailProtection`, `serverAuth`, `clientAuth`, `codeSigning`, `OCSPSigning` | see below | no |
 
-`id-kp-emailProtection` is deliberately refused: signing a message to a mailbox
-is not signing a document, and a certificate issued for that purpose was not
-issued for this one. Anything not covered is `cert_key_usage_invalid`, critical
-or not. A **CA** certificate's `extendedKeyUsage` is enforced only when it is
-marked critical: RFC 5280 gives no path-processing rule for EKU in a CA
-certificate, real eIDAS hierarchies carry advisory sets there, and refusing
-them would reject chains that are correct — but a CA that marks the extension
-critical has asked to be taken at its word, and is.
+`szOID_KP_DOCUMENT_SIGNING` is Microsoft's "Document Signing" purpose from its
+private arc. It predates RFC 9336 by two decades and is what European
+qualified-signature CAs actually put in signing certificates, so it is accepted
+for the same purpose as the RFC's own OID.
+
+An `extendedKeyUsage` that names none of the accepted purposes does not
+automatically refuse the certificate. ETSI EN 319 412-2 makes `nonRepudiation`
+(`contentCommitment`) *the* key-usage signal for a signing certificate, and
+real qualified certificates pair it with an `extendedKeyUsage` that says
+`emailProtection` and nothing else. Calling those signatures invalid over a
+purpose field the issuer filled in loosely would be wrong, so:
+
+| `keyUsage` | `extendedKeyUsage` | Outcome |
+| --- | --- | --- |
+| `nonRepudiation` (with or without `digitalSignature`) | absent, or naming an accepted purpose | `cert_path_ok`, no caveat |
+| `nonRepudiation` | present, naming only unrelated purposes | `cert_key_usage_advisory` (`unknown`), naming the OIDs found; the path still passes and the verdict is capped at `indeterminate` |
+| `digitalSignature` only | present, naming only unrelated purposes | `cert_key_usage_invalid` (`failed`) — nothing signals a signing certificate |
+| neither `digitalSignature` nor `nonRepudiation` | anything | `cert_key_usage_invalid` (`failed`) — the key was not issued to sign |
+
+A **CA** certificate's `extendedKeyUsage` is enforced only when it is marked
+critical: RFC 5280 gives no path-processing rule for EKU in a CA certificate,
+real eIDAS hierarchies carry advisory sets there, and refusing them would
+reject chains that are correct — but a CA that marks the extension critical has
+asked to be taken at its word, and is. There is no advisory downgrade for a CA
+or for a TSA certificate.
 
 **Malformed is not absent.** An extension whose bytes do not decode as its OID
 says they should is `cert_malformed` (failed). Treating a decoding failure as
@@ -1165,7 +1195,8 @@ the tool could not determine the answer and is never a substitute for `failed`.
 | `cert_not_yet_valid` | `failed` | One was not yet valid then. |
 | `cert_signature_invalid` | `failed` | A link is not correctly signed by its issuer. |
 | `cert_algorithm_rejected` | `failed` | A certificate signature algorithm or key is outside the policy. |
-| `cert_key_usage_invalid` | `failed` | A CA does not permit `keyCertSign`, or the leaf permits neither `digitalSignature` nor `nonRepudiation`. |
+| `cert_key_usage_invalid` | `failed` | A CA does not permit `keyCertSign`; the leaf permits neither `digitalSignature` nor `nonRepudiation`; or the leaf's `extendedKeyUsage` names only unrelated purposes and it does not assert `nonRepudiation`. |
+| `cert_key_usage_advisory` | `unknown` | The signing certificate asserts `nonRepudiation` but its `extendedKeyUsage` names only unrelated purposes. The message names the OIDs found. Blocking: caps the verdict at `indeterminate`. |
 | `cert_basic_constraints_invalid` | `failed` | An issuing certificate is not marked as a CA. |
 | `cert_name_constraint_violation` | `failed` | A certificate violates a name constraint imposed by a CA above it. |
 | `cert_unsupported_critical_extension` | `failed` | A certificate carries a critical extension this validator does not understand. |

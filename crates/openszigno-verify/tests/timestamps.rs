@@ -641,3 +641,73 @@ fn without_the_intermediate_the_tsa_path_is_untrusted() {
     );
     assert_eq!(report.verdict, Verdict::Indeterminate);
 }
+
+/// XAdES asks for a bare `TimeStampToken`, but 1.2.2-era producers embedded the
+/// whole RFC 3161 `TimeStampResp`. Those dossiers still have to verify, for
+/// both statuses that mean a token was issued.
+#[test]
+fn a_timestampresp_wrapped_token_verifies() {
+    for status in [0, 1] {
+        let pki = good_pki();
+        let signature = signature_with_timestamp(&pki, |timestamp| {
+            timestamp.wrap_in_response = Some(status);
+        });
+        let xml = dossier(signature, &pki.signer_key);
+        let report = run_at(&xml, vec![pki.root_der.clone()], "2020-06-02T00:00:00Z");
+
+        assert_check(
+            &report,
+            CheckCode::TimestampTokenParsed,
+            CheckStatus::Passed,
+        );
+        assert_check(&report, CheckCode::TimestampVerified, CheckStatus::Passed);
+        assert!(report.signatures[0].timestamps[0].verified);
+    }
+}
+
+/// A response that reports a rejection carries nothing to believe. Reading its
+/// token field anyway would turn a refusal into a verification.
+#[test]
+fn a_rejected_timestamp_response_fails() {
+    // 2 = rejection, 3 = waiting, 4 = revocationWarning, 5 = revocationNotification.
+    for status in [2, 3, 4, 5] {
+        let pki = good_pki();
+        let signature = signature_with_timestamp(&pki, |timestamp| {
+            timestamp.wrap_in_response = Some(status);
+        });
+        let xml = dossier(signature, &pki.signer_key);
+        let report = run_at(&xml, vec![pki.root_der.clone()], "2020-06-02T00:00:00Z");
+
+        assert_check(
+            &report,
+            CheckCode::TimestampTokenParsed,
+            CheckStatus::Failed,
+        );
+        assert!(!report.signatures[0].timestamps[0].verified);
+        // A rejected response is missing proof, not a finding about the
+        // signature.
+        assert_eq!(report.verdict, Verdict::Indeterminate);
+    }
+}
+
+/// Bytes that are neither shape are refused with the outermost DER tag named,
+/// which is public information and the one thing that makes the failure
+/// actionable.
+#[test]
+fn an_unknown_der_shape_names_the_tag_it_saw() {
+    let pki = good_pki();
+    let signature = signature_with_timestamp(&pki, |timestamp| {
+        // A DER OCTET STRING, which is neither a ContentInfo nor a
+        // TimeStampResp.
+        timestamp.raw_token = Some(vec![0x04, 0x03, 0x01, 0x02, 0x03]);
+    });
+    let xml = dossier(signature, &pki.signer_key);
+    let report = run_at(&xml, vec![pki.root_der.clone()], "2020-06-02T00:00:00Z");
+
+    let message = report.signatures[0].timestamps[0].checks[0].message.clone();
+    assert!(
+        message.contains("0x04 (OCTET STRING)"),
+        "expected the tag to be named; got {message}"
+    );
+    assert_eq!(report.verdict, Verdict::Indeterminate);
+}

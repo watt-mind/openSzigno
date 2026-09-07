@@ -72,6 +72,25 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
 
 ### Changed (M2 phase 2)
 
+- Signing certificates are accepted when their `extendedKeyUsage` names
+  Microsoft's `szOID_KP_DOCUMENT_SIGNING` (`1.3.6.1.4.1.311.10.3.12`), the
+  private-arc purpose that predates RFC 9336 and that qualified-signature CAs
+  actually issue.
+- New `cert_key_usage_advisory` (`unknown`): when a signing certificate
+  asserts `nonRepudiation` — the ETSI EN 319 412-2 signal for a signing
+  certificate — but its `extendedKeyUsage` names only unrelated purposes, the
+  path passes with a caveat naming the OIDs found instead of failing.
+  `cert_key_usage_invalid` is kept for a `keyUsage` that permits neither
+  `digitalSignature` nor `nonRepudiation`, and for an unrelated
+  `extendedKeyUsage` without `nonRepudiation`. There is no advisory downgrade
+  for a CA or a TSA certificate.
+- An `xades:EncapsulatedTimeStamp` may carry a whole RFC 3161 `TimeStampResp`
+  rather than the bare `TimeStampToken`, as XAdES 1.2.2-era producers emitted.
+  The response is unwrapped only when its `PKIStatus` is `granted` or
+  `grantedWithMods`; any other status, or a response with no token, stays
+  `timestamp_token_parsed` (`failed`) with the status named. DER that is
+  neither shape now names the outermost tag it saw.
+
 - **A timestamp that does not verify no longer makes a signature `invalid`.**
   Following ETSI EN 319 102-1, a token that fails for any reason — malformed,
   wrong imprint, bad TSA signature, TSA certificate problem, untrusted or

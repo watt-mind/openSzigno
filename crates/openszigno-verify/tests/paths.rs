@@ -15,7 +15,7 @@ use openszigno_verify::{
     FixedClock, MemoryTrustStore, NoRevocation, NoTrust, RoxmltreeC14n, VerifyOptions,
     VerifyReport, parse_rfc3339, verify,
 };
-use rcgen::{BasicConstraints, IsCa, SanType};
+use rcgen::{BasicConstraints, IsCa, KeyUsagePurpose, SanType};
 use x509_cert::ext::pkix::name::GeneralName;
 
 fn run(xml: &str, anchors: Vec<Vec<u8>>, intermediates: Vec<Vec<u8>>) -> VerifyReport {
@@ -25,6 +25,21 @@ fn run(xml: &str, anchors: Vec<Vec<u8>>, intermediates: Vec<Vec<u8>>) -> VerifyR
     let clock = FixedClock(parse_rfc3339("2020-06-01T00:00:00Z").expect("parses"));
     let options = VerifyOptions::new(&clock, &trust, &revocation, &backend);
     verify(xml.as_bytes(), &options).expect("the dossier parses structurally")
+}
+
+/// Every check emitted anywhere in the report, as `code=status`.
+fn codes(report: &VerifyReport) -> Vec<String> {
+    report
+        .checks
+        .iter()
+        .chain(
+            report
+                .signatures
+                .iter()
+                .flat_map(|signature| signature.checks.iter()),
+        )
+        .map(|check| format!("{}={}", check.code.as_str(), check.status.as_str()))
+        .collect()
 }
 
 fn assert_check(report: &VerifyReport, code: CheckCode, status: CheckStatus) {
@@ -458,6 +473,21 @@ fn an_unimplemented_constraint_form_fails_closed() {
 // ---------------------------------------------------------------------------
 
 fn signer_with_extensions(extensions: Vec<rcgen::CustomExtension>) -> VerifyReport {
+    signer_with_usage_and_extensions(
+        vec![
+            KeyUsagePurpose::DigitalSignature,
+            KeyUsagePurpose::ContentCommitment,
+        ],
+        extensions,
+    )
+}
+
+/// Verify a dossier signed by a certificate with the given `keyUsage` bits and
+/// extra extensions. `ContentCommitment` is X.509's name for `nonRepudiation`.
+fn signer_with_usage_and_extensions(
+    key_usages: Vec<KeyUsagePurpose>,
+    extensions: Vec<rcgen::CustomExtension>,
+) -> VerifyReport {
     let root_key = rsa_key(keys::ROOT_RSA2048);
     let signer_key = rsa_key(keys::SIGNER_RSA2048);
     let root = self_signed(
@@ -465,6 +495,7 @@ fn signer_with_extensions(extensions: Vec<rcgen::CustomExtension>) -> VerifyRepo
         &root_key,
     );
     let mut spec = CertSpec::signer("Signer");
+    spec.key_usages = key_usages;
     spec.custom_extensions = extensions;
     let signer = issued_by(&spec, &signer_key, &root, &root_key);
     let dossier = DossierSpec {
@@ -477,12 +508,40 @@ fn signer_with_extensions(extensions: Vec<rcgen::CustomExtension>) -> VerifyRepo
 
 /// An `extendedKeyUsage` on the signing certificate restricts what the key may
 /// be used for whether or not it is marked critical (RFC 5280 section
-/// 4.2.1.12), so a set that does not cover document signing fails either way.
-/// `id-kp-documentSigning` (RFC 9336) and `anyExtendedKeyUsage` are what this
-/// tool accepts; `emailProtection`, `serverAuth`, `clientAuth`, `codeSigning`
-/// and `OCSPSigning` are unrelated purposes.
+/// 4.2.1.12). Accepted purposes are `anyExtendedKeyUsage`,
+/// `id-kp-documentSigning` (RFC 9336), and Microsoft's older
+/// `szOID_KP_DOCUMENT_SIGNING` (1.3.6.1.4.1.311.10.3.12), which is what
+/// qualified-signature CAs actually issue.
 #[test]
-fn an_extended_key_usage_must_permit_document_signing() {
+fn an_extended_key_usage_that_permits_document_signing_passes() {
+    for critical in [true, false] {
+        for oids in [
+            vec!["2.5.29.37.0"],
+            vec!["1.3.6.1.5.5.7.3.36"],
+            vec!["1.3.6.1.4.1.311.10.3.12"],
+            // A permitted purpose alongside an unrelated one is still
+            // permitted: what matters is that one of them covers this use.
+            vec!["1.3.6.1.4.1.311.10.3.12", "1.3.6.1.5.5.7.3.4"],
+            vec!["1.3.6.1.5.5.7.3.4", "1.3.6.1.5.5.7.3.36"],
+        ] {
+            let report =
+                signer_with_extensions(vec![extended_key_usage_extension(&oids, critical)]);
+            assert_check(&report, CheckCode::CertPathOk, CheckStatus::Passed);
+            assert!(
+                !codes(&report).contains(&"cert_key_usage_advisory=unknown".to_owned()),
+                "a permitted purpose needs no caveat: {oids:?}"
+            );
+        }
+    }
+}
+
+/// Real qualified certificates pair `nonRepudiation` with an `extendedKeyUsage`
+/// that says `emailProtection` and nothing else. ETSI EN 319 412-2 makes
+/// `nonRepudiation` the key-usage signal for a signing certificate, so calling
+/// those signatures invalid over a loosely filled purpose field would be wrong.
+/// They are accepted with a caveat that caps the verdict instead.
+#[test]
+fn an_unrelated_eku_with_nonrepudiation_is_advisory() {
     for critical in [true, false] {
         for oid in [
             "1.3.6.1.5.5.7.3.4", // emailProtection
@@ -490,36 +549,67 @@ fn an_extended_key_usage_must_permit_document_signing() {
             "1.3.6.1.5.5.7.3.2", // clientAuth
             "1.3.6.1.5.5.7.3.3", // codeSigning
             "1.3.6.1.5.5.7.3.9", // OCSPSigning
-            "1.3.6.1.5.5.7.3.8", // timeStamping, which is for a TSA only
+            "1.3.6.1.5.5.7.3.8", // timeStamping, which is for a TSA
         ] {
-            let report =
-                signer_with_extensions(vec![extended_key_usage_extension(&[oid], critical)]);
-            assert_check(&report, CheckCode::CertKeyUsageInvalid, CheckStatus::Failed);
+            let report = signer_with_usage_and_extensions(
+                vec![KeyUsagePurpose::ContentCommitment],
+                vec![extended_key_usage_extension(&[oid], critical)],
+            );
+            assert_check(&report, CheckCode::CertPathOk, CheckStatus::Passed);
+            assert_check(
+                &report,
+                CheckCode::CertKeyUsageAdvisory,
+                CheckStatus::Unknown,
+            );
+            // The caveat is blocking, so it can only lower a verdict.
+            assert_eq!(report.verdict, openszigno_verify::Verdict::Indeterminate);
         }
+    }
 
-        let any = signer_with_extensions(vec![extended_key_usage_extension(
-            &["2.5.29.37.0"],
-            critical,
-        )]);
-        assert_check(&any, CheckCode::CertPathOk, CheckStatus::Passed);
+    // The advisory names the purposes it found, which are public OIDs.
+    let report = signer_with_usage_and_extensions(
+        vec![KeyUsagePurpose::ContentCommitment],
+        vec![extended_key_usage_extension(&["1.3.6.1.5.5.7.3.4"], false)],
+    );
+    let message = report.signatures[0]
+        .checks
+        .iter()
+        .find(|check| check.code == CheckCode::CertKeyUsageAdvisory)
+        .map(|check| check.message.clone())
+        .expect("the advisory is emitted");
+    assert!(
+        message.contains("1.3.6.1.5.5.7.3.4"),
+        "the advisory must name what it found; got {message}"
+    );
+}
 
-        let document_signing = signer_with_extensions(vec![extended_key_usage_extension(
-            &["1.3.6.1.5.5.7.3.36"],
-            critical,
-        )]);
-        assert_check(
-            &document_signing,
-            CheckCode::CertPathOk,
-            CheckStatus::Passed,
+/// Without `nonRepudiation` there is no signal that this is a signing
+/// certificate at all, and an unrelated `extendedKeyUsage` is then a refusal.
+#[test]
+fn an_unrelated_eku_without_nonrepudiation_fails() {
+    for critical in [true, false] {
+        let report = signer_with_usage_and_extensions(
+            vec![KeyUsagePurpose::DigitalSignature],
+            vec![extended_key_usage_extension(
+                &["1.3.6.1.5.5.7.3.4"],
+                critical,
+            )],
         );
+        assert_check(&report, CheckCode::CertKeyUsageInvalid, CheckStatus::Failed);
+    }
+}
 
-        // A set that also names an unrelated purpose is still permitted: the
-        // one that covers this use is present.
-        let mixed = signer_with_extensions(vec![extended_key_usage_extension(
-            &["1.3.6.1.5.5.7.3.4", "1.3.6.1.5.5.7.3.36"],
-            critical,
-        )]);
-        assert_check(&mixed, CheckCode::CertPathOk, CheckStatus::Passed);
+/// A `keyUsage` that permits neither `digitalSignature` nor `nonRepudiation`
+/// fails whatever the `extendedKeyUsage` says: the key was not issued to sign.
+#[test]
+fn a_key_usage_that_permits_no_signing_fails() {
+    for extensions in [
+        Vec::new(),
+        vec![extended_key_usage_extension(&["1.3.6.1.5.5.7.3.36"], false)],
+    ] {
+        let report =
+            signer_with_usage_and_extensions(vec![KeyUsagePurpose::KeyEncipherment], extensions);
+        assert_check(&report, CheckCode::CertKeyUsageInvalid, CheckStatus::Failed);
     }
 }
 

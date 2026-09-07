@@ -137,6 +137,7 @@ check_codes! {
     CertSignatureInvalid => "cert_signature_invalid",
     CertAlgorithmRejected => "cert_algorithm_rejected",
     CertKeyUsageInvalid => "cert_key_usage_invalid",
+    CertKeyUsageAdvisory => "cert_key_usage_advisory",
     CertBasicConstraintsInvalid => "cert_basic_constraints_invalid",
     CertNameConstraintViolation => "cert_name_constraint_violation",
     CertUnsupportedCriticalExtension => "cert_unsupported_critical_extension",

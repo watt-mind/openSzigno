@@ -267,6 +267,7 @@ pub fn verify(bytes: &[u8], options: &VerifyOptions<'_>) -> Result<VerifyReport,
                 PathPurpose::Signing,
             );
             report.chain = path.chain;
+            report.checks.extend(path.advisories);
             let status = match path.code {
                 CheckCode::CertPathOk => CheckStatus::Passed,
                 // Giving up is not a finding: an exhausted search means the
