@@ -6,6 +6,11 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
+readme = "../../README.md"
+homepage = "https://github.com/watt-mind/openSzigno"
+documentation = "https://github.com/watt-mind/openSzigno#readme"
+keywords = ["e-szigno", "es3", "dossier", "cli", "microsec"]
+categories = ["command-line-utilities", "parser-implementations"]
 
 [[bin]]
 name = "openszigno"
@@ -23,3 +28,17 @@ rustix.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+
+# Archive layout produced by the release workflow, so that
+# `cargo binstall openszigno-cli` finds the prebuilt binaries:
+#   openszigno-v0.1.0-x86_64-unknown-linux-musl.tar.gz
+#     openszigno-v0.1.0-x86_64-unknown-linux-musl/openszigno
+# The binary name is spelled out in `pkg-url` because `{ bin }` is only
+# bound in `bin-dir` templates, not in the package URL context.
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/openszigno-v{ version }-{ target }{ archive-suffix }"
+bin-dir = "{ bin }-v{ version }-{ target }/{ bin }{ binary-ext }"
+pkg-fmt = "tgz"
+
+[package.metadata.binstall.overrides.x86_64-pc-windows-msvc]
+pkg-fmt = "zip"
