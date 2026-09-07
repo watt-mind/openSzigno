@@ -3,3 +3,9 @@ target/
 # Local real-world dossiers are private integration inputs, never fixtures.
 samples/*
 !samples/.gitkeep
+
+# Local extraction scratch area for private samples.
+tmp/
+
+# Local cache of downloaded specifications; see docs/references.md.
+refs/

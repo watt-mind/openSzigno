@@ -34,10 +34,18 @@ fn reject_link_components(path: &Path) -> Result<(), OpenError> {
     let mut current = std::path::PathBuf::new();
     for component in path.components() {
         current.push(component);
+        // A drive or UNC prefix and the root directory cannot be links and
+        // cannot always be inspected on their own (for example `\\?\C:`).
+        if matches!(
+            component,
+            std::path::Component::Prefix(_) | std::path::Component::RootDir
+        ) {
+            continue;
+        }
         match std::fs::symlink_metadata(&current) {
             Ok(metadata) if metadata.file_type().is_symlink() => {
                 return Err(OpenError::Unsafe(
-                    "output directory path must not contain symlinks",
+                    "output directory path must not contain symlinks; pass a resolved path",
                 ));
             }
             Ok(metadata) => reject_reparse_point(&metadata)?,
@@ -60,7 +68,7 @@ fn reject_reparse_point(metadata: &std::fs::Metadata) -> Result<(), OpenError> {
 
     if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
         return Err(OpenError::Unsafe(
-            "output directory path must not contain symlinks",
+            "output directory path must not contain symlinks; pass a resolved path",
         ));
     }
     Ok(())
@@ -188,9 +196,32 @@ mod imp {
             .map_err(to_io_error)
         }
 
+        /// Create one new subdirectory and return a descriptor for it.
+        ///
+        /// The directory is made and reopened relative to this descriptor, so
+        /// a nested extraction level cannot be redirected outside the tree.
+        pub fn create_subdirectory(&self, name: &str) -> Result<Self, OpenError> {
+            rustix::fs::mkdirat(&self.directory, name, Mode::RWXU)
+                .map_err(|_| OpenError::Io("could not create the output directory"))?;
+            // A directory that was made but cannot be opened is removed again,
+            // so a failure never leaves an unrecorded entry behind.
+            match open_component(&self.directory, OsStr::new(name)) {
+                Ok(directory) => Ok(Self { directory }),
+                Err(error) => {
+                    let _ = self.remove_directory(name);
+                    Err(error)
+                }
+            }
+        }
+
         /// Remove one file from the directory.
         pub fn remove_file(&self, name: &str) -> io::Result<()> {
             rustix::fs::unlinkat(&self.directory, name, AtFlags::empty()).map_err(to_io_error)
+        }
+
+        /// Remove one empty subdirectory of this directory.
+        pub fn remove_directory(&self, name: &str) -> io::Result<()> {
+            rustix::fs::unlinkat(&self.directory, name, AtFlags::REMOVEDIR).map_err(to_io_error)
         }
 
         /// Report whether an entry with this name already exists, without
@@ -223,6 +254,15 @@ mod imp {
     impl OutputDir {
         pub fn open(path: &Path) -> Result<Self, OpenError> {
             reject_link_components(path)?;
+            // Match the Unix walk, which reports an existing non-directory as
+            // unsafe rather than as a creation failure.
+            if let Ok(existing) = std::fs::symlink_metadata(path)
+                && !existing.file_type().is_dir()
+            {
+                return Err(OpenError::Unsafe(
+                    "output must be a real directory, not a symlink",
+                ));
+            }
             create_directory(path)?;
             reject_link_components(path)?;
 
@@ -254,8 +294,21 @@ mod imp {
                 .open(self.path.join(name))
         }
 
+        pub fn create_subdirectory(&self, name: &str) -> Result<Self, OpenError> {
+            self.revalidate()
+                .map_err(|_| OpenError::Unsafe("output must be a real directory, not a symlink"))?;
+            let path = self.path.join(name);
+            std::fs::create_dir(&path)
+                .map_err(|_| OpenError::Io("could not create the output directory"))?;
+            Self::open(&path)
+        }
+
         pub fn remove_file(&self, name: &str) -> io::Result<()> {
             std::fs::remove_file(self.path.join(name))
+        }
+
+        pub fn remove_directory(&self, name: &str) -> io::Result<()> {
+            std::fs::remove_dir(self.path.join(name))
         }
 
         pub fn exists(&self, name: &str) -> io::Result<bool> {

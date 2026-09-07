@@ -7,7 +7,10 @@ use std::path::{Component, Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{Args, Parser, Subcommand};
-use openszigno_core::{DecodeOutcome, Dossier, Error as CoreError, Limits, UnsupportedReason};
+use openszigno_core::{
+    DecodeOutcome, DetectedType, Dossier, Error as CoreError, KNOWN_COMPATIBLE_NAMESPACES, Limits,
+    ParseOptions, UnsupportedReason,
+};
 use serde::Serialize;
 use serde_json::{Value, json};
 use unicode_normalization::UnicodeNormalization;
@@ -15,6 +18,10 @@ use unicode_normalization::UnicodeNormalization;
 use crate::output_dir::{OpenError, OutputDir};
 
 const SCHEMA_VERSION: u32 = 1;
+
+/// Nesting levels `--max-depth` can never exceed, whatever the caller asks
+/// for. A flag must not be able to disable a bound.
+const MAX_NESTING_DEPTH: u32 = 8;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -47,6 +54,10 @@ struct InputArgs {
     /// Emit one stable JSON object on stdout.
     #[arg(long)]
     json: bool,
+    /// Also accept a dossier whose root Dossier element is in this namespace,
+    /// in addition to the known-compatible ones. Repeatable.
+    #[arg(long = "allow-namespace", value_name = "URI")]
+    allow_namespace: Vec<String>,
 }
 
 #[derive(Clone, Debug, Args)]
@@ -59,6 +70,48 @@ struct ExtractArgs {
     /// Emit one stable JSON object on stdout.
     #[arg(long)]
     json: bool,
+    /// Also accept a dossier whose root Dossier element is in this namespace,
+    /// in addition to the known-compatible ones. Repeatable.
+    #[arg(long = "allow-namespace", value_name = "URI")]
+    allow_namespace: Vec<String>,
+    /// Write embedded dossiers as raw payload files without expanding them.
+    #[arg(long)]
+    no_recursive: bool,
+    /// Nesting levels of embedded dossiers to expand; values above 8 are
+    /// clamped to 8.
+    #[arg(long, value_name = "N", default_value_t = 3)]
+    max_depth: u32,
+}
+
+impl InputArgs {
+    fn parse_options(&self) -> ParseOptions {
+        parse_options(&self.allow_namespace)
+    }
+}
+
+impl ExtractArgs {
+    fn parse_options(&self) -> ParseOptions {
+        parse_options(&self.allow_namespace)
+    }
+}
+
+/// The known-compatible namespaces plus whatever the caller allowed. The
+/// allow-list is additive: a flag can widen it but never narrow it away from
+/// the documented default.
+fn parse_options(allowed: &[String]) -> ParseOptions {
+    let mut namespaces: Vec<String> = KNOWN_COMPATIBLE_NAMESPACES
+        .iter()
+        .map(|namespace| (*namespace).to_owned())
+        .collect();
+    for namespace in allowed {
+        if !namespaces.iter().any(|known| known == namespace) {
+            namespaces.push(namespace.clone());
+        }
+    }
+    ParseOptions {
+        limits: Limits::default(),
+        allowed_namespaces: namespaces,
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -149,19 +202,26 @@ fn main() -> ExitCode {
     };
     let (command, json_mode, result) = match cli.command {
         Command::Inspect(args) => {
-            let result = inspect(&args.file);
+            let result = inspect(&args.file, &args.parse_options());
             ("inspect", args.json, result)
         }
         Command::List(args) => {
-            let result = list(&args.file);
+            let result = list(&args.file, &args.parse_options());
             ("list", args.json, result)
         }
         Command::Extract(args) => {
-            let result = extract(&args.file, &args.output);
+            let options = args.parse_options();
+            let result = extract(
+                &args.file,
+                &args.output,
+                &options,
+                !args.no_recursive,
+                args.max_depth.min(MAX_NESTING_DEPTH),
+            );
             ("extract", args.json, result)
         }
         Command::ValidateStructure(args) => {
-            let result = validate_structure(&args.file);
+            let result = validate_structure(&args.file, &args.parse_options());
             ("validate-structure", args.json, result)
         }
     };
@@ -268,15 +328,14 @@ struct Failure {
 
 type CliResult = Result<Success, Failure>;
 
-fn inspect(path: &Path) -> CliResult {
-    let limits = Limits::default();
-    let (bytes, dossier) = load(path, &limits)?;
-    let warnings = capability_warnings(&dossier);
+fn inspect(path: &Path, options: &ParseOptions) -> CliResult {
+    let (bytes, dossier) = load(path, options)?;
+    let warnings = dossier_warnings(&dossier);
     Ok(Success {
         input: valid_input(bytes.len()),
         data: json!({
             "dossier": dossier_overview(&dossier),
-            "limits": limits,
+            "limits": options.limits,
             "capabilities": {
                 "structural_validation": true,
                 "base64_extraction": true,
@@ -289,10 +348,9 @@ fn inspect(path: &Path) -> CliResult {
     })
 }
 
-fn list(path: &Path) -> CliResult {
-    let limits = Limits::default();
-    let (bytes, dossier) = load(path, &limits)?;
-    let warnings = capability_warnings(&dossier);
+fn list(path: &Path, options: &ParseOptions) -> CliResult {
+    let (bytes, dossier) = load(path, options)?;
+    let warnings = dossier_warnings(&dossier);
     Ok(Success {
         input: valid_input(bytes.len()),
         data: json!({
@@ -303,166 +361,480 @@ fn list(path: &Path) -> CliResult {
     })
 }
 
-fn validate_structure(path: &Path) -> CliResult {
-    let limits = Limits::default();
-    let (bytes, dossier) = load(path, &limits)?;
-    let warnings = capability_warnings(&dossier);
+fn validate_structure(path: &Path, options: &ParseOptions) -> CliResult {
+    let (bytes, dossier) = load(path, options)?;
+    let warnings = dossier_warnings(&dossier);
     Ok(Success {
         input: valid_input(bytes.len()),
         data: json!({
             "valid_structure": true,
             "documents": dossier.documents.len(),
+            "conformance_warnings": dossier.warnings.len(),
             "cryptographic_verification_performed": false
         }),
         warnings,
     })
 }
 
-fn extract(path: &Path, output: &Path) -> CliResult {
-    let limits = Limits::default();
-    let (bytes, dossier) = load(path, &limits)?;
-    let mut warnings = capability_warnings(&dossier);
-    let mut planned = Vec::new();
-    let mut names = HashSet::new();
-    let mut total = 0u64;
+/// What one planned output file will become.
+struct PlanFile {
+    document_index: usize,
+    dossier_path: String,
+    name: String,
+    path: String,
+    bytes: Vec<u8>,
+    detected_type: &'static str,
+    declared_type: String,
+}
 
-    for document in &dossier.documents {
-        match dossier
-            .decode_document(document.index, &limits)
-            .map_err(|error| failure(valid_input(bytes.len()), CliError::extraction(error)))?
-        {
-            DecodeOutcome::Decoded(decoded) => {
-                total = total
-                    .checked_add(decoded.bytes.len() as u64)
-                    .ok_or_else(|| {
-                        failure(
-                            valid_input(bytes.len()),
-                            CliError::unsafe_output(
-                                "total_size_limit",
-                                "aggregate decoded size overflowed",
-                            ),
-                        )
-                    })?;
-                if total > limits.max_total_decoded_bytes {
-                    return Err(failure(
-                        valid_input(bytes.len()),
-                        CliError::unsafe_output(
-                            "total_size_limit",
-                            "aggregate decoded size exceeds the limit",
-                        ),
-                    ));
-                }
-                let name = safe_output_name(document)
-                    .map_err(|error| failure(valid_input(bytes.len()), error))?;
-                // Compare names the way a filesystem might fold them, so that
-                // two documents cannot silently target one file.
-                if !names.insert(name.nfc().collect::<String>().to_lowercase()) {
-                    return Err(failure(
-                        valid_input(bytes.len()),
-                        CliError::unsafe_output(
-                            "output_name_collision",
-                            "two documents resolve to the same output filename",
-                        ),
-                    ));
-                }
-                planned.push((document.index, name, decoded.bytes));
-            }
-            DecodeOutcome::Unsupported(UnsupportedReason::Encrypted) => warnings.push(Notice {
-                code: "document_skipped_encrypted".to_owned(),
-                message: format!(
-                    "document {} was not extracted because it is encrypted",
-                    document.index
-                ),
-            }),
-            DecodeOutcome::Unsupported(UnsupportedReason::TransformChain) => {
-                warnings.push(Notice {
-                    code: "document_skipped_unsupported_transform".to_owned(),
-                    message: format!(
-                        "document {} was not extracted because its transform chain is unsupported",
-                        document.index
-                    ),
-                })
-            }
-        }
-    }
+/// One decoded document being considered for nested expansion.
+#[derive(Clone, Copy)]
+struct Nested<'a> {
+    document: &'a openszigno_core::Document,
+    decoded: &'a [u8],
+    dossier_path: &'a str,
+    name: &'a str,
+    directory_path: &'a str,
+    depth: u32,
+}
+
+/// One planned file, plus the subdirectory holding the dossier it embeds.
+struct PlanEntry {
+    file: PlanFile,
+    subdirectory: Option<PlanDir>,
+}
+
+/// One planned output directory: the extraction root, or a `<file>.d`
+/// subdirectory holding a nested dossier.
+struct PlanDir {
+    name: String,
+    entries: Vec<PlanEntry>,
+}
+
+/// State shared by every nesting level of one extraction run.
+struct Plan<'a> {
+    options: &'a ParseOptions,
+    recursive: bool,
+    max_depth: u32,
+    /// Decoded bytes across the whole tree, against `max_total_decoded_bytes`.
+    total: u64,
+    warnings: Vec<Notice>,
+    skipped: usize,
+    nested_dossiers: usize,
+}
+
+fn extract(
+    path: &Path,
+    output: &Path,
+    options: &ParseOptions,
+    recursive: bool,
+    max_depth: u32,
+) -> CliResult {
+    let (bytes, dossier) = load(path, options)?;
+    let input = valid_input(bytes.len());
+    let mut plan = Plan {
+        options,
+        recursive,
+        max_depth,
+        total: 0,
+        warnings: dossier_warnings(&dossier),
+        skipped: 0,
+        nested_dossiers: 0,
+    };
+
+    // Everything is decoded, named, and checked for collisions across the
+    // whole tree before the output directory is touched.
+    let root = plan
+        .plan_dossier(&dossier, String::new(), "", String::new(), 0)
+        .map_err(|error| failure(input.clone(), error))?;
 
     let directory =
-        OutputDir::open(output).map_err(|error| failure(valid_input(bytes.len()), error.into()))?;
-    for (_, name, _) in &planned {
-        match directory.exists(name) {
-            Ok(false) => {}
-            Ok(true) => {
-                return Err(failure(
-                    valid_input(bytes.len()),
-                    CliError::unsafe_output(
-                        "output_exists",
-                        "an output file already exists; no files were written",
-                    ),
-                ));
-            }
-            Err(_) => {
-                return Err(failure(
-                    valid_input(bytes.len()),
-                    CliError::io("could not safely inspect an output path"),
-                ));
+        OutputDir::open(output).map_err(|error| failure(input.clone(), error.into()))?;
+    for entry in &root.entries {
+        for name in std::iter::once(&entry.file.name)
+            .chain(entry.subdirectory.as_ref().map(|sub| &sub.name))
+        {
+            match directory.exists(name) {
+                Ok(false) => {}
+                Ok(true) => {
+                    return Err(failure(
+                        input,
+                        CliError::unsafe_output(
+                            "output_exists",
+                            "an output file already exists; no files were written",
+                        ),
+                    ));
+                }
+                Err(_) => {
+                    return Err(failure(
+                        input,
+                        CliError::io("could not safely inspect an output path"),
+                    ));
+                }
             }
         }
     }
 
-    let mut extracted = Vec::with_capacity(planned.len());
-    let mut created: Vec<String> = Vec::with_capacity(planned.len());
-    for (index, name, contents) in planned {
-        let mut file = match directory.create_new_file(&name) {
-            Ok(file) => file,
-            Err(error) => {
-                let error = if error.kind() == io::ErrorKind::AlreadyExists {
-                    CliError::unsafe_output(
-                        "output_exists",
-                        "an output file already exists or cannot be created safely",
-                    )
-                } else {
-                    CliError::io("could not create an output file")
-                };
-                return Err(failure(
-                    valid_input(bytes.len()),
-                    roll_back(&directory, &created, error),
-                ));
-            }
-        };
-        created.push(name.clone());
-        if file
-            .write_all(&contents)
-            .and_then(|()| file.flush())
-            .is_err()
-        {
-            return Err(failure(
-                valid_input(bytes.len()),
-                roll_back(
-                    &directory,
-                    &created,
-                    CliError::io("could not write an extracted document"),
-                ),
-            ));
-        }
-        extracted.push(json!({
-            "document_index": index,
-            "filename": name,
-            "bytes": contents.len()
-        }));
+    let mut writer = Writer {
+        directories: vec![directory],
+        created: Vec::new(),
+        extracted: Vec::new(),
+    };
+    if let Err(error) = writer.write_directory(0, &root) {
+        let error = writer.roll_back(error);
+        return Err(failure(input, error));
     }
 
     Ok(Success {
-        input: valid_input(bytes.len()),
+        input,
         data: json!({
-            "extracted": extracted,
-            "extracted_count": extracted.len(),
-            "skipped_count": dossier.documents.len() - extracted.len()
+            "extracted": writer.extracted,
+            "extracted_count": writer.extracted.len(),
+            "skipped_count": plan.skipped,
+            "nested_dossiers_extracted": plan.nested_dossiers
         }),
-        warnings,
+        warnings: plan.warnings,
     })
 }
 
-fn load(path: &Path, limits: &Limits) -> Result<(Vec<u8>, Dossier), Failure> {
+impl Plan<'_> {
+    /// Decode and name every document of one dossier, recursing into the
+    /// dossiers it embeds. Nothing is written here.
+    ///
+    /// `prefix` is the `dossier_path` of the enclosing document with a
+    /// trailing slash, `directory_path` the output path of the directory this
+    /// dossier extracts into, both relative to the extraction root.
+    fn plan_dossier(
+        &mut self,
+        dossier: &Dossier,
+        prefix: String,
+        directory_path: &str,
+        directory_name: String,
+        depth: u32,
+    ) -> Result<PlanDir, CliError> {
+        let mut entries = Vec::new();
+        let mut names = HashSet::new();
+        for document in &dossier.documents {
+            let dossier_path = format!("{prefix}{}", document.index);
+            let decoded = match dossier
+                .decode_document(document.index, &self.options.limits)
+                .map_err(CliError::extraction)?
+            {
+                DecodeOutcome::Decoded(decoded) => decoded.bytes,
+                DecodeOutcome::Unsupported(reason) => {
+                    self.skipped += 1;
+                    self.warnings.push(skip_notice(&dossier_path, reason));
+                    continue;
+                }
+            };
+
+            self.total = self
+                .total
+                .checked_add(decoded.len() as u64)
+                .ok_or_else(|| {
+                    CliError::unsafe_output("total_size_limit", "aggregate decoded size overflowed")
+                })?;
+            if self.total > self.options.limits.max_total_decoded_bytes {
+                return Err(CliError::unsafe_output(
+                    "total_size_limit",
+                    "aggregate decoded size exceeds the limit",
+                ));
+            }
+
+            let detected = openszigno_core::sniff(&decoded);
+            let name = safe_output_name(document, fallback_extension(document, detected))?;
+            let name = self.claim(&mut names, name, document.index, &dossier_path)?;
+            let path = join_path(directory_path, &name);
+            let subdirectory = self.plan_nested(
+                &Nested {
+                    document,
+                    decoded: &decoded,
+                    dossier_path: &dossier_path,
+                    name: &name,
+                    directory_path,
+                    depth,
+                },
+                &mut names,
+            )?;
+            entries.push(PlanEntry {
+                file: PlanFile {
+                    document_index: document.index,
+                    dossier_path,
+                    name,
+                    path,
+                    bytes: decoded,
+                    detected_type: detected.as_str(),
+                    declared_type: document.mime_type.essence(),
+                },
+                subdirectory,
+            });
+        }
+        Ok(PlanDir {
+            name: directory_name,
+            entries,
+        })
+    }
+
+    /// Take a name in one directory, renaming it deterministically if it is
+    /// already taken.
+    ///
+    /// Real dossiers reuse titles, so a repeated name is deduplicated rather
+    /// than failing the run. Only a name that still collides after renaming is
+    /// an error.
+    fn claim(
+        &mut self,
+        names: &mut HashSet<String>,
+        name: String,
+        index: usize,
+        dossier_path: &str,
+    ) -> Result<String, CliError> {
+        if names.insert(name_key(&name)) {
+            return Ok(name);
+        }
+        let renamed = deduplicated_name(&name, index);
+        if renamed.len() > 255 {
+            return Err(CliError::unsafe_output(
+                "unsafe_output_name",
+                format!("document {dossier_path} output filename exceeds 255 bytes"),
+            ));
+        }
+        claim_name(names, &renamed)?;
+        self.warnings.push(Notice {
+            code: "output_name_deduplicated".to_owned(),
+            message: format!(
+                "document {index} (dossier path {dossier_path}) was renamed because an earlier document already took its output name"
+            ),
+        });
+        Ok(renamed)
+    }
+
+    /// Plan the subdirectory for a document that carries an embedded dossier.
+    ///
+    /// A payload that cannot be parsed is kept as a raw file and reported; it
+    /// never fails the run.
+    fn plan_nested(
+        &mut self,
+        request: &Nested<'_>,
+        names: &mut HashSet<String>,
+    ) -> Result<Option<PlanDir>, CliError> {
+        let Nested {
+            document,
+            decoded,
+            dossier_path,
+            name,
+            directory_path,
+            depth,
+        } = *request;
+        // The declared type and the payload itself both count: real dossiers
+        // declare unreliable MIME types.
+        let looks_nested =
+            document.nested_dossier || openszigno_core::sniff(decoded) == DetectedType::Dossier;
+        if !looks_nested || !self.recursive {
+            return Ok(None);
+        }
+        if depth >= self.max_depth {
+            self.warnings.push(Notice {
+                code: "nested_dossier_depth_limit".to_owned(),
+                message: format!(
+                    "the dossier embedded in document {dossier_path} was kept as a file because the maximum nesting depth was reached"
+                ),
+            });
+            return Ok(None);
+        }
+        let nested = match openszigno_core::parse_with_options(decoded, self.options) {
+            Ok(nested) => nested,
+            Err(error) => {
+                self.warnings.push(Notice {
+                    code: "nested_dossier_invalid".to_owned(),
+                    message: format!(
+                        "the dossier embedded in document {dossier_path} could not be parsed ({}) and was kept as a file",
+                        error.code().as_str()
+                    ),
+                });
+                return Ok(None);
+            }
+        };
+
+        let directory_name = format!("{name}.d");
+        if directory_name.len() > 255 {
+            return Err(CliError::unsafe_output(
+                "unsafe_output_name",
+                format!("document {dossier_path} output directory name exceeds 255 bytes"),
+            ));
+        }
+        let directory_name = self.claim(names, directory_name, document.index, dossier_path)?;
+        for warning in &nested.warnings {
+            self.warnings.push(Notice {
+                code: warning.code.as_str().to_owned(),
+                message: format!(
+                    "in the dossier embedded in document {dossier_path}: {}",
+                    warning.message
+                ),
+            });
+        }
+        self.nested_dossiers += 1;
+        let nested_path = join_path(directory_path, &directory_name);
+        let plan = self.plan_dossier(
+            &nested,
+            format!("{dossier_path}/"),
+            &nested_path,
+            directory_name,
+            depth + 1,
+        )?;
+        Ok(Some(plan))
+    }
+}
+
+/// The key two names are compared on: NFC-normalised and case-folded, so a
+/// case-insensitive filesystem cannot map two outputs onto one file.
+fn name_key(name: &str) -> String {
+    name.nfc().collect::<String>().to_lowercase()
+}
+
+/// Insert `-<index>` before the extension, so a repeated title still yields a
+/// distinct, predictable filename.
+fn deduplicated_name(name: &str, index: usize) -> String {
+    let path = Path::new(name);
+    match (
+        path.file_stem().and_then(|stem| stem.to_str()),
+        path.extension().and_then(|extension| extension.to_str()),
+    ) {
+        (Some(stem), Some(extension)) if !stem.is_empty() => {
+            format!("{stem}-{index}.{extension}")
+        }
+        _ => format!("{name}-{index}"),
+    }
+}
+
+/// Reject two documents that would target the same name in one directory.
+///
+/// Kept for the pathological case that survives deduplication.
+fn claim_name(names: &mut HashSet<String>, name: &str) -> Result<(), CliError> {
+    if names.insert(name_key(name)) {
+        return Ok(());
+    }
+    Err(CliError::unsafe_output(
+        "output_name_collision",
+        "two outputs resolve to the same name in one directory",
+    ))
+}
+
+fn join_path(directory: &str, name: &str) -> String {
+    if directory.is_empty() {
+        name.to_owned()
+    } else if name.is_empty() {
+        directory.to_owned()
+    } else {
+        format!("{directory}/{name}")
+    }
+}
+
+/// The extension to append when the title carries none and the dossier
+/// declares none either.
+fn fallback_extension(
+    document: &openszigno_core::Document,
+    detected: DetectedType,
+) -> Option<&'static str> {
+    if document.mime_type.extension.is_some() {
+        return None;
+    }
+    detected.preferred_extension()
+}
+
+fn skip_notice(dossier_path: &str, reason: UnsupportedReason) -> Notice {
+    match reason {
+        UnsupportedReason::Encrypted => Notice {
+            code: "document_skipped_encrypted".to_owned(),
+            message: format!("document {dossier_path} was not extracted because it is encrypted"),
+        },
+        UnsupportedReason::TransformChain => Notice {
+            code: "document_skipped_unsupported_transform".to_owned(),
+            message: format!(
+                "document {dossier_path} was not extracted because its transform chain is unsupported"
+            ),
+        },
+    }
+}
+
+/// One entry this run created, so that a failure can undo it.
+enum Undo {
+    File(usize, String),
+    Directory(usize, String),
+}
+
+/// Writes a planned tree, remembering what it created.
+struct Writer {
+    directories: Vec<OutputDir>,
+    created: Vec<Undo>,
+    extracted: Vec<Value>,
+}
+
+impl Writer {
+    fn write_directory(&mut self, directory: usize, plan: &PlanDir) -> Result<(), CliError> {
+        for entry in &plan.entries {
+            let mut file = self.directories[directory]
+                .create_new_file(&entry.file.name)
+                .map_err(|error| {
+                    if error.kind() == io::ErrorKind::AlreadyExists {
+                        CliError::unsafe_output(
+                            "output_exists",
+                            "an output file already exists or cannot be created safely",
+                        )
+                    } else {
+                        CliError::io("could not create an output file")
+                    }
+                })?;
+            self.created
+                .push(Undo::File(directory, entry.file.name.clone()));
+            file.write_all(&entry.file.bytes)
+                .and_then(|()| file.flush())
+                .map_err(|_| CliError::io("could not write an extracted document"))?;
+            self.extracted.push(json!({
+                "document_index": entry.file.document_index,
+                "dossier_path": entry.file.dossier_path,
+                "filename": entry.file.name,
+                "path": entry.file.path,
+                "bytes": entry.file.bytes.len(),
+                "detected_type": entry.file.detected_type,
+                "declared_type": entry.file.declared_type
+            }));
+
+            if let Some(nested) = &entry.subdirectory {
+                let handle = self.directories[directory]
+                    .create_subdirectory(&nested.name)
+                    .map_err(CliError::from)?;
+                self.created
+                    .push(Undo::Directory(directory, nested.name.clone()));
+                self.directories.push(handle);
+                let child = self.directories.len() - 1;
+                self.write_directory(child, nested)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Undo everything this run created, deepest entry first, so a partial
+    /// extraction is never left behind.
+    fn roll_back(&self, error: CliError) -> CliError {
+        let removed = self.created.iter().rev().all(|entry| match entry {
+            Undo::File(directory, name) => self.directories[*directory].remove_file(name).is_ok(),
+            Undo::Directory(directory, name) => {
+                self.directories[*directory].remove_directory(name).is_ok()
+            }
+        });
+        if removed {
+            return error;
+        }
+        CliError {
+            code: error.code,
+            message: format!("{}; some extracted files may remain", error.message),
+            exit: error.exit,
+        }
+    }
+}
+
+fn load(path: &Path, options: &ParseOptions) -> Result<(Vec<u8>, Dossier), Failure> {
+    let limits = &options.limits;
     let metadata = fs::metadata(path).map_err(|_| {
         failure(
             InputInfo {
@@ -515,7 +887,7 @@ fn load(path: &Path, limits: &Limits) -> Result<(Vec<u8>, Dossier), Failure> {
                 CliError::io("could not read the input file"),
             )
         })?;
-    let dossier = openszigno_core::parse(&bytes, limits).map_err(|error| {
+    let dossier = openszigno_core::parse_with_options(&bytes, options).map_err(|error| {
         failure(
             InputInfo {
                 format: None,
@@ -537,8 +909,33 @@ fn dossier_overview(dossier: &Dossier) -> Value {
         "documents": dossier.documents.len(),
         "signatures_present": dossier.signatures_present,
         "timestamps_present": dossier.timestamps_present,
+        "nested_dossiers": dossier
+            .documents
+            .iter()
+            .filter(|document| document.nested_dossier)
+            .count(),
         "signatures_verified": false
     })
+}
+
+/// Every warning a reading command reports for a dossier: what the tool
+/// cannot do with it, and how it deviates from the default profile.
+fn dossier_warnings(dossier: &Dossier) -> Vec<Notice> {
+    let mut warnings = capability_warnings(dossier);
+    warnings.extend(structural_warnings(dossier));
+    warnings
+}
+
+/// The core's structural findings, with their stable codes preserved.
+fn structural_warnings(dossier: &Dossier) -> Vec<Notice> {
+    dossier
+        .warnings
+        .iter()
+        .map(|warning| Notice {
+            code: warning.code.as_str().to_owned(),
+            message: warning.message.clone(),
+        })
+        .collect()
 }
 
 fn capability_warnings(dossier: &Dossier) -> Vec<Notice> {
@@ -608,7 +1005,14 @@ fn is_private_use(character: char) -> bool {
     )
 }
 
-fn safe_output_name(document: &openszigno_core::Document) -> Result<String, CliError> {
+/// Derive the output filename from the document title.
+///
+/// `fallback` is the extension suggested by content sniffing; it is used only
+/// when the title carries no extension and the dossier declares none.
+fn safe_output_name(
+    document: &openszigno_core::Document,
+    fallback: Option<&str>,
+) -> Result<String, CliError> {
     let title = document.title.trim();
     if title.is_empty()
         || title == "."
@@ -700,6 +1104,11 @@ fn safe_output_name(document: &openszigno_core::Document) -> Result<String, CliE
         {
             name.push_str(&suffix);
         }
+    } else if let Some(extension) = fallback
+        && Path::new(&name).extension().is_none()
+    {
+        name.push('.');
+        name.push_str(extension);
     }
     if name.len() > 255 {
         return Err(CliError::unsafe_output(
@@ -711,23 +1120,6 @@ fn safe_output_name(document: &openszigno_core::Document) -> Result<String, CliE
         ));
     }
     Ok(name)
-}
-
-/// Undo the files this run created, so a partial extraction is never left
-/// behind. The original error is returned, or a variant of it when the
-/// cleanup itself could not complete.
-fn roll_back(directory: &OutputDir, created: &[String], error: CliError) -> CliError {
-    let removed = created
-        .iter()
-        .all(|name| directory.remove_file(name).is_ok());
-    if removed {
-        return error;
-    }
-    CliError {
-        code: error.code,
-        message: format!("{}; some extracted files may remain", error.message),
-        exit: error.exit,
-    }
 }
 
 fn valid_input(bytes: usize) -> InputInfo {
@@ -781,15 +1173,21 @@ fn write_human_success(command: &str, response: &Response) -> io::Result<()> {
             let dossier = &response.data["dossier"];
             writeln!(out, "{}", display_json_string(&dossier["title"]))?;
             for document in response.data["documents"].as_array().into_iter().flatten() {
+                let nested = if document["nested_dossier"] == Value::Bool(true) {
+                    " | nested dossier"
+                } else {
+                    ""
+                };
                 writeln!(
                     out,
-                    "[{}] {} | {}/{} | {} B | {}",
+                    "[{}] {} | {}/{} | {} B | {}{}",
                     document["index"],
                     display_json_string(&document["title"]),
                     display_json_string(&document["mime_type"]["media_type"]),
                     display_json_string(&document["mime_type"]["subtype"]),
-                    document["source_size"],
-                    document["transforms"]
+                    display_source_size(&document["source_size"]),
+                    document["transforms"],
+                    nested
                 )?;
             }
             writeln!(
@@ -806,10 +1204,11 @@ fn write_human_success(command: &str, response: &Response) -> io::Result<()> {
             for item in response.data["extracted"].as_array().into_iter().flatten() {
                 writeln!(
                     out,
-                    "[{}] {} ({} B)",
-                    item["document_index"],
-                    display_json_string(&item["filename"]),
-                    item["bytes"]
+                    "[{}] {} ({} B, {})",
+                    display_json_string(&item["dossier_path"]),
+                    display_json_string(&item["path"]),
+                    item["bytes"],
+                    display_json_string(&item["detected_type"])
                 )?;
             }
             writeln!(out, "Extraction is not proof of signature validity.")?;
@@ -818,6 +1217,11 @@ fn write_human_success(command: &str, response: &Response) -> io::Result<()> {
             writeln!(
                 out,
                 "Structure is valid for the supported e-Szigno profile."
+            )?;
+            writeln!(
+                out,
+                "Conformance warnings: {} (listed as warnings on stderr).",
+                response.data["conformance_warnings"]
             )?;
             writeln!(out, "Cryptographic verification was not performed.")?;
         }
@@ -830,6 +1234,13 @@ fn write_human_success(command: &str, response: &Response) -> io::Result<()> {
     Ok(())
 }
 
+/// A declared source size, or `?` when the profile omits `SourceSize`.
+fn display_source_size(value: &Value) -> String {
+    value
+        .as_u64()
+        .map_or_else(|| "?".to_owned(), |size| size.to_string())
+}
+
 fn display_json_string(value: &Value) -> String {
     value.as_str().unwrap_or("<missing>").to_owned()
 }
@@ -838,22 +1249,234 @@ fn display_json_string(value: &Value) -> String {
 mod tests {
     use super::*;
 
+    /// A temporary directory under a fully resolved base path.
+    ///
+    /// `OutputDir` refuses a path containing a symlink, and the platform
+    /// temporary directory is itself a symlink on some systems (macOS resolves
+    /// `/var` to `/private/var`), so the base is canonicalized first.
+    fn scratch() -> tempfile::TempDir {
+        let base = std::env::temp_dir()
+            .canonicalize()
+            .expect("the temporary directory must resolve");
+        tempfile::tempdir_in(base).expect("a temporary directory must be available")
+    }
+
+    /// Parse a synthetic, unsigned dossier and return its only document, so
+    /// that the private naming rules can be exercised directly.
+    fn document(title: &str, extension: Option<&str>) -> openszigno_core::Document {
+        let escaped = title
+            .replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;");
+        let extension =
+            extension.map_or_else(String::new, |value| format!(" extension=\"{value}\""));
+        let xml = format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<es:Dossier xmlns:es="https://www.microsec.hu/ds/e-szigno30#" xmlns:ds="http://www.w3.org/2000/09/xmldsig#">
+<es:DossierProfile Id="p0" OBJREF="Object0"><es:Title>Unsigned synthetic fixture</es:Title><es:CreationDate>2026-01-01T00:00:00Z</es:CreationDate></es:DossierProfile>
+<es:Documents Id="Object0"><es:Document><es:DocumentProfile Id="p1" OBJREF="o1"><es:Title>{escaped}</es:Title><es:CreationDate>2026-01-01T00:00:00Z</es:CreationDate><es:Format><es:MIME-Type type="text" subtype="plain"{extension}/></es:Format><es:SourceSize sizeValue="1" sizeUnit="B"/><es:BaseTransform><es:Transform Algorithm="base64"/></es:BaseTransform></es:DocumentProfile><ds:Object Id="o1">eA==</ds:Object></es:Document></es:Documents>
+</es:Dossier>"#
+        );
+        openszigno_core::parse(xml.as_bytes(), &Limits::default())
+            .expect("the synthetic dossier must parse")
+            .documents
+            .swap_remove(0)
+    }
+
+    fn rejected_name(title: &str, extension: Option<&str>) -> CliError {
+        safe_output_name(&document(title, extension), None)
+            .expect_err("this title must not become a filename")
+    }
+
+    fn accepted_name(title: &str, extension: Option<&str>) -> String {
+        safe_output_name(&document(title, extension), None).expect("this title must be usable")
+    }
+
+    fn sniffed_name(title: &str, fallback: Option<&str>) -> String {
+        safe_output_name(&document(title, None), fallback).expect("this title must be usable")
+    }
+
+    #[test]
+    fn an_ordinary_title_is_used_as_written() {
+        assert_eq!(accepted_name("hello.txt", Some("txt")), "hello.txt");
+        assert_eq!(
+            accepted_name("Report 2026.txt", Some("txt")),
+            "Report 2026.txt"
+        );
+        assert_eq!(accepted_name("no-extension", None), "no-extension");
+    }
+
+    #[test]
+    fn a_title_is_stored_in_one_canonical_composition() {
+        // "e" + U+0301 is written as the single code point U+00E9.
+        assert_eq!(
+            accepted_name("e\u{301}rte\u{301}s.txt", Some("txt")),
+            "\u{e9}rt\u{e9}s.txt"
+        );
+    }
+
+    #[test]
+    fn a_declared_extension_is_appended_only_when_it_is_missing() {
+        assert_eq!(accepted_name("invoice", Some("pdf")), "invoice.pdf");
+        assert_eq!(accepted_name("invoice.pdf", Some("pdf")), "invoice.pdf");
+        assert_eq!(accepted_name("invoice.PDF", Some("pdf")), "invoice.PDF");
+        assert_eq!(accepted_name("invoice.txt", Some("pdf")), "invoice.txt.pdf");
+    }
+
+    #[test]
+    fn a_title_that_hides_reorders_or_escapes_is_rejected() {
+        // A title that is empty or only whitespace cannot reach this point: the
+        // parser rejects it as a missing element first.
+        for title in [
+            ".",
+            "..",
+            ".hidden",
+            "-rf",
+            "../escape.txt",
+            "dir/file.txt",
+            "dir\\file.txt",
+            "a<b",
+            "a>b",
+            "a:b",
+            "a\"b",
+            "a|b",
+            "a?b",
+            "a*b",
+            // (a C0 control other than tab or newline is not even valid XML)
+            "tab\there.txt",
+            "line\nbreak.txt",
+            "nbsp\u{a0}.txt",
+            "soft\u{ad}hyphen.txt",
+            "bidi\u{202e}txt.exe",
+            "zero\u{200b}width.txt",
+            "annotation\u{fff9}.txt",
+            "tag\u{e0001}.txt",
+            "private\u{e000}.txt",
+            "trailing.",
+        ] {
+            let error = rejected_name(title, None);
+            assert_eq!(
+                error.code, "unsafe_output_name",
+                "{title:?} must be rejected"
+            );
+            assert_eq!(error.exit, 5);
+            assert!(
+                !error.message.contains(title),
+                "the message must not echo the title"
+            );
+        }
+    }
+
+    #[test]
+    fn a_reserved_windows_device_name_is_rejected_on_every_platform() {
+        for title in [
+            "CON", "con", "PRN", "AUX", "NUL", "nul.txt", "COM1", "com9.log", "LPT1", "lpt9.dat",
+        ] {
+            assert_eq!(
+                rejected_name(title, None).code,
+                "unsafe_output_name",
+                "{title} is a reserved device name"
+            );
+        }
+        // Only the stem is reserved: a longer name is fine.
+        assert_eq!(accepted_name("console.txt", None), "console.txt");
+    }
+
+    #[test]
+    fn an_over_long_name_is_rejected_before_and_after_the_extension() {
+        assert_eq!(
+            rejected_name(&"a".repeat(241), None).code,
+            "unsafe_output_name"
+        );
+        assert_eq!(
+            rejected_name(&"a".repeat(240), Some("abcdefghijklmnop")).code,
+            "unsafe_output_name"
+        );
+        assert_eq!(accepted_name(&"a".repeat(240), None).len(), 240);
+    }
+
+    #[test]
+    fn a_declared_extension_that_is_not_a_short_alphanumeric_suffix_is_rejected() {
+        for extension in ["tar.gz", "t x", "abcdefghijklmnopq", "-", "txt/", "\u{e9}"] {
+            assert_eq!(
+                rejected_name("payload", Some(extension)).code,
+                "unsafe_output_name",
+                "{extension} is not a usable extension"
+            );
+        }
+        assert_eq!(accepted_name("payload", Some("abcdefghijklmnop")).len(), 24);
+    }
+
+    #[test]
+    fn a_missing_json_string_is_rendered_as_a_placeholder() {
+        assert_eq!(display_json_string(&json!("title")), "title");
+        assert_eq!(display_json_string(&Value::Null), "<missing>");
+        assert_eq!(display_json_string(&json!(7)), "<missing>");
+    }
+
+    #[test]
+    fn cli_errors_carry_the_documented_exit_status() {
+        assert_eq!(CliError::io("x").exit, 3);
+        assert_eq!(CliError::invalid("input_too_large", "x").exit, 4);
+        assert_eq!(CliError::unsafe_output("output_exists", "x").exit, 5);
+        assert_eq!(CliError::io("x").code, "io_error");
+
+        let unsafe_directory = CliError::from(OpenError::Unsafe("not a directory"));
+        assert_eq!(unsafe_directory.code, "unsafe_output_directory");
+        assert_eq!(unsafe_directory.exit, 5);
+        let io = CliError::from(OpenError::Io("cannot inspect"));
+        assert_eq!(io.code, "io_error");
+        assert_eq!(io.exit, 3);
+    }
+
+    #[test]
+    fn capability_warnings_name_every_unsupported_document() {
+        let dossier = openszigno_core::parse(
+            std::fs::read(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../tests/fixtures/encrypted.es3"),
+            )
+            .expect("the fixture is readable")
+            .as_slice(),
+            &Limits::default(),
+        )
+        .expect("the fixture parses");
+        let warnings = capability_warnings(&dossier);
+        let codes: Vec<&str> = warnings
+            .iter()
+            .map(|warning| warning.code.as_str())
+            .collect();
+        assert_eq!(codes, ["encrypted_document_unsupported"]);
+    }
+
     /// A mid-run failure must not leave a half-extracted directory behind.
     #[test]
-    fn roll_back_removes_the_files_this_run_created() {
-        let temporary = tempfile::tempdir().expect("temporary directory is available");
+    fn roll_back_removes_the_files_and_directories_this_run_created() {
+        let temporary = scratch();
         let directory = OutputDir::open(temporary.path()).expect("output directory opens");
+        let nested = directory
+            .create_subdirectory("nested.d")
+            .expect("subdirectory is created");
         for name in ["first.txt", "second.txt"] {
             let mut file = directory.create_new_file(name).expect("file is created");
             file.write_all(b"payload").expect("file is writable");
         }
+        let mut inner = nested
+            .create_new_file("inner.txt")
+            .expect("file is created");
+        inner.write_all(b"payload").expect("file is writable");
 
-        let created = vec!["first.txt".to_owned(), "second.txt".to_owned()];
-        let error = roll_back(
-            &directory,
-            &created,
-            CliError::io("could not write an extracted document"),
-        );
+        let writer = Writer {
+            directories: vec![directory, nested],
+            created: vec![
+                Undo::File(0, "first.txt".to_owned()),
+                Undo::File(0, "second.txt".to_owned()),
+                Undo::Directory(0, "nested.d".to_owned()),
+                Undo::File(1, "inner.txt".to_owned()),
+            ],
+            extracted: Vec::new(),
+        };
+        let error = writer.roll_back(CliError::io("could not write an extracted document"));
 
         assert_eq!(error.code, "io_error");
         assert_eq!(error.message, "could not write an extracted document");
@@ -869,18 +1492,70 @@ mod tests {
     /// the destination is clean.
     #[test]
     fn roll_back_reports_that_files_may_remain() {
-        let temporary = tempfile::tempdir().expect("temporary directory is available");
+        let temporary = scratch();
         let directory = OutputDir::open(temporary.path()).expect("output directory opens");
-        let created = vec!["never-created.txt".to_owned()];
+        let writer = Writer {
+            directories: vec![directory],
+            created: vec![Undo::File(0, "never-created.txt".to_owned())],
+            extracted: Vec::new(),
+        };
 
-        let error = roll_back(
-            &directory,
-            &created,
-            CliError::io("could not write an extracted document"),
-        );
+        let error = writer.roll_back(CliError::io("could not write an extracted document"));
 
         assert_eq!(error.code, "io_error");
         assert_eq!(error.exit, 3);
         assert!(error.message.ends_with("; some extracted files may remain"));
+    }
+
+    #[test]
+    fn a_sniffed_extension_is_appended_only_when_nothing_else_names_one() {
+        assert_eq!(sniffed_name("payload", Some("txt")), "payload.txt");
+        assert_eq!(sniffed_name("payload.dat", Some("txt")), "payload.dat");
+        assert_eq!(sniffed_name("payload", None), "payload");
+        // A declared extension always wins over the sniffed one.
+        assert_eq!(
+            safe_output_name(&document("payload", Some("pdf")), Some("txt"))
+                .expect("this title must be usable"),
+            "payload.pdf"
+        );
+    }
+
+    #[test]
+    fn a_sniffed_extension_is_used_only_without_a_declared_one() {
+        let declared = document("payload", Some("pdf"));
+        assert_eq!(fallback_extension(&declared, DetectedType::Text), None);
+        let undeclared = document("payload", None);
+        assert_eq!(
+            fallback_extension(&undeclared, DetectedType::Pdf),
+            Some("pdf")
+        );
+        assert_eq!(fallback_extension(&undeclared, DetectedType::Binary), None);
+    }
+
+    #[test]
+    fn a_relative_output_path_is_joined_with_forward_slashes() {
+        assert_eq!(join_path("", "a.txt"), "a.txt");
+        assert_eq!(join_path("a.d", "b.txt"), "a.d/b.txt");
+        assert_eq!(join_path("a.d", ""), "a.d");
+    }
+
+    #[test]
+    fn a_repeated_output_name_in_one_directory_is_a_collision() {
+        let mut names = HashSet::new();
+        assert!(claim_name(&mut names, "Report.txt").is_ok());
+        let error = claim_name(&mut names, "report.TXT").expect_err("names collide");
+        assert_eq!(error.code, "output_name_collision");
+        assert_eq!(error.exit, 5);
+    }
+
+    #[test]
+    fn a_skipped_document_names_its_dossier_path_and_reason() {
+        assert_eq!(
+            skip_notice("2/0", UnsupportedReason::Encrypted).code,
+            "document_skipped_encrypted"
+        );
+        let chain = skip_notice("2/0", UnsupportedReason::TransformChain);
+        assert_eq!(chain.code, "document_skipped_unsupported_transform");
+        assert!(chain.message.contains("2/0"));
     }
 }

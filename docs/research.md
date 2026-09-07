@@ -17,9 +17,11 @@ The default e-Szignó namespace is:
 https://www.microsec.hu/ds/e-szigno30#
 ```
 
-Special-purpose dossiers may use another compatible e-dossier namespace.
-The tool must identify a dossier by a namespace-aware root-element check, not
-by extension alone.
+Special-purpose dossiers may use another compatible e-dossier namespace, for
+example the Hungarian company-court (e-cégeljárás) dossiers. The tool must
+identify a dossier by a namespace-aware root-element check, not by extension
+alone. Support for compatible non-default namespaces is milestone M1 in
+[roadmap.md](roadmap.md).
 
 ## Primary sources
 
@@ -78,7 +80,8 @@ to reject or safely bound at least:
   collisions;
 - unsupported transforms and unknown namespaces without an explicit opt-in.
 
-Signature verification is a separate security-sensitive feature. It requires
+Signature verification is a separate security-sensitive feature, planned as
+milestone M2 in [roadmap.md](roadmap.md). It requires
 strict same-document ID resolution, reference-scope enforcement,
 canonicalization, algorithm policy, certificate-path and revocation checking,
 and timestamp validation. Until all of those are implemented and tested,
@@ -90,5 +93,6 @@ commands may report *signature material present*, but must not report
 Rust is the preferred implementation language: it supports one native binary,
 portable release artifacts, a bounded whole-document XML parser (input-size,
 depth, and node-count limited; see `docs/architecture.md`), and an
-agent-friendly CLI without requiring a VM/runtime. Go remains a viable fallback, but Rust is
-the default unless a later validation-library evaluation reverses the choice.
+agent-friendly CLI without requiring a VM/runtime. Go remains a viable
+fallback, but Rust is the default unless a later validation-library evaluation
+reverses the choice.

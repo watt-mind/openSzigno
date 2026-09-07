@@ -1,0 +1,104 @@
+name: CI
+
+on:
+  push:
+    branches: [develop, master]
+  pull_request:
+    branches: [develop, master]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+concurrency:
+  group: ci-${{ github.event_name }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  lint:
+    name: Format and lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo doc --workspace --no-deps --locked
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+  test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace --locked
+      - name: Smoke-test the release binary on synthetic fixtures
+        shell: bash
+        run: |
+          cargo build --release --locked
+          bin=target/release/openszigno
+          for f in tests/fixtures/plain-base64.es3 tests/fixtures/zip-base64.es3; do
+            "$bin" inspect "$f" --json >/dev/null
+            "$bin" list "$f" --json >/dev/null
+            "$bin" validate-structure "$f" --json >/dev/null
+          done
+          "$bin" extract tests/fixtures/plain-base64.es3 --output ci-out/plain --json
+          "$bin" extract tests/fixtures/zip-base64.es3 --output ci-out/zip --json
+          test "$(cat ci-out/plain/hello.txt)" = "Hello from openSzigno synthetic fixture."
+          test "$(cat ci-out/zip/zipped.txt)" = "Zipped openSzigno synthetic fixture."
+
+  msrv:
+    name: Minimum supported Rust (1.88)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.88
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --workspace --all-targets --locked
+
+  coverage:
+    name: Coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: taiki-e/install-action@cargo-llvm-cov
+      - uses: Swatinem/rust-cache@v2
+      - name: Measure line coverage
+        run: cargo llvm-cov --workspace --locked --lcov --output-path lcov.info
+      - name: Report and enforce the coverage floor
+        run: |
+          cargo llvm-cov report --summary-only | tee coverage-summary.txt
+          cargo llvm-cov report --fail-under-lines 85
+      - uses: actions/upload-artifact@v7
+        with:
+          name: coverage
+          retention-days: 1
+          path: |
+            lcov.info
+            coverage-summary.txt
+
+  deny:
+    name: Licenses and advisories
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+          arguments: --all-features

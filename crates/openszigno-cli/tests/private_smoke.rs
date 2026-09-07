@@ -6,9 +6,20 @@ use std::process::Command;
 use std::sync::Mutex;
 
 use openszigno_core::{DecodeOutcome, ErrorCode, Limits, UnsupportedReason};
-use tempfile::tempdir;
 
 static PANIC_HOOK_LOCK: Mutex<()> = Mutex::new(());
+
+/// A temporary directory under a fully resolved base path.
+///
+/// The extractor refuses an output path that contains a symlink, and the
+/// platform temporary directory is itself a symlink on some systems (macOS
+/// resolves `/var` to `/private/var`), so the base is canonicalized first.
+fn scratch() -> tempfile::TempDir {
+    let base = std::env::temp_dir()
+        .canonicalize()
+        .expect("the temporary directory must resolve");
+    tempfile::tempdir_in(base).expect("a temporary directory must be available")
+}
 
 #[derive(Default)]
 struct CorpusAggregate {
@@ -79,7 +90,7 @@ fn opt_in_private_fixture_smoke() {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
 
-    let output_directory = tempdir().expect("temporary output directory must be available");
+    let output_directory = scratch();
     let commands = ["inspect", "list", "validate-structure"];
     for command in commands {
         let output = Command::new(env!("CARGO_BIN_EXE_openszigno"))

@@ -18,3 +18,5 @@ evidence.
 | `traversal-title.es3` | Parses structurally; extraction rejects `unsafe_output_name`. |
 | `encrypted.es3` | Parses and reports the document as encrypted/unsupported. |
 | `doctype.es3` | Rejected as `unsafe_xml`. |
+| `nested-dossier.es3` | One `application/nldossier2` document (`court.dosszie`) whose Base64 payload is a complete default-namespace dossier. `extract` writes `court.dosszie` and `court.dosszie.d/inner.txt`; `--no-recursive` writes only the first. |
+| `compatible-namespace.es3` | A 2014 e-cégeljárás-namespace dossier with one `base64` text document. Parses with two conformance warnings: `dangling_objref` (a `SignatureProfile` whose OBJREF resolves to nothing) and `document_without_profile` (an empty `Document` holding only an empty `ds:Object`). |
