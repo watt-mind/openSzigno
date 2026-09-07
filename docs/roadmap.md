@@ -300,6 +300,18 @@ or carry advisory extended key usages. With phase 3 those 49 become reachable
 `valid` results, but only for a caller who supplies revocation data that covers
 the validation time; the private corpus has not been re-measured with one.
 
+With phase 3 (revocation and trusted lists), the same corpus verified with the
+Hungarian trusted list (its signature checked against the NMHH signer taken
+from the EU list of trusted lists), the two Microsec roots, and a revocation
+store holding the public Microsec CA CRLs gives, in aggregate: 54 of 62
+signatures `valid` with exit status 0, 43 of them qualified with the matching
+CA/QC service named; 7 `invalid` (1024-bit RSA signers, signatures without a
+timestamp whose certificates have expired, one genuinely revoked certificate,
+one chain to a CA outside the trust set); 1 `indeterminate` capped by the
+legacy-algorithm flag. Real Microsec dossiers embed OCSP responses for the
+end-entity certificate only, so the CA CRLs must be supplied through the
+revocation store until online fetching lands in M3.
+
 ## Engineering items
 
 These are not format milestones; they can land in any order.
