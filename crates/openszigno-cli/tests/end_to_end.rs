@@ -16,10 +16,10 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 use common::{
-    CertSpec, CrlSpec, DossierSpec, RevokedSpec, SigSpec, SigningCertificateSpec, TestKey,
-    TimestampSpec, TlService, TrustListSpec, build, build_crl, build_trust_list,
-    document_signature, extended_key_usage_extension, issued_by, keys, qc_statements_extension,
-    rsa_key, self_signed,
+    CertSpec, CounterSignatureSpec, CrlSpec, DossierSpec, RevokedSpec, SigSpec,
+    SigningCertificateSpec, TestKey, TimestampSpec, TlService, TrustListSpec, build, build_crl,
+    build_trust_list, countersignature, document_signature, extended_key_usage_extension,
+    issued_by, keys, qc_statements_extension, rsa_key, self_signed,
 };
 use rcgen::BasicConstraints;
 use serde_json::Value;
@@ -536,6 +536,53 @@ fn human_output_states_the_policy() {
     assert!(text.contains("Verification verdict: valid"), "{text}");
     assert!(text.contains("Revocation policy: offline"), "{text}");
     assert!(text.contains("not a legal opinion"), "{text}");
+}
+
+/// Human output names the signature a countersignature attests, so a reader
+/// never has to work it out from the placement alone.
+#[test]
+fn human_output_names_the_countersigned_signature() {
+    let pki = pki();
+    let stores = Stores::new(
+        &pki,
+        &[build_crl(&CrlSpec::new(
+            pki.root_der.clone(),
+            rsa_key(keys::ROOT_RSA2048),
+        ))],
+    );
+    let mut parent = signature(&pki);
+    parent.signature_value_id = Some("sigval-doc".to_owned());
+    let mut nested = countersignature("csig", vec![pki.signer_der.clone()], "sigval-doc");
+    nested.signing_certificate = Some(SigningCertificateSpec::v1(pki.signer_der.clone()));
+    parent.countersignatures = vec![CounterSignatureSpec::new(nested)];
+    let spec = DossierSpec {
+        document_signature: Some(parent),
+        ..Default::default()
+    };
+    let xml = build(
+        &spec,
+        &[("doc", &pki.signer_key), ("csig", &pki.signer_key)],
+    );
+    let directory = scratch();
+    let path = write_dossier(&directory, &xml);
+
+    let output = run(&[
+        "verify",
+        path.to_str().unwrap(),
+        "--at",
+        AT,
+        "--trust-store",
+        stores.trust().to_str().unwrap(),
+        "--revocation-store",
+        stores.revocation().to_str().unwrap(),
+    ]);
+    let text = String::from_utf8(output.stdout).expect("UTF-8");
+    assert!(text.contains("[1] countersignature signature: "), "{text}");
+    assert!(text.contains("(countersignature of signature 0)"), "{text}");
+    assert!(
+        text.contains("countersignature_binding_ok: passed"),
+        "{text}"
+    );
 }
 
 /// `--lotl` takes the national lists' signing certificates from the EU list of

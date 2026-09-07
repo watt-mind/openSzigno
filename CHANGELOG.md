@@ -100,6 +100,48 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
   `documents_undetermined`. Human output gains one coverage line per document.
   `schema_version` stays `1`: every addition is additive and no existing field
   changed meaning.
+- **Countersignatures in `verify`.** Both forms a dossier can carry one in are
+  now classified and verified. The XAdES enveloped form (ETSI EN 319 132-1
+  clause 5.2.7.2, ETSI TS 101903 V1.4.1 clause 7.2.4.2) is a `ds:Signature`
+  inside an `xades:CounterSignature` in the countersigned signature's
+  `xades:UnsignedSignatureProperties`; it gets its own placement,
+  `countersignature`, and is verified like any other signature. The e-dossier
+  form (e-dossier specification clauses 3.2.1.3.1 and 3.2.1.3.4.1.3) is an
+  ordinary sibling signature whose signed `es:SignatureProfile/es:Type` says
+  `countersignature`, including the deprecated Hungarian spelling; it keeps its
+  `document` or `dossier` placement and gains the role. Before this, a nested
+  countersignature reached the invalid-placement path, so a valid dossier could
+  be reported as carrying a signature at an undescribed placement.
+- **The countersignature reference scope and binding.** A countersignature
+  must cover the countersigned `ds:SignatureValue`, its own
+  `xades:SignedProperties`, and its own signature-profile object when it
+  carries one — and nothing about documents, because a countersignature
+  attests the parent signature and not the payload. It grants no document
+  coverage: coverage stays with the signature it attests. The
+  `CountersignedSignature` `ds:Reference/@Type` is corroboration only;
+  resolution decides.
+- **New codes** `countersignature_binding_ok` (`passed`),
+  `countersignature_binding_missing` (`failed`),
+  `countersignature_binding_mismatch` (`failed`, the countersignature-wrapping
+  check), `nested_signatures_unsupported` (`info`, on the countersigned
+  signature) and `signatures_unsupported` (`unknown`, on the dossier).
+- **Unsupported nesting is `unknown`-class, never `invalid`.** A signature
+  nested in a shape this build does not support — two `ds:Signature` elements
+  in one `xades:CounterSignature`, or a signature under something that is not
+  `xades:UnsignedSignatureProperties` — keeps its `sig_placement_invalid` with
+  a message that names the reason, but its verdict is left out of the dossier
+  verdict, which is capped at `indeterminate` by `signatures_unsupported`
+  instead. The signature it was dropped into is **not** affected: it records
+  `nested_signatures_unsupported` (`info`) and keeps its own verdict, because
+  it does not cover its own unsigned properties and nothing put there can
+  change what it says. A binding check that actually fails is still a finding
+  and still makes its signature `invalid`.
+- **New JSON.** `data.signatures[].placement` (`document`, `dossier`,
+  `countersignature`, `unknown`), `role` (`signature` or `countersignature`),
+  `parent_signature_index` and `countersigns`. The existing `scope` field is
+  kept as an alias of `placement` and always carries the same value, so no
+  consumer breaks. Human output names the countersigned signature:
+  `countersignature of signature 0`. `schema_version` stays `1`.
 
 - **`--online` revocation fetching**, implemented in the CLI. The
   `openszigno-verify` crate stays network-free and structurally cannot open a

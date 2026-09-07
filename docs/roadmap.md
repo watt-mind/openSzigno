@@ -258,6 +258,23 @@ is written out in
 
 #### Residual risks carried by M3
 
+- **Countersignatures have been implemented against the specifications, not
+  against real material.** Both forms — the XAdES enveloped
+  `xades:CounterSignature` of EN 319 132-1 clause 5.2.7.2 and the e-dossier
+  `es:SignatureProfile/es:Type` form of e-dossier clause 3.2.1.3.4.1.3 — are
+  read from the prose and exercised only against synthetic dossiers this
+  project signs itself. Long explicit chains of countersignatures, where each
+  one references the `ds:SignatureValue` of the previous `CounterSignature`,
+  are permitted by the specification and are classified by the same rules, but
+  no real Microsec dossier carrying one has been verified. A nesting outside
+  the recognised shape is reported as an unsupported placement rather than
+  guessed at, so the failure mode of a wrong reading is a dossier capped at
+  `indeterminate`, not one called `invalid`.
+- **A countersignature's own document coverage is deliberately nil.** If real
+  material turns out to use a countersignature to add coverage of a document
+  the countersigned signature does not reach, this build would report that
+  document as uncovered. That is the conservative direction, but it is a
+  reading of the format and not a proof.
 - **Archive timestamps are still unverified**, so this build makes no claim
   about long-term (B-LTA) re-validation. Closing it needs consented real
   archive-timestamped material or a second implementation to differ against.

@@ -48,7 +48,8 @@ pub use codes::{Check, CheckCode, CheckStatus, Verdict};
 pub use policy::{PolicyReport, TrustListSnapshot, VerifyLimits};
 pub use report::{
     CoverageState, CoverageVia, CoveringSignature, DocumentCoverage, SignatureReport,
-    SignatureScope, SigningCertificateBinding, ValidationTimeSource, VerifyReport, XadesReport,
+    SignatureRole, SignatureScope, SigningCertificateBinding, ValidationTimeSource, VerifyReport,
+    XadesReport,
 };
 pub use revocation::{CertificateRevocation, RevocationOrigin, RevocationStatus};
 pub use trust::{
@@ -324,12 +325,14 @@ pub fn verify(bytes: &[u8], options: &VerifyOptions<'_>) -> Result<VerifyReport,
         ids: &ids,
         namespace,
         allowed_namespaces: &options.parse.allowed_namespaces,
+        signatures: &signature_nodes,
         backend: options.backend,
         limits: &options.limits,
         allow_legacy_algorithms: options.allow_legacy_algorithms,
     };
 
     let mut signatures = Vec::new();
+    let mut nested_unsupported: Vec<(usize, usize)> = Vec::new();
     let mut dossier_crls: Vec<Vec<u8>> = Vec::new();
     let mut dossier_ocsp: Vec<Vec<u8>> = Vec::new();
     let mut dossier_certificates: Vec<ParsedCertificate> = Vec::new();
@@ -558,7 +561,25 @@ pub fn verify(bytes: &[u8], options: &VerifyOptions<'_>) -> Result<VerifyReport,
         }
 
         report.verdict = dsig::signature_verdict(&report.checks);
+        if let Some(parent) = outcome.unsupported_nesting_parent {
+            nested_unsupported.push((parent, index));
+        }
         signatures.push(report);
+    }
+
+    // A nested signature this build does not support says nothing whatever
+    // about the signature it was dropped into: the enclosing signature does
+    // not cover its own unsigned properties, so nothing there can change what
+    // it says. The parent is told, informationally, and keeps its verdict.
+    for (parent, nested) in &nested_unsupported {
+        if let Some(report) = signatures.get_mut(*parent) {
+            report.checks.push(Check::info(
+                CheckCode::NestedSignaturesUnsupported,
+                format!(
+                    "signature {nested} is nested inside this one in a shape this build does not support; it is reported on its own and does not affect this signature's verdict"
+                ),
+            ));
+        }
     }
 
     // --- Stage G: container timestamps ------------------------------------
@@ -644,6 +665,26 @@ pub fn verify(bytes: &[u8], options: &VerifyOptions<'_>) -> Result<VerifyReport,
         ));
     }
 
+    // Incomplete support is not invalidity. A signature at a placement this
+    // build does not describe cannot be judged, so it blocks the dossier with
+    // `unknown` instead of sinking it with the `failed` placement check it
+    // carries in its own right.
+    let unsupported: Vec<String> = signatures
+        .iter()
+        .filter(|signature| unsupported_placement_only(signature))
+        .map(|signature| signature.index.to_string())
+        .collect();
+    if !unsupported.is_empty() {
+        dossier_checks.push(Check::unknown(
+            CheckCode::SignaturesUnsupported,
+            format!(
+                "{} signature(s) sit at a placement this build does not support and could not be judged; indexes: {}",
+                unsupported.len(),
+                unsupported.join(", ")
+            ),
+        ));
+    }
+
     // --- Stage H: document coverage ---------------------------------------
     // Which modelled documents the signatures actually cover. This is a
     // statement about the container, not about any signature: it changes no
@@ -672,6 +713,9 @@ pub fn verify(bytes: &[u8], options: &VerifyOptions<'_>) -> Result<VerifyReport,
 
     let mut verdict = codes::verdict_of(&dossier_checks);
     for signature in &signatures {
+        if unsupported_placement_only(signature) {
+            continue;
+        }
         verdict = verdict.worst(signature.verdict);
     }
 
@@ -698,6 +742,25 @@ pub fn verify(bytes: &[u8], options: &VerifyOptions<'_>) -> Result<VerifyReport,
         documents,
         signatures,
     })
+}
+
+/// Whether a signature is one this build could not judge at all *because of
+/// its placement*, and for no other reason.
+///
+/// Such a signature is left out of the dossier verdict: it carries a `failed`
+/// `sig_placement_invalid` so a caller reading its own entry sees exactly what
+/// happened, but a nesting this build does not implement is missing support,
+/// not evidence of forgery, and under ETSI EN 319 102-1 that is INDETERMINATE.
+/// The dossier is capped through the `signatures_unsupported` check instead. A
+/// signature that failed anything *else* is folded in as usual: a binding or a
+/// digest that actually fails is a finding whatever the placement.
+fn unsupported_placement_only(signature: &SignatureReport) -> bool {
+    signature.placement == SignatureScope::Unknown
+        && signature
+            .checks
+            .iter()
+            .filter(|check| check.status == CheckStatus::Failed)
+            .all(|check| check.code == CheckCode::SigPlacementInvalid)
 }
 
 /// One signature, as the coverage pass sees it.

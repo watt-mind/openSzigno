@@ -18,8 +18,35 @@ pub enum SignatureScope {
     Document,
     /// `//es:Dossier/ds:Signature`, the frame signature.
     Dossier,
+    /// A `ds:Signature` that is the only child of an `xades:CounterSignature`
+    /// inside another signature's `xades:UnsignedSignatureProperties`, as
+    /// ETSI EN 319 132-1 clause 5.2.7.2 and TS 101903 clause 7.2.4.2 define
+    /// it. It attests the enclosing signature's `ds:SignatureValue`, never
+    /// the payload.
+    Countersignature,
     /// Anywhere else, which the e-dossier placement rules do not describe.
+    /// This is the *unsupported placement* state: the signature is reported
+    /// with `sig_placement_invalid` and a message naming the reason, and its
+    /// verdict is deliberately kept out of the dossier verdict, because
+    /// incomplete support is not evidence of forgery.
     Unknown,
+}
+
+/// Whether a signature stands on its own or attests another signature.
+///
+/// The role is orthogonal to the placement: a countersignature reaches the
+/// container in two shapes. The XAdES one nests inside the countersigned
+/// signature (`placement: countersignature`), and the e-dossier one is an
+/// ordinary document- or dossier-level signature whose signed
+/// `es:SignatureProfile/es:Type` says `countersignature` and whose references
+/// include another signature's `ds:SignatureValue`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SignatureRole {
+    /// An ordinary signature over container content.
+    Signature,
+    /// A signature whose subject is another signature's `ds:SignatureValue`.
+    Countersignature,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -188,7 +215,24 @@ pub struct XadesReport {
 #[derive(Clone, Debug, Serialize)]
 pub struct SignatureReport {
     pub index: usize,
+    /// The placement, under its original field name.
+    ///
+    /// Kept as an alias of [`SignatureReport::placement`] so no consumer of
+    /// the phase-3 report breaks; both fields always carry the same value.
     pub scope: SignatureScope,
+    /// Where this signature sits: `document`, `dossier`, `countersignature`,
+    /// or `unknown` for a nesting this build does not support.
+    pub placement: SignatureScope,
+    /// Whether this signature attests container content or another signature.
+    pub role: SignatureRole,
+    /// The index into `data.signatures` of the signature this one is embedded
+    /// in, for a `countersignature` placement. `null` otherwise, including for
+    /// an e-dossier-form countersignature, which is a sibling and not nested.
+    pub parent_signature_index: Option<usize>,
+    /// The indexes into `data.signatures` of every signature whose
+    /// `ds:SignatureValue` this signature's references resolve to. Empty for
+    /// an ordinary signature.
+    pub countersigns: Vec<usize>,
     pub document_index: Option<usize>,
     pub signature_id: Option<String>,
     pub verdict: Verdict,

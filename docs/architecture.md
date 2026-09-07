@@ -23,6 +23,11 @@ checked.
   [Archive timestamps](#archive-timestamps);
 - XAdES level detection (B-B, B-T, B-LT, B-LTA), scheme-level trusted-list
   `Qualifications` extensions, and signature-policy processing;
+- any countersignature nesting other than a single `ds:Signature` inside an
+  `xades:CounterSignature` in the countersigned signature's
+  `xades:UnsignedSignatureProperties`; such a signature is reported at an
+  unsupported placement and caps the dossier at `indeterminate`, never
+  `invalid`. See [Countersignatures](#countersignatures);
 - decryption of encrypted payloads, the M4 milestone described in
   [roadmap.md](roadmap.md).
 
@@ -728,10 +733,11 @@ Per `ds:Signature`, in document order, stopping early where continuing would be
 meaningless:
 
 1. **Structure and policy.** `ds:SignedInfo` and `ds:SignatureValue` are
-   present; the signature sits at `//es:Document/ds:Signature` or
-   `//es:Dossier/ds:Signature`; the canonicalization, signature, and digest
-   algorithms are inside the pinned allowlist; every transform is inside the
-   transform allowlist; every reference URI is `""` or `#id`; every `#id`
+   present; the signature sits at `//es:Document/ds:Signature`,
+   `//es:Dossier/ds:Signature`, or inside an `xades:CounterSignature` (see
+   [Countersignatures](#countersignatures)); the canonicalization, signature,
+   and digest algorithms are inside the pinned allowlist; every transform is
+   inside the transform allowlist; every reference URI is `""` or `#id`; every `#id`
    resolves to exactly one node in the ID space `openszigno-core` validated;
    and the mandated e-dossier reference set is covered. Any failure here makes
    the verdict `invalid` and the later stages are not attempted — there is no
@@ -779,10 +785,12 @@ strongest defence against XML signature wrapping, and it is a check a generic
 XMLDSig library cannot perform, because it depends on the container's
 semantics rather than on what the signature claims about itself.
 
-| Placement | Must cover |
-| --- | --- |
-| `//es:Document/ds:Signature` | the document's `es:DocumentProfile`, the document's payload `ds:Object`, the signature's own signature-profile object, and, when XAdES qualifying properties are present, the `xades:SignedProperties`. |
-| `//es:Dossier/ds:Signature` | `/es:Dossier/es:DossierProfile`, `/es:Dossier/es:Documents`, the signature's own signature-profile object, and the same `xades:SignedProperties`. |
+| Placement | `placement` | Must cover |
+| --- | --- | --- |
+| `//es:Document/ds:Signature` | `document` | the document's `es:DocumentProfile`, the document's payload `ds:Object`, the signature's own signature-profile object, and, when XAdES qualifying properties are present, the `xades:SignedProperties`. |
+| `//es:Dossier/ds:Signature` | `dossier` | `/es:Dossier/es:DossierProfile`, `/es:Dossier/es:Documents`, the signature's own signature-profile object, and the same `xades:SignedProperties`. |
+| the `ds:Signature` inside an `xades:CounterSignature` | `countersignature` | the countersigned signature's `ds:SignatureValue`, its own `xades:SignedProperties`, and its own signature-profile object **when it carries one**. Nothing about documents: a countersignature attests the parent signature, not the payload. See [Countersignatures](#countersignatures). |
+| any other nesting | `unknown` | undefined. This is the *unsupported placement* state; the mandated set is `reference_scope_unknown`. |
 
 A reference covers a required element when the element is the resolved node or
 a descendant of it, so a `URI=""` reference covers everything, and a reference
@@ -885,6 +893,97 @@ format with sibling documents invites, and the tool must not invite it.
 A `not_modelled` document is listed and is in none of the three counts: it is
 not a modelled document, the format's mandated set for it is undefined, and
 the parser already reports it as a conformance warning.
+
+### Countersignatures
+
+A countersignature signs another signature's `ds:SignatureValue`. It says
+"I attest that this signature exists", not "I attest this content", and the
+report keeps those apart: a countersignature has a `role`, it names what it
+countersigns, and it grants no document coverage whatever.
+
+Two forms reach a dossier, and both are recognised.
+
+**The XAdES enveloped form.** ETSI EN 319 132-1 clause 5.2.7.2 (and ETSI
+TS 101903 V1.4.1 clause 7.2.4.2 before it) defines the `CounterSignature`
+unsigned qualifying property. Its XML Schema type is a sequence of exactly one
+`ds:Signature`, and its content "shall be a XMLDSIG or XAdES signature whose
+`ds:SignedInfo` shall contain one `ds:Reference` element referencing the
+`ds:SignatureValue` element of the embedding and countersigned XAdES
+signature". Clause 5.2.7.1 (TS 101903 clause 7.2.4.1) additionally defines the
+`ds:Reference/@Type` value
+`http://uri.etsi.org/01903#CountersignedSignature`, whose "only purpose ... is
+to serve as an easy identification of a signature as being a
+countersignature". This build treats the `Type` exactly that way: as
+corroboration. **Resolution decides**, because an attacker writes the
+attribute. Such a signature is reported with `placement: "countersignature"`,
+`role: "countersignature"`, and `parent_signature_index`.
+
+**The e-dossier form.** The Microsec e-dossier specification describes
+countersignatures in its own terms. Clause 3.2.1.3.1 adds to the mandated
+reference set of a document-level signature: "In case of a countersign, the
+`ds:SignatureValue` element of the countersigned signatures", and the frame
+signature's set carries the same addition. Clause 3.2.1.3.4.1.3 gives the
+signed `es:SignatureProfile/es:Type` its values: `signature` "signature on a
+document or dossier (i.e. not a countersignature)" and `countersignature` "it
+is a countersignature", plus the deprecated Hungarian spellings `aláírás` and
+`ellenjegyzés` the schema keeps for compatibility. A signature in this form is
+an ordinary sibling at a defined placement, so it keeps `placement:
+"document"` or `"dossier"` and gains `role: "countersignature"` and
+`countersigns`. The declaration is *signed* — the profile object is inside the
+mandated reference set — but it still only declares a role; what is actually
+attested is decided by what the references resolve to.
+
+Both forms are verified as signatures in their own right: every stage from
+structure to revocation applies, unchanged. What countersignatures add is the
+binding.
+
+| Code | Status | Meaning |
+| --- | --- | --- |
+| `countersignature_binding_ok` | `passed` | The countersignature's references resolve to the `ds:SignatureValue` it must attest: for the XAdES form, the signature it is embedded in; for the e-dossier form, at least one other signature's. |
+| `countersignature_binding_missing` | `failed` | It does not. A nested signature that binds nothing is not a countersignature of anything, and a profile that declares `countersignature` while referencing no other signature's value contradicts itself. |
+| `countersignature_binding_mismatch` | `failed` | A nested signature's reference resolves to a `ds:SignatureValue` other than its lexical parent's. This is the wrapping shape: the element says "I countersign the signature I am inside" and the reference says otherwise. |
+
+`countersigns` lists the indexes of every signature whose `ds:SignatureValue`
+this one's references resolve to; a signature never countersigns itself.
+
+**Coverage.** A countersignature covers no document. Document coverage stays
+with the signature it attests, and the two `via` routes remain `direct` and
+`frame`. This is not an omission: what a countersignature references is a
+signature value, and a signature value is not a document.
+
+#### The support boundary
+
+Only the shape above is a countersignature. Everything else nested inside a
+`ds:Signature` is **unsupported placement**, and unsupported is deliberately
+not a synonym for invalid.
+
+| Shape | Answer |
+| --- | --- |
+| One `ds:Signature` inside `xades:CounterSignature` inside the enclosing signature's `xades:UnsignedSignatureProperties`, in any recognised XAdES namespace | `placement: "countersignature"` |
+| An `xades:CounterSignature` holding two or more `ds:Signature` elements | `unknown`. `CounterSignatureType` is a sequence of exactly one, so two leave two candidate parents and no rule for choosing. |
+| A `ds:Signature` nested under anything that is not `xades:UnsignedSignatureProperties/xades:CounterSignature` | `unknown` |
+
+An unsupported nesting produces three things, and no more:
+
+- the nested signature keeps its `sig_placement_invalid` (`failed`) and a
+  message that **names the reason**, so its own entry says exactly what
+  happened;
+- the enclosing signature records `nested_signatures_unsupported` (`info`) and
+  its verdict is untouched. It has to be: the enclosing signature does not
+  cover its own unsigned properties, so nothing dropped in there can change
+  what it says. A dossier where an attacker appends a nested element must not
+  become a dossier whose good signature reads as broken;
+- the dossier records `signatures_unsupported` (`unknown`), and the nested
+  signature's own verdict is **left out of the dossier verdict**.
+
+That last rule is the point of the section. A nesting this build does not
+implement is missing support, which under ETSI EN 319 102-1 is INDETERMINATE,
+not TOTAL-FAILED. So the dossier is capped at `indeterminate` and never made
+`invalid` by an unsupported placement alone. A signature that failed something
+*else* as well is folded in as usual, and a binding check that actually fails
+is a finding: `countersignature_binding_missing` and
+`countersignature_binding_mismatch` make their signature `invalid` and the
+dossier with it.
 
 ### Algorithm policy
 
@@ -1779,6 +1878,10 @@ verify anything.
       {
         "index": 0,
         "scope": "document",
+        "placement": "document",
+        "role": "signature",
+        "parent_signature_index": null,
+        "countersigns": [],
         "document_index": 0,
         "signature_id": "sig-doc",
         "verdict": "indeterminate",
@@ -1914,6 +2017,15 @@ Notes on the shape:
   of the same name only: a `covered_unverified` or `not_modelled` document is
   in `data.documents` and in none of the three. See
   [Document coverage](#document-coverage).
+- `placement` is `document`, `dossier`, `countersignature`, or `unknown`, and
+  `scope` is an alias of it kept from the phase-3 report: both always carry the
+  same value. `role` is `signature` or `countersignature`.
+  `parent_signature_index` names the signature a nested
+  `xades:CounterSignature` is embedded in and is `null` for every other
+  placement, including an e-dossier-form countersignature, which is a sibling
+  and not a nesting. `countersigns` lists the indexes of every signature whose
+  `ds:SignatureValue` this one's references resolve to. See
+  [Countersignatures](#countersignatures).
 - `checks` at the top level belongs to the dossier; each signature carries its
   own `checks`, ordered by pipeline stage, so a consumer reading top to bottom
   sees the same order the tool evaluated.
@@ -2010,13 +2122,18 @@ verify), and `revocation_not_checked` (the caller switched revocation off).
 | `no_signatures` | `unknown` | The dossier carries no `ds:Signature`, so there is nothing that could be valid. |
 | `signature_count_within_limits` | `passed` | The signature count is within `max_signatures`. |
 | `signature_limit_exceeded` | `failed` | More signatures than `max_signatures`; the excess is not examined. |
+| `signatures_unsupported` | `unknown` | One or more signatures sit at a placement this build does not support; the message names the count and the indexes. Blocking, so such a dossier cannot be `valid`. `unknown`, never `failed`: incomplete support is missing information, not evidence of forgery, and those signatures' own verdicts are left out of the dossier verdict. |
 | `documents_all_covered` | `passed` / `info` | Every modelled document is covered. `passed` when each is covered by a signature that verified; `info` when at least one is covered only by signatures that did not verify, because that finding is already on those signatures. See [Document coverage](#document-coverage). |
 | `documents_uncovered` | `unknown` | One or more modelled documents are covered by no signature; the message names the count and the indexes. Blocking, so a dossier with an unsigned document cannot be `valid`. `unknown`, not `failed`: an unsigned sibling is missing information, not evidence against a signature that did verify. |
 | `documents_coverage_undetermined` | `unknown` | The coverage of one or more modelled documents could not be determined, because a signature that might cover them could not be evaluated. The message names the count. Blocking, for the same reason. |
 | `sig_structure` | `passed` | `ds:SignedInfo`, `ds:SignatureValue`, the methods, and at least one reference are present and within limits. |
 | `sig_structure_invalid` | `failed` | One of those is missing, malformed, or over a limit. |
-| `sig_placement` | `passed` | The signature is at a placement the e-dossier format defines. |
-| `sig_placement_invalid` | `failed` | It is not. |
+| `sig_placement` | `passed` | The signature is at a placement this build describes: `//es:Document/ds:Signature`, `//es:Dossier/ds:Signature`, or the `ds:Signature` inside an `xades:CounterSignature`. |
+| `sig_placement_invalid` | `failed` | It is not, and the message names the reason. On its own this does **not** make the dossier `invalid`; see `signatures_unsupported` and [Countersignatures](#countersignatures). |
+| `countersignature_binding_ok` | `passed` | The countersignature's references resolve to the `ds:SignatureValue` it must attest. |
+| `countersignature_binding_missing` | `failed` | They do not, so nothing is countersigned. |
+| `countersignature_binding_mismatch` | `failed` | A nested signature resolves to a `ds:SignatureValue` other than its lexical parent's. The countersignature-wrapping check. |
+| `nested_signatures_unsupported` | `info` | A signature is nested inside this one in a shape this build does not support. Informational: the enclosing signature does not cover its own unsigned properties, so nothing dropped in there can change what it says. |
 | `c14n_method_allowed` | `passed` | `ds:CanonicalizationMethod` is implemented. |
 | `c14n_unsupported` | `failed` | A canonicalization algorithm, on `ds:SignedInfo` or in a transform, is known but not implemented. |
 | `signature_algorithm_allowed` | `passed` | `ds:SignatureMethod` is inside the allowlist. |
@@ -2162,7 +2279,15 @@ the aggregation is:
 - **`invalid`** when any signature is `invalid`, or a container timestamp's
   imprint or token contradicts the container;
 - **`indeterminate`** otherwise, which includes a dossier whose every
-  signature is `valid` but which holds a document no signature covers.
+  signature is `valid` but which holds a document no signature covers, and one
+  that carries a signature at a placement this build does not support.
+
+One class of signature is deliberately excluded from that fold: a signature
+whose only failure is `sig_placement_invalid`. Its own entry keeps the failed
+check, but the dossier hears about it through `signatures_unsupported`
+(`unknown`) instead, because a nesting this build does not implement is
+missing support rather than evidence against anything. See
+[the support boundary](#the-support-boundary).
 
 **Only checks about the signature itself can make it `invalid`:** the
 reference digests, the signature value, the algorithm policy, the reference
