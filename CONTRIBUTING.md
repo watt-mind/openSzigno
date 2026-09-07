@@ -73,6 +73,19 @@ cargo build --release --locked
 Coverage is reported by CI; to reproduce it locally see
 [docs/testing.md](docs/testing.md#coverage).
 
+## Local hooks
+
+One-time install (requires the [lefthook](https://lefthook.dev) binary):
+
+```sh
+lefthook install
+```
+
+Pre-commit then runs `cargo fmt --all` (re-staged automatically) and
+`cargo clippy --workspace --all-targets --locked -- -D warnings`; commit-msg
+enforces the Conventional Commits subject shape above via
+`scripts/commit-msg.sh`. Same checks run in CI, so a red hook is a red build.
+
 ## Tests and fixtures
 
 - Every behavioural change needs a test. A security fix needs a regression

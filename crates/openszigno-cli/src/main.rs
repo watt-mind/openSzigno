@@ -842,7 +842,14 @@ mod tests {
     #[test]
     fn roll_back_removes_the_files_this_run_created() {
         let temporary = tempfile::tempdir().expect("temporary directory is available");
-        let directory = OutputDir::open(temporary.path()).expect("output directory opens");
+        // Resolve symlinks (e.g. macOS /var -> /private/var in TMPDIR): the
+        // tool rejects symlinked output paths by design, so tests must pass
+        // a resolved path, exactly as the error message instructs callers.
+        let resolved = temporary
+            .path()
+            .canonicalize()
+            .expect("temporary path resolves");
+        let directory = OutputDir::open(&resolved).expect("output directory opens");
         for name in ["first.txt", "second.txt"] {
             let mut file = directory.create_new_file(name).expect("file is created");
             file.write_all(b"payload").expect("file is writable");
@@ -870,7 +877,12 @@ mod tests {
     #[test]
     fn roll_back_reports_that_files_may_remain() {
         let temporary = tempfile::tempdir().expect("temporary directory is available");
-        let directory = OutputDir::open(temporary.path()).expect("output directory opens");
+        // See above: pass a resolved path so the symlink guard does not fire.
+        let resolved = temporary
+            .path()
+            .canonicalize()
+            .expect("temporary path resolves");
+        let directory = OutputDir::open(&resolved).expect("output directory opens");
         let created = vec!["never-created.txt".to_owned()];
 
         let error = roll_back(

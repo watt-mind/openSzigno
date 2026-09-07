@@ -22,6 +22,20 @@ fn parse_json(output: &Output) -> Value {
     serde_json::from_slice(&output.stdout).expect("stdout must be exactly one JSON value")
 }
 
+/// Temporary directory with symlinks resolved.
+///
+/// The extraction guard rejects output paths containing symlinked components
+/// (e.g. macOS `TMPDIR` lives under `/var -> /private/var`), so the harness
+/// must pass a resolved path — exactly what the guard tells callers to do.
+fn resolved_tempdir() -> (TempDir, PathBuf) {
+    let directory = tempdir().expect("temporary directory is available");
+    let resolved = directory
+        .path()
+        .canonicalize()
+        .expect("temporary path resolves");
+    (directory, resolved)
+}
+
 #[test]
 fn inspect_list_and_validate_emit_agent_json() {
     for command in ["inspect", "list", "validate-structure"] {
@@ -43,8 +57,8 @@ fn inspect_list_and_validate_emit_agent_json() {
 
 #[test]
 fn extracts_plain_and_zip_payloads_without_clobbering() {
-    let directory = tempdir().unwrap();
-    let output_dir = directory.path().join("out");
+    let (_directory, root) = resolved_tempdir();
+    let output_dir = root.join("out");
     let output = run(&[
         "extract",
         fixture("plain-base64.es3").to_str().unwrap(),
@@ -70,7 +84,7 @@ fn extracts_plain_and_zip_payloads_without_clobbering() {
     assert_eq!(second.status.code(), Some(5));
     assert_eq!(parse_json(&second)["errors"][0]["code"], "output_exists");
 
-    let zip_dir = directory.path().join("zip");
+    let zip_dir = root.join("zip");
     let zip = run(&[
         "extract",
         fixture("zip-base64.es3").to_str().unwrap(),
@@ -97,12 +111,12 @@ fn emits_stable_errors_for_unsafe_inputs() {
     assert_eq!(response["ok"], false);
     assert_eq!(response["errors"][0]["code"], "duplicate_id");
 
-    let directory = tempdir().unwrap();
+    let (_directory, root) = resolved_tempdir();
     let traversal = run(&[
         "extract",
         fixture("traversal-title.es3").to_str().unwrap(),
         "--output",
-        directory.path().join("out").to_str().unwrap(),
+        root.join("out").to_str().unwrap(),
         "--json",
     ]);
     assert_eq!(traversal.status.code(), Some(5));
@@ -115,7 +129,7 @@ fn emits_stable_errors_for_unsafe_inputs() {
         "extract",
         fixture("invalid-base64.es3").to_str().unwrap(),
         "--output",
-        directory.path().join("invalid").to_str().unwrap(),
+        root.join("invalid").to_str().unwrap(),
         "--json",
     ]);
     assert_eq!(invalid.status.code(), Some(5));
@@ -124,12 +138,12 @@ fn emits_stable_errors_for_unsafe_inputs() {
 
 #[test]
 fn encrypted_documents_are_skipped_explicitly() {
-    let directory = tempdir().unwrap();
+    let (_directory, root) = resolved_tempdir();
     let output = run(&[
         "extract",
         fixture("encrypted.es3").to_str().unwrap(),
         "--output",
-        directory.path().join("out").to_str().unwrap(),
+        root.join("out").to_str().unwrap(),
         "--json",
     ]);
     assert!(output.status.success());
@@ -159,8 +173,8 @@ fn all_commands_have_human_output_with_explicit_verification_boundaries() {
         assert!(!stdout.contains("signature is valid"));
     }
 
-    let directory = tempdir().unwrap();
-    let output_dir = directory.path().join("human-extract");
+    let (_directory, root) = resolved_tempdir();
+    let output_dir = root.join("human-extract");
     let output = run(&[
         "extract",
         fixture("plain-base64.es3").to_str().unwrap(),
@@ -184,9 +198,11 @@ fn all_commands_have_human_output_with_explicit_verification_boundaries() {
 fn rejects_symlinked_output_directories() {
     use std::os::unix::fs::symlink;
 
-    let directory = tempdir().unwrap();
-    let real = directory.path().join("real");
-    let linked = directory.path().join("linked");
+    // Resolve the harness root so the rejection fires on the deliberately
+    // symlinked leaf, not on an incidental TMPDIR component.
+    let (_directory, root) = resolved_tempdir();
+    let real = root.join("real");
+    let linked = root.join("linked");
     std::fs::create_dir(&real).unwrap();
     symlink(&real, &linked).unwrap();
 
@@ -210,9 +226,10 @@ fn rejects_symlinked_output_directories() {
 fn rejects_symlinked_intermediate_output_components() {
     use std::os::unix::fs::symlink;
 
-    let directory = tempdir().unwrap();
-    let real = directory.path().join("real");
-    let linked = directory.path().join("linked");
+    // See above: resolve the harness root, keep the symlinked leaf.
+    let (_directory, root) = resolved_tempdir();
+    let real = root.join("real");
+    let linked = root.join("linked");
     std::fs::create_dir(&real).unwrap();
     symlink(&real, &linked).unwrap();
     let nested = linked.join("nested").join("out");
@@ -267,10 +284,10 @@ fn count_entries(directory: &Path) -> usize {
 }
 
 fn extract_titles(titles: &[&str]) -> (Output, TempDir, PathBuf) {
-    let directory = tempdir().expect("temporary directory is available");
+    let (directory, root) = resolved_tempdir();
     let owned: Vec<String> = titles.iter().map(|title| (*title).to_owned()).collect();
-    let input = write_dossier(directory.path(), &owned);
-    let output_dir = directory.path().join("out");
+    let input = write_dossier(&root, &owned);
+    let output_dir = root.join("out");
     let output = run(&[
         "extract",
         input.to_str().unwrap(),
@@ -324,8 +341,8 @@ fn rejects_titles_that_differ_only_by_unicode_composition() {
 fn extracted_files_are_private_to_the_user() {
     use std::os::unix::fs::PermissionsExt;
 
-    let directory = tempdir().unwrap();
-    let output_dir = directory.path().join("modes");
+    let (_directory, root) = resolved_tempdir();
+    let output_dir = root.join("modes");
     let output = run(&[
         "extract",
         fixture("plain-base64.es3").to_str().unwrap(),

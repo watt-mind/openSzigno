@@ -79,7 +79,13 @@ fn opt_in_private_fixture_smoke() {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
 
-    let output_directory = tempdir().expect("temporary output directory must be available");
+    // Resolve symlinks (e.g. macOS /var -> /private/var in TMPDIR): the tool
+    // rejects symlinked output components by design. Aggregate-only handling.
+    let _output_directory = tempdir().expect("temporary output directory must be available");
+    let output_directory = _output_directory
+        .path()
+        .canonicalize()
+        .expect("temporary output path resolves");
     let commands = ["inspect", "list", "validate-structure"];
     for command in commands {
         let output = Command::new(env!("CARGO_BIN_EXE_openszigno"))
@@ -99,7 +105,7 @@ fn opt_in_private_fixture_smoke() {
         .arg("extract")
         .arg(&fixture)
         .arg("--output")
-        .arg(output_directory.path())
+        .arg(&output_directory)
         .arg("--json")
         .output()
         .expect("private extraction smoke must start");
@@ -117,7 +123,7 @@ fn opt_in_private_fixture_smoke() {
         extracted > 0,
         "private fixture had no extractable documents"
     );
-    let files_written = std::fs::read_dir(output_directory.path())
+    let files_written = std::fs::read_dir(&output_directory)
         .expect("private temporary output must be readable")
         .filter(|entry| {
             entry
