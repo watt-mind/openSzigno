@@ -75,11 +75,12 @@ jobs:
           components: llvm-tools-preview
       - uses: taiki-e/install-action@cargo-llvm-cov
       - uses: Swatinem/rust-cache@v2
-      - name: Measure line coverage and enforce the floor
+      - name: Measure line coverage
+        run: cargo llvm-cov --workspace --locked --lcov --output-path lcov.info
+      - name: Report and enforce the coverage floor
         run: |
-          cargo llvm-cov --workspace --locked --lcov --output-path lcov.info \
-            --fail-under-lines 85
           cargo llvm-cov report --summary-only | tee coverage-summary.txt
+          cargo llvm-cov report --fail-under-lines 85
       - uses: actions/upload-artifact@v4
         with:
           name: coverage

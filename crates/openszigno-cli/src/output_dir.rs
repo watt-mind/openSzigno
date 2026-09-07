@@ -37,7 +37,7 @@ fn reject_link_components(path: &Path) -> Result<(), OpenError> {
         match std::fs::symlink_metadata(&current) {
             Ok(metadata) if metadata.file_type().is_symlink() => {
                 return Err(OpenError::Unsafe(
-                    "output directory path must not contain symlinks",
+                    "output directory path must not contain symlinks; pass a resolved path",
                 ));
             }
             Ok(metadata) => reject_reparse_point(&metadata)?,
@@ -60,7 +60,7 @@ fn reject_reparse_point(metadata: &std::fs::Metadata) -> Result<(), OpenError> {
 
     if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
         return Err(OpenError::Unsafe(
-            "output directory path must not contain symlinks",
+            "output directory path must not contain symlinks; pass a resolved path",
         ));
     }
     Ok(())
