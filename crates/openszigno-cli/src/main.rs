@@ -1564,6 +1564,11 @@ fn dossier_overview(dossier: &Dossier) -> Value {
         "documents": dossier.documents.len(),
         "signatures_present": dossier.signatures_present,
         "timestamps_present": dossier.timestamps_present,
+        "signature_inventory": {
+            "verified": false,
+            "signatures": dossier.signatures,
+            "timestamps": dossier.timestamps,
+        },
         "nested_dossiers": dossier
             .documents
             .iter()
@@ -1814,6 +1819,93 @@ fn write_diagnostic(line: &str) {
     let _ = writeln!(io::stderr(), "{line}");
 }
 
+/// Print the claimed signature inventory, one line per signature and one per
+/// container timestamp.
+///
+/// Every line starts with `(unverified)`, because nothing on it was checked:
+/// these are the dossier's own claims about its signature material, read out
+/// of the XML at parse time.
+fn write_signature_inventory(out: &mut impl Write, inventory: &Value) -> io::Result<()> {
+    let signatures = inventory["signatures"]
+        .as_array()
+        .map_or(&[][..], |items| items);
+    let timestamps = inventory["timestamps"]
+        .as_array()
+        .map_or(&[][..], |items| items);
+    if signatures.is_empty() && timestamps.is_empty() {
+        return Ok(());
+    }
+    writeln!(
+        out,
+        "Signature inventory (claimed by the dossier; nothing below was verified):"
+    )?;
+    for (index, signature) in signatures.iter().enumerate() {
+        let mut line = format!(
+            "(unverified) signature {index}: placement={}",
+            display_json_string(&signature["placement"])
+        );
+        if let Some(document) = signature["document_index"].as_u64() {
+            line.push_str(&format!(", document={document}"));
+        }
+        if let Some(id) = signature["id"].as_str() {
+            line.push_str(&format!(", id={id}"));
+        }
+        if let Some(parent) = signature["parent_signature_id"].as_str() {
+            line.push_str(&format!(", inside={parent}"));
+        }
+        line.push_str(&format!(", references={}", signature["reference_count"]));
+        let properties = join_json_strings(&signature["xades_properties"]);
+        if !properties.is_empty() {
+            line.push_str(&format!(", xades={properties}"));
+        }
+        let evidence = &signature["evidence"];
+        line.push_str(&format!(
+            ", certificates={}, crls={}, ocsp={}, signature-timestamps={}, archive-timestamps={}",
+            evidence["certificates"],
+            evidence["crls"],
+            evidence["ocsp_responses"],
+            evidence["signature_timestamps"],
+            evidence["archive_timestamps"]
+        ));
+        if let Some(claimed) = signature["claimed_signing_time"].as_str() {
+            line.push_str(&format!(", claimed signing time={claimed}"));
+        }
+        writeln!(out, "{line}")?;
+    }
+    for (index, timestamp) in timestamps.iter().enumerate() {
+        let mut line = format!(
+            "(unverified) timestamp {index}: placement={}",
+            display_json_string(&timestamp["placement"])
+        );
+        if let Some(document) = timestamp["document_index"].as_u64() {
+            line.push_str(&format!(", document={document}"));
+        }
+        line.push_str(&format!(", includes={}", timestamp["include_count"]));
+        line.push_str(if timestamp["has_token"] == Value::Bool(true) {
+            ", token=present"
+        } else {
+            ", token=absent"
+        });
+        writeln!(out, "{line}")?;
+    }
+    Ok(())
+}
+
+/// Join an array of JSON strings for a human line. The values come from the
+/// core inventory, which only ever emits plain element names.
+fn join_json_strings(value: &Value) -> String {
+    value
+        .as_array()
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>()
+                .join("+")
+        })
+        .unwrap_or_default()
+}
+
 fn write_human_success(command: &str, response: &Response) -> io::Result<()> {
     let stdout = io::stdout();
     let mut out = stdout.lock();
@@ -1833,6 +1925,7 @@ fn write_human_success(command: &str, response: &Response) -> io::Result<()> {
                 "Timestamps present: {} (not verified)",
                 dossier["timestamps_present"]
             )?;
+            write_signature_inventory(&mut out, &dossier["signature_inventory"])?;
         }
         "list" => {
             let dossier = &response.data["dossier"];

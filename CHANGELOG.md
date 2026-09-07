@@ -12,6 +12,28 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
 
 ### Added (M3: container timestamps, online revocation, trusted-list identities)
 
+- **Unverified signature inventory in `inspect` and `list`.** The structural
+  model now describes every `ds:Signature` and container `es:TimeStamp` a
+  dossier carries, built at parse time from the XML alone. Per signature:
+  `id`, `placement` (`document`, `dossier`, `nested_in_signature`, `other`),
+  `document_index`, `parent_signature_id`, `canonicalization_method`,
+  `signature_method`, `digest_methods`, `reference_count`, `reference_uris`
+  (same-document fragments, at most 16), `xades_namespace`,
+  `xades_properties` (at most 32), `evidence` (element counts of certificates,
+  CRLs, OCSP responses, signature timestamps, and archive timestamps),
+  `claimed_signing_time`, and `key_info_certificates`. Per container
+  timestamp: `placement`, `document_index`, `include_count`, and `has_token`.
+  It appears as `dossier.signature_inventory` in both commands' JSON, always
+  beside `"verified": false`, and human `inspect` prints one `(unverified)`
+  line per entry. **None of it is verified**: no cryptography is performed,
+  nothing is decoded, no certificate value is read, and no reference is
+  resolved. It reports what a dossier claims, never whether the claim is true;
+  `verify` remains the only command that answers that. `signatures_present`
+  and `timestamps_present` are unchanged, and `verify` is untouched. The
+  inventory describes at most 64 signatures and 64 container timestamps; a
+  dossier with more produces the new structural warning
+  `signature_inventory_truncated`, which, like every structural warning,
+  changes no exit status.
 - **`extract --document <SELECTOR>`**, repeatable, extracts only the documents
   it names. A selector is either `#<index>` in source XML order or an exact
   `object_ref` — the `ds:Object` `Id` the `DocumentProfile` `OBJREF` points at.

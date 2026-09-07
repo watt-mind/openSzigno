@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-use serde_json::Value;
+use serde_json::{Value, json};
 use tempfile::TempDir;
 
 /// A temporary directory under a fully resolved base path.
@@ -1400,4 +1400,211 @@ fn a_closed_stdout_is_an_io_failure_for_failures_and_usage_errors_too() {
             "the CLI must not panic"
         );
     }
+}
+
+/// A synthetic dossier with one document-level signature carrying XAdES
+/// properties and evidence containers, a countersignature, and a dossier-level
+/// `es:TimeStamp`. Nothing in it is real: the signature value, the
+/// certificate, and the token are all the placeholder `AA==`, which is exactly
+/// the point, because the inventory reports claims and verifies nothing.
+const SIGNED_INVENTORY: &str = concat!(
+    r#"<?xml version="1.0" encoding="UTF-8"?>"#,
+    r#"<es:Dossier xmlns:es="https://www.microsec.hu/ds/e-szigno30#""#,
+    r#" xmlns:ds="http://www.w3.org/2000/09/xmldsig#""#,
+    r#" xmlns:xades="http://uri.etsi.org/01903/v1.3.2#">"#,
+    r#"<es:DossierProfile Id="DossierProfile1" OBJREF="Object0">"#,
+    "<es:Title>Synthetic signed fixture</es:Title>",
+    "<es:CreationDate>2026-01-01T00:00:00Z</es:CreationDate></es:DossierProfile>",
+    r#"<es:Documents Id="Object0"><es:Document>"#,
+    r#"<es:DocumentProfile Id="DocumentProfile0" OBJREF="DocumentObject0">"#,
+    "<es:Title>hello.txt</es:Title><es:CreationDate>2026-01-01T00:00:00Z</es:CreationDate>",
+    r#"<es:Format><es:MIME-Type type="text" subtype="plain" extension="txt"/></es:Format>"#,
+    r#"<es:SourceSize sizeValue="5" sizeUnit="B"/>"#,
+    r#"<es:BaseTransform><es:Transform Algorithm="base64"/></es:BaseTransform>"#,
+    "</es:DocumentProfile>",
+    r#"<ds:Object Id="DocumentObject0">aGVsbG8=</ds:Object>"#,
+    r#"<ds:Signature Id="doc-sig"><ds:SignedInfo>"#,
+    r#"<ds:CanonicalizationMethod Algorithm="http://www.w3.org/TR/2001/REC-xml-c14n-20010315"/>"#,
+    r#"<ds:SignatureMethod Algorithm="http://www.w3.org/2001/04/xmldsig-more#rsa-sha256"/>"#,
+    r##"<ds:Reference URI="#DocumentObject0">"##,
+    r#"<ds:DigestMethod Algorithm="http://www.w3.org/2001/04/xmlenc#sha256"/>"#,
+    "<ds:DigestValue>AA==</ds:DigestValue></ds:Reference></ds:SignedInfo>",
+    "<ds:SignatureValue>AA==</ds:SignatureValue>",
+    "<ds:KeyInfo><ds:X509Data><ds:X509Certificate>AA==</ds:X509Certificate>",
+    "</ds:X509Data></ds:KeyInfo>",
+    r##"<ds:Object><xades:QualifyingProperties Target="#doc-sig">"##,
+    "<xades:SignedProperties><xades:SignedSignatureProperties>",
+    "<xades:SigningTime>2026-01-02T03:04:05Z</xades:SigningTime>",
+    "<xades:SigningCertificate><xades:Cert/></xades:SigningCertificate>",
+    "</xades:SignedSignatureProperties></xades:SignedProperties>",
+    "<xades:UnsignedProperties><xades:UnsignedSignatureProperties>",
+    "<xades:CertificateValues>",
+    "<xades:EncapsulatedX509Certificate>AA==</xades:EncapsulatedX509Certificate>",
+    "</xades:CertificateValues>",
+    r#"<xades:CounterSignature><ds:Signature Id="counter-sig"><ds:SignedInfo>"#,
+    r#"<ds:CanonicalizationMethod Algorithm="http://www.w3.org/TR/2001/REC-xml-c14n-20010315"/>"#,
+    r#"<ds:SignatureMethod Algorithm="http://www.w3.org/2001/04/xmldsig-more#rsa-sha256"/>"#,
+    r##"<ds:Reference URI="#doc-sig">"##,
+    r#"<ds:DigestMethod Algorithm="http://www.w3.org/2001/04/xmlenc#sha256"/>"#,
+    "<ds:DigestValue>AA==</ds:DigestValue></ds:Reference></ds:SignedInfo>",
+    "<ds:SignatureValue>AA==</ds:SignatureValue></ds:Signature></xades:CounterSignature>",
+    "</xades:UnsignedSignatureProperties></xades:UnsignedProperties>",
+    "</xades:QualifyingProperties></ds:Object></ds:Signature>",
+    "</es:Document></es:Documents>",
+    r##"<es:TimeStamp><xades:Include URI="#DossierProfile1"/>"##,
+    r##"<xades:Include URI="#Object0"/>"##,
+    "<xades:EncapsulatedTimeStamp>AA==</xades:EncapsulatedTimeStamp></es:TimeStamp>",
+    "</es:Dossier>",
+);
+
+/// Write the synthetic signed dossier and return the directory holding it,
+/// which the caller keeps alive for as long as the path is used.
+fn signed_input() -> (TempDir, PathBuf) {
+    let directory = scratch();
+    let path = directory.path().join("signed.es3");
+    std::fs::write(&path, SIGNED_INVENTORY).expect("the fixture must be writable");
+    (directory, path)
+}
+
+#[test]
+fn inspect_and_list_json_carry_the_unverified_signature_inventory() {
+    let (_directory, path) = signed_input();
+    for command in ["inspect", "list"] {
+        let output = run(&[command, path.to_str().unwrap(), "--json"]);
+        assert!(output.status.success(), "{command} should succeed");
+        let dossier = &parse_json(&output)["data"]["dossier"];
+
+        assert_eq!(dossier["signatures_present"], 2, "{command}");
+        assert_eq!(dossier["timestamps_present"], 1, "{command}");
+        let inventory = &dossier["signature_inventory"];
+        assert_eq!(
+            inventory["verified"], false,
+            "{command} must never present the inventory as verified"
+        );
+
+        let signature = &inventory["signatures"][0];
+        assert_eq!(signature["id"], "doc-sig");
+        assert_eq!(signature["placement"], "document");
+        assert_eq!(signature["document_index"], 0);
+        assert_eq!(signature["parent_signature_id"], Value::Null);
+        assert_eq!(
+            signature["canonicalization_method"],
+            "http://www.w3.org/TR/2001/REC-xml-c14n-20010315"
+        );
+        assert_eq!(
+            signature["signature_method"],
+            "http://www.w3.org/2001/04/xmldsig-more#rsa-sha256"
+        );
+        assert_eq!(
+            signature["digest_methods"],
+            json!(["http://www.w3.org/2001/04/xmlenc#sha256"])
+        );
+        assert_eq!(signature["reference_count"], 1);
+        assert_eq!(signature["reference_uris"], json!(["#DocumentObject0"]));
+        assert_eq!(
+            signature["xades_namespace"],
+            "http://uri.etsi.org/01903/v1.3.2#"
+        );
+        assert_eq!(
+            signature["xades_properties"],
+            json!([
+                "SigningTime",
+                "SigningCertificate",
+                "CertificateValues",
+                "CounterSignature"
+            ])
+        );
+        assert_eq!(
+            signature["evidence"],
+            json!({
+                "certificates": 1,
+                "crls": 0,
+                "ocsp_responses": 0,
+                "signature_timestamps": 0,
+                "archive_timestamps": 0
+            })
+        );
+        assert_eq!(signature["claimed_signing_time"], "2026-01-02T03:04:05Z");
+        assert_eq!(signature["key_info_certificates"], 1);
+
+        let counter = &inventory["signatures"][1];
+        assert_eq!(counter["placement"], "nested_in_signature");
+        assert_eq!(counter["parent_signature_id"], "doc-sig");
+
+        assert_eq!(
+            inventory["timestamps"],
+            json!([{
+                "placement": "dossier",
+                "document_index": Value::Null,
+                "include_count": 2,
+                "has_token": true
+            }])
+        );
+    }
+}
+
+#[test]
+fn an_unsigned_dossier_has_an_empty_inventory_in_json() {
+    let output = run(&[
+        "inspect",
+        fixture("plain-base64.es3").to_str().unwrap(),
+        "--json",
+    ]);
+    let inventory = &parse_json(&output)["data"]["dossier"]["signature_inventory"];
+
+    assert_eq!(inventory["verified"], false);
+    assert_eq!(inventory["signatures"], json!([]));
+    assert_eq!(inventory["timestamps"], json!([]));
+}
+
+#[test]
+fn human_inspect_marks_every_inventory_line_unverified() {
+    let (_directory, path) = signed_input();
+    let output = run(&["inspect", path.to_str().unwrap()]);
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).expect("human output is UTF-8");
+    let lines: Vec<&str> = stdout.lines().collect();
+
+    assert_eq!(lines[3], "Signatures present: 2 (not verified)");
+    assert_eq!(lines[4], "Timestamps present: 1 (not verified)");
+    assert_eq!(
+        lines[5],
+        "Signature inventory (claimed by the dossier; nothing below was verified):"
+    );
+    assert_eq!(
+        lines[6],
+        concat!(
+            "(unverified) signature 0: placement=document, document=0, id=doc-sig, ",
+            "references=1, xades=SigningTime+SigningCertificate+CertificateValues+CounterSignature, ",
+            "certificates=1, crls=0, ocsp=0, signature-timestamps=0, archive-timestamps=0, ",
+            "claimed signing time=2026-01-02T03:04:05Z"
+        )
+    );
+    assert_eq!(
+        lines[7],
+        concat!(
+            "(unverified) signature 1: placement=nested_in_signature, id=counter-sig, ",
+            "inside=doc-sig, references=1, certificates=0, crls=0, ocsp=0, ",
+            "signature-timestamps=0, archive-timestamps=0"
+        )
+    );
+    assert_eq!(
+        lines[8],
+        "(unverified) timestamp 0: placement=dossier, includes=2, token=present"
+    );
+    assert_eq!(lines.len(), 9);
+    assert!(
+        stdout.lines().skip(5).all(|line| line.starts_with("(unverified)")
+            || line.starts_with("Signature inventory")),
+        "no inventory line may read as a verified finding"
+    );
+}
+
+#[test]
+fn human_inspect_prints_no_inventory_for_an_unsigned_dossier() {
+    let output = run(&["inspect", fixture("plain-base64.es3").to_str().unwrap()]);
+    let stdout = String::from_utf8(output.stdout).expect("human output is UTF-8");
+
+    assert!(!stdout.contains("Signature inventory"));
+    assert!(!stdout.contains("(unverified)"));
 }

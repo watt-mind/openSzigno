@@ -122,7 +122,8 @@ A dossier that parses but deviates from the default profile is reported
 through structural warnings rather than being rejected, because real
 company-court dossiers routinely deviate in these ways. The warnings carry
 the codes `dangling_objref`, `document_without_profile`,
-`source_size_missing`, and `creation_date_missing`, and never change an exit
+`source_size_missing`, `creation_date_missing`, and
+`signature_inventory_truncated`, and never change an exit
 status by themselves.
 
 - Every `Document` must carry a `DocumentProfile`; one holding only a
@@ -138,6 +139,11 @@ status by themselves.
 - `CreationDate` is optional in the `DossierProfile`; when absent the
   dossier `creation_date` is `null` and `creation_date_missing` is reported.
   A `DocumentProfile` must still carry its `CreationDate`.
+- The signature inventory describes at most 64 `ds:Signature` elements and at
+  most 64 `es:TimeStamp` elements. A dossier carrying more produces
+  `signature_inventory_truncated`; `signatures_present` and
+  `timestamps_present` still count every element. See
+  [Signature inventory](#signature-inventory).
 - The `DossierProfile` and every `DocumentProfile` `OBJREF` must still resolve
   exactly as before; a failure is the hard error `unresolved_objref`. Any
   other dangling `OBJREF` (a `SignatureProfile` pointing at nothing, for
@@ -158,6 +164,86 @@ content falls through to the UTF-8 text/binary test. The categories are
 Sniffing reads at most the first 4096 bytes (1024 for a leading HTML tag),
 never allocates a copy of the payload, and reports nothing about the content
 beyond the category.
+
+## Signature inventory
+
+`inspect` and `list` describe the signature material a dossier carries. The
+description is built while parsing, from the XML alone.
+
+**Nothing in the inventory is verified.** Every field is a *claim* the dossier
+makes about itself. A dossier can say that it carries a signature over the
+whole container, signed at a given time, with a certificate chain and
+revocation data attached, and every one of those elements can be empty, wrong,
+or forged; the inventory reports what the elements say, not whether they say
+anything true. It answers "what does this file claim to contain?" and never
+"is any of it valid?" Only `verify` answers the second question, and it answers
+it with cryptography.
+
+Concretely, building the inventory:
+
+- performs no cryptography of any kind: no digest, no signature check, no
+  canonicalization;
+- decodes nothing: no Base64 payload, no certificate, no CRL, no OCSP
+  response, no RFC 3161 token. Evidence is reported as element counts, so
+  `certificates: 3` means three `xades:EncapsulatedX509Certificate` elements
+  were present, not that three certificates parsed;
+- extracts no subject, issuer, serial number, validity date, key, or any other
+  value from inside a certificate. That is deliberately out of scope here;
+- resolves no reference. A `ds:Reference` URI is reported as text, and
+  `reference_uris` lists same-document fragments only. Nothing is ever
+  dereferenced, on the document or off it;
+- parses no claimed timestamp. `claimed_signing_time` is the
+  `xades:SigningTime` text with surrounding whitespace removed and nothing
+  else done to it.
+
+Placement is structural. A `ds:Signature` inside an `es:Document` is
+`document` and names the document index; a direct child of the root
+`es:Dossier` is `dossier`; one inside another `ds:Signature`, which a
+`xades:CounterSignature` is, is `nested_in_signature` and names the enclosing
+signature's `Id`; anything else is `other`, because the format does not say
+what such a signature would cover. A countersignature is inventoried as an
+entry of its own and contributes nothing to the entry of the signature that
+carries it. Container `es:TimeStamp` elements are placed by the same rule.
+
+Everything is bounded, because a dossier is untrusted input:
+
+| Bound | Value | On exceeding it |
+| --- | --- | --- |
+| Signatures described | 64 | `signature_inventory_truncated` |
+| Container timestamps described | 64 | `signature_inventory_truncated` |
+| `reference_uris` per signature | 16 | The rest are not listed. |
+| `xades_properties` per signature | 32 | The rest are not listed. |
+| `digest_methods` per signature | 16 | The rest are not listed. |
+
+In human mode `inspect` prints the inventory after its existing lines, one
+line per signature and one per container timestamp, each prefixed with
+`(unverified)`:
+
+```text
+Microsec e-Szigno dossier
+Title: Synthetic signed fixture
+Documents: 1
+Signatures present: 2 (not verified)
+Timestamps present: 1 (not verified)
+Signature inventory (claimed by the dossier; nothing below was verified):
+(unverified) signature 0: placement=document, document=0, id=doc-sig, references=1, xades=SigningTime+SigningCertificate, certificates=1, crls=0, ocsp=0, signature-timestamps=0, archive-timestamps=0, claimed signing time=2026-01-02T03:04:05Z
+(unverified) signature 1: placement=nested_in_signature, id=counter-sig, inside=doc-sig, references=1, certificates=0, crls=0, ocsp=0, signature-timestamps=0, archive-timestamps=0
+(unverified) timestamp 0: placement=dossier, includes=2, token=present
+```
+
+A dossier with no signature material prints no inventory lines at all. `list`
+carries the same inventory in its JSON and its human output is unchanged.
+
+Values that reach the output are filtered, because they come from untrusted
+XML. An `Id` and a property name are echoed only when they look like a name
+(ASCII alphanumerics, `-`, `_`, at most 64 characters); an algorithm URI only
+when it is printable ASCII of at most 255 characters; a claimed signing time
+only when it is a short token of the characters an XML dateTime uses. A value
+that fails the filter is reported as `null`, or left out of its list, rather
+than echoed. A reference URI that is not a same-document reference is left out
+of `reference_uris` entirely, so a `reference_uris` list shorter than
+`reference_count` is itself the signal that a signature references something
+this listing does not show.
 
 ## Parser safety model
 
@@ -226,8 +312,8 @@ under `data.limits`. They are not yet configurable on the command line; see
 
 | Command | Function | Mutates input? |
 | --- | --- | --- |
-| `inspect FILE` | Identify the format; return dossier metadata, limits, and capability warnings. | No |
-| `list FILE` | Return deterministic document records and signature/timestamp presence. | No |
+| `inspect FILE` | Identify the format; return dossier metadata, the unverified signature inventory, limits, and capability warnings. | No |
+| `list FILE` | Return deterministic document records, signature/timestamp presence, and the unverified signature inventory. | No |
 | `extract FILE --output DIR` | Decode supported documents, and the dossiers they embed, into a new or existing directory without overwriting files. | No |
 | `extract FILE --document SEL --stdout` | Decode exactly one document and write its raw payload bytes to stdout. Writes no files. | No |
 | `validate-structure FILE` | Apply the project's strict structural rules without validating signatures. | No |
@@ -368,6 +454,11 @@ writes one compact line; this is pretty-printed:
       "documents": 1,
       "namespace": "https://www.microsec.hu/ds/e-szigno30#",
       "nested_dossiers": 0,
+      "signature_inventory": {
+        "signatures": [],
+        "timestamps": [],
+        "verified": false
+      },
       "signatures_present": 0,
       "signatures_verified": false,
       "timestamps_present": 0,
@@ -432,7 +523,41 @@ The `dossier` object carries `title`, `category` (or `null`), `creation_date`
 (or `null`),
 `namespace`, `xml_encoding`, `documents` (a count), `nested_dossiers` (a count
 of documents that embed a dossier), `signatures_present`, `timestamps_present`,
-and `signatures_verified`, which is always `false`.
+`signature_inventory`, and `signatures_verified`, which is always `false`.
+
+`signature_inventory` is the unverified description of the signature material,
+identical in `inspect` and `list`. It is an object with three members:
+`verified`, which is always `false`; `signatures`, one entry per
+`ds:Signature` in document order; and `timestamps`, one entry per container
+`es:TimeStamp` in document order. `signatures_present` and `timestamps_present`
+keep their meaning and still count every element, including the ones a
+truncated inventory does not describe. See
+[Signature inventory](#signature-inventory) for what each field means and, more
+importantly, for what it does not mean.
+
+| `signatures[]` field | Type | Meaning |
+| --- | --- | --- |
+| `id` | string or null | The `Id` attribute, when present and shaped like an ID. |
+| `placement` | string | `document`, `dossier`, `nested_in_signature`, or `other`. |
+| `document_index` | number or null | The enclosing document's index, for `document` placement. |
+| `parent_signature_id` | string or null | The enclosing signature's `Id`, for `nested_in_signature`. |
+| `canonicalization_method` | string or null | `ds:CanonicalizationMethod/@Algorithm`, as declared. |
+| `signature_method` | string or null | `ds:SignatureMethod/@Algorithm`, as declared. |
+| `digest_methods` | array | The distinct `ds:DigestMethod/@Algorithm` values of the references, in document order, at most 16. |
+| `reference_count` | number | Every `ds:Reference` in `ds:SignedInfo`. |
+| `reference_uris` | array | Same-document reference URIs only, at most 16. |
+| `xades_namespace` | string or null | The namespace of `xades:QualifyingProperties`, when it is a recognised XAdES namespace. |
+| `xades_properties` | array | Local names of the signed and unsigned qualifying properties present, in document order, at most 32. |
+| `evidence` | object | `certificates`, `crls`, `ocsp_responses`, `signature_timestamps`, `archive_timestamps`: element counts. |
+| `claimed_signing_time` | string or null | The `xades:SigningTime` text, trimmed and otherwise unparsed. |
+| `key_info_certificates` | number | `ds:X509Certificate` elements under `ds:KeyInfo`. |
+
+| `timestamps[]` field | Type | Meaning |
+| --- | --- | --- |
+| `placement` | string | `dossier`, `document`, or `other`. |
+| `document_index` | number or null | The enclosing document's index, for `document` placement. |
+| `include_count` | number | `xades:Include` children, counted; none is resolved. |
+| `has_token` | boolean | A non-empty `xades:EncapsulatedTimeStamp` is present. |
 
 Example of a failure envelope, from `inspect --json` on
 `tests/fixtures/doctype.es3` (exit status 4):
@@ -547,6 +672,7 @@ Warning codes. Warnings never change the exit status by themselves:
 | `document_without_profile` | all commands | A `Document` has no `DocumentProfile` and was skipped. |
 | `source_size_missing` | all commands | A `DocumentProfile` declares no `SourceSize`, so the decoded length is not checked against one. |
 | `creation_date_missing` | all commands | The `DossierProfile` declares no `CreationDate`; the dossier `creation_date` is `null`. |
+| `signature_inventory_truncated` | all commands | More than 64 `ds:Signature` or 64 `es:TimeStamp` elements are present, so the inventory describes only the first 64 of that kind. `signatures_present` and `timestamps_present` still count them all. |
 | `output_name_deduplicated` | `extract` | A document's output name was already taken in its directory, so it was renamed. |
 | `nested_dossier_depth_limit` | `extract` | An embedded dossier was kept as a file because `--max-depth` was reached. |
 | `nested_dossier_invalid` | `extract` | An embedded dossier could not be parsed; the raw payload was kept and the run continued. |
@@ -2167,7 +2293,12 @@ every run.
 The rule for the other four commands is unchanged: `inspect`, `list`,
 `extract`, and `validate-structure` verify nothing, `signatures_verified` and
 `cryptographic_verification_performed` stay `false`, and the warning
-`cryptographic_verification_not_performed` keeps its meaning for them. It is
+`cryptographic_verification_not_performed` keeps its meaning for them. The
+signature inventory `inspect` and `list` report changes nothing about that
+boundary: it is the dossier's own claims about its signature material, carries
+`"verified": false` in the JSON and an `(unverified)` prefix on every human
+line, and a richer inventory is not weaker evidence or stronger evidence but no
+evidence at all. See [Signature inventory](#signature-inventory). It is
 deliberately *not* emitted by `verify`, which reports what it actually did.
 
 Extracting a document is never proof that it was signed or that the signature
