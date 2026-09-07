@@ -34,6 +34,14 @@ fn reject_link_components(path: &Path) -> Result<(), OpenError> {
     let mut current = std::path::PathBuf::new();
     for component in path.components() {
         current.push(component);
+        // A drive or UNC prefix and the root directory cannot be links and
+        // cannot always be inspected on their own (for example `\\?\C:`).
+        if matches!(
+            component,
+            std::path::Component::Prefix(_) | std::path::Component::RootDir
+        ) {
+            continue;
+        }
         match std::fs::symlink_metadata(&current) {
             Ok(metadata) if metadata.file_type().is_symlink() => {
                 return Err(OpenError::Unsafe(
