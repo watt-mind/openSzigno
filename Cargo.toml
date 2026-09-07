@@ -10,7 +10,7 @@ repository = "https://github.com/Watt-Mind/openSzigno"
 rust-version = "1.88"
 
 [workspace.dependencies]
-base64 = "0.22.1"
+base64 = "0.23.1"
 clap = { version = "4.5.48", features = ["derive"] }
 encoding_rs = "0.8.40"
 roxmltree = "0.21.1"
