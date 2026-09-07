@@ -17,3 +17,4 @@ Project policies live at the repository root:
 | [CONTRIBUTING.md](../CONTRIBUTING.md) | Branch model, commit conventions, required checks, and fixture and privacy rules. |
 | [SECURITY.md](../SECURITY.md) | Threat model, what is in and out of scope, and how to report a vulnerability. |
 | [CHANGELOG.md](../CHANGELOG.md) | Release history in Keep a Changelog format. |
+- [verify-design.md](verify-design.md): M2 design proposal for XMLDSig/XAdES verification: ecosystem survey, pipeline, stable codes, JSON shape, phases.
