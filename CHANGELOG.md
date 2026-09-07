@@ -10,6 +10,124 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
 
 ## [Unreleased]
 
+### Added (M4: decryption of encrypted payloads)
+
+- **`extract --decrypt-key FILE`** decrypts documents whose transform chain
+  contains `encrypt`. The specification calls that transform "S/MIME
+  encryption" and names no algorithm; Microsec's own `eszigno3` reference CLI
+  documents its `cm_decrypt` as RFC 5652 CMS and exports per-recipient
+  encrypted keys, so the decoded payload is read as a DER `ContentInfo`
+  carrying `id-envelopedData`. The supported subset is
+  `KeyTransRecipientInfo` recipients named by `issuerAndSerialNumber` or
+  `subjectKeyIdentifier`, RSAES-PKCS1-v1_5 and RSAES-OAEP (MGF1 with
+  SHA-1/256/384/512) key transport, and AES-128/192/256-CBC content
+  encryption. See
+  [docs/architecture.md](docs/architecture.md#decryption).
+
+  ```sh
+  openszigno extract encrypted.es3 --output ./out \
+    --decrypt-key recipient.key.pem --decrypt-cert recipient.cert.pem
+  ```
+
+- **`--decrypt-cert FILE`**, PEM or DER, is the certificate that makes a CMS
+  recipient recognisable; it may be omitted when a PEM key file carries the
+  certificate alongside the key. It is checked against the key, and a
+  certificate that does not belong to it is `decryption_key_mismatch`.
+- **`--decrypt-passphrase-file FILE`** and the environment variable
+  `OPENSZIGNO_DECRYPT_PASSPHRASE` supply the passphrase of an encrypted
+  PKCS#8 key; the file wins when both are set, and one trailing newline is
+  stripped from the file. **No flag takes a key or a passphrase as an argument
+  value**, because `argv` is readable by other processes and lands in shell
+  history. All three of key, certificate, and passphrase files are capped at
+  1 MiB.
+- **`--allow-legacy-ciphers`** additionally decrypts DES-EDE3-CBC content.
+  It is off by default because 3DES is weak, and available because it is what
+  the Microsec reference tool encrypted with by default; without the flag such
+  a document is `document_skipped_legacy_cipher`, with the OID named.
+- **New JSON.** Each `extract` `extracted` entry gains `decrypted`, and
+  `extract --stdout` gains the same field in its `data`. It is `true` when an
+  `encrypt` transform was reversed. `schema_version` stays `1`; both are
+  additive.
+- **New error codes.** `invalid_decryption_key`,
+  `invalid_decryption_certificate`, `decryption_certificate_required`, and
+  `decryption_key_mismatch` (exit 4, raised before the dossier is decoded);
+  `invalid_cms` and `decrypt_failed` (exit 5). `decrypt_failed` carries the
+  fixed message `decryption failed` and never says which step failed, because
+  telling a bad RSA unwrap from bad padding is what a padding oracle is made
+  of.
+- **New warning codes.** `document_skipped_no_matching_recipient`,
+  `document_skipped_unsupported_cipher`, and
+  `document_skipped_legacy_cipher`. All three are skips at exit 0: a dossier
+  may legitimately hold documents addressed to several people, and `extract`
+  gives the caller the ones they can read.
+- **Key handling guarantees**, stated in
+  [SECURITY.md](SECURITY.md#how-key-material-is-handled) and covered by a test:
+  key bytes, the passphrase, and anything derived from them appear on neither
+  stdout nor stderr nor in the JSON envelope, on a successful or a failing run;
+  key and passphrase buffers are zeroed on drop; nothing is ever transmitted.
+
+### Changed (M4)
+
+- **`capabilities.encrypted_extraction` in `inspect --json` is now the string
+  `"with_key"`, not `false`.** `inspect` is never given a key, so it can only
+  report that the tool can decrypt when `extract` is given one. A consumer that
+  tested the field for truthiness now sees a truthy value, which is the correct
+  answer; one that compared it to `false` must compare it to `"with_key"`.
+  `schema_version` stays `1`: the field kept its name and its meaning, and the
+  other capability fields stay boolean.
+- **`encrypt` is now only recognised in the position the specification puts
+  it.** The forward chain is fixed as `zip? -> encrypt? -> base64`, so
+  `encrypt -> base64` and `zip -> encrypt -> base64` are encrypted documents
+  and `encrypt` anywhere else is `unsupported_transform_chain` /
+  `document_skipped_unsupported_transform` rather than
+  `encrypted_document_unsupported` / `document_skipped_encrypted`. Nothing
+  becomes extractable that was not before.
+- **`encrypted_document_unsupported` is not emitted by a run that holds a
+  decryption key**, because it would be untrue; what happened to each document
+  is reported per document instead. Its message now points at
+  `extract --decrypt-key` rather than saying the document cannot be extracted.
+- **The `RUSTSEC-2023-0071` note in `deny.toml`** was rewritten: the tool now
+  does perform an RSA private-key operation, locally, with a key the operator
+  supplied, for the length of one `extract` run. Exploiting the advisory needs
+  an attacker who can time that run on the operator's own machine, which is
+  outside the threat model; the ignore is still to be revisited when `rsa` 0.10
+  is stable.
+- **New dependencies**, all MIT OR Apache-2.0: `aes`, `cbc`, `cipher`, `cms`
+  (already used by `openszigno-verify`), `des`, `pkcs8` with `encryption`
+  (which brings `pkcs5`, `pbkdf2`, `scrypt`, `salsa20`), and `zeroize`.
+  `rand_chacha` and `rand_core` are test-only. `cargo deny check` passes.
+- **The decryption tests generate their RSA keys at run time**, from a fixed
+  seed through `ChaCha20Rng`, once per test binary. No private key, in any
+  encoding, is committed to this repository, and no line of it spells a
+  complete PEM private-key armour header: a secret scanner cannot tell a
+  synthetic key from a real one, so the project stores none and allowlists no
+  scanner rule.
+- **`rsa`, `num-bigint-dig`, `scrypt`, `salsa20`, and `sha2` are built at
+  `opt-level = 3` in the dev profile.** Generating an RSA key and running a
+  PKCS#8 key derivation unoptimized costs seconds each, which is what
+  generating test keys at run time would otherwise have added to every test
+  run. The code under test is not optimized, and release builds are unchanged.
+
+### Not implemented, deliberately (M4)
+
+- **PKCS#12 (`.p12`/`.pfx`) keystores.** Convert with `openssl` first; the
+  commands are in
+  [docs/architecture.md](docs/architecture.md#key-material). A keystore parser
+  is attack surface for a step the operator does once.
+- **PKCS#11.** A key on a smart card or HSM cannot be used.
+- **`RecipientInfo` forms other than `ktri`.** A key-agreement (`kari`)
+  recipient reads as no matching recipient rather than as a named unsupported
+  algorithm.
+- **RFC 5083 `AuthEnvelopedData` (AES-GCM).** Recognised only to be skipped.
+  Nothing in the specification or the reference CLI suggests it is produced.
+- **MIME-wrapped CMS.** No available source says whether any producer wraps the
+  message in MIME headers instead of emitting bare DER under the Base64
+  transform. Bare DER is what is read; anything else is `invalid_cms` rather
+  than a guess.
+- **`es:RecipientCertificateList`.** The element is optional and advisory; the
+  authoritative recipient list is the CMS `RecipientInfos`, which is what the
+  matching uses.
+
 ### Added (M3: container timestamps, online revocation, trusted-list identities)
 
 - **Unverified signature inventory in `inspect` and `list`.** The structural

@@ -194,6 +194,26 @@ Extracted 1 document(s).
 Extraction is not proof of signature validity.
 ```
 
+An encrypted document, with the recipient's key. The key and its passphrase
+come from files, never from the command line, and never appear in any output:
+
+```sh
+openszigno extract encrypted.es3 --output ./out \
+  --decrypt-key recipient.key.pem \
+  --decrypt-cert recipient.cert.pem
+```
+
+```text
+Extracted 1 document(s).
+[0] secret.txt (38 B, text)
+Extraction is not proof of signature validity.
+```
+
+Decrypting a document is not verifying it. It shows that the key could unwrap
+the payload; it says nothing about who produced it. See
+[docs/architecture.md](docs/architecture.md#decryption) for the supported CMS
+subset, the flags, and how a `.p12` keystore is converted first.
+
 One document straight to a file, without a scratch directory. `#0` is the
 first document in source XML order; `openszigno list` shows the indices and
 the `OBJREF` values a selector can use instead:
@@ -225,7 +245,7 @@ openszigno inspect tests/fixtures/plain-base64.es3 --json
     "capabilities": {
       "base64_extraction": true,
       "cryptographic_verification": false,
-      "encrypted_extraction": false,
+      "encrypted_extraction": "with_key",
       "structural_validation": true,
       "zip_base64_extraction": true
     },
@@ -281,6 +301,7 @@ openszigno extract tests/fixtures/plain-base64.es3 --output ./out --json
         "declared_type": "text/plain",
         "detected_type": "text",
         "document_index": 0,
+        "decrypted": false,
         "dossier_path": "0",
         "filename": "hello.txt",
         "path": "hello.txt"
@@ -342,6 +363,10 @@ Flags:
 | `--max-depth N` | `extract` | Nesting levels of embedded dossiers to expand (default 3); values above the hard cap of 8 are clamped. |
 | `--document SELECTOR` | `extract` | Extract only this document, named by its `object_ref` (exact match) or as `#<index>` in source order. Repeatable. Selectors never reach into an embedded dossier; a selected embedded dossier still expands into `<file>.d`. An unmatched selector is `document_not_found` (exit 4). |
 | `--stdout` | `extract` | Write the selected document's raw payload bytes to stdout and nothing else; diagnostics go to stderr and no files are written. Needs exactly one resolved, decodable document. Cannot be combined with `--json` or `--output`. |
+| `--decrypt-key FILE` | `extract` | RSA private key that decrypts documents whose transform chain contains `encrypt`: PKCS#8, DER or PEM, plain or passphrase-protected. Without it an encrypted document stays skipped. Decryption is never verification. |
+| `--decrypt-cert FILE` | `extract` | The certificate belonging to `--decrypt-key`, PEM or DER; it is what makes a CMS recipient recognisable. Optional when a PEM key file carries the certificate alongside the key. |
+| `--decrypt-passphrase-file FILE` | `extract` | Read an encrypted key's passphrase from this file (one trailing newline stripped). The environment variable `OPENSZIGNO_DECRYPT_PASSPHRASE` is the alternative; the file wins. No flag ever takes a passphrase as an argument value. |
+| `--allow-legacy-ciphers` | `extract` | Also decrypt DES-EDE3-CBC content, which is weak but is what the Microsec reference tool encrypted with by default. Refused without this flag. |
 | `--trust-store DIR` | `verify` | Directory of trust anchors (`anchors/*`, PEM or DER) and optional extra CA certificates (`intermediates/*`). A directory of certificates with no `anchors` subdirectory is read as anchors. Without it, every chain check is `unknown`. |
 | `--trust-list FILE` | `verify` | ETSI TS 119 612 trusted list (XML) to take trust anchors from. Repeatable. Its anchors join the `--trust-store` ones, each reported with its origin, and only these can make a chain `qualified`. Nothing is fetched; see [docs/trust.md](docs/trust.md). |
 | `--lotl FILE` | `verify` | EU list of trusted lists (XML). Its `PointersToOtherTSL` entries name the national lists' signing certificates, so one out-of-band certificate bootstraps every `--trust-list`. The LOTL is verified against `--trust-list-signer` first and contributes no trust anchors of its own. |
@@ -442,13 +467,14 @@ the tool reports presence only and claims nothing about validity. See
 | XAdES qualifying properties: `SigningCertificate` binding, signing time, signature policy, and level detection. | M2 phase 2 |
 | Revocation checking (CRL and OCSP) and EU trusted-list import for qualified status. | M2 phase 3 |
 | Timestamp verification. | M3 |
-| Decryption of encrypted payloads. A document that declares the `encrypt` transform is reported and skipped. | M4 |
+| CMS recipient forms other than `KeyTransRecipientInfo`, and content encryption outside AES-CBC and (behind a flag) DES-EDE3-CBC. Such a document is named and skipped. | after M4 |
 
 Outside the current plan altogether:
 
 - e-dossier namespaces outside the documented allow-list, unless added with
   `--allow-namespace`;
-- transform chains other than `base64` and `zip -> base64`;
+- transform chains other than `base64`, `zip -> base64`, `encrypt -> base64`,
+  and `zip -> encrypt -> base64`;
 - XML encodings other than UTF-8 and ISO-8859-2;
 - DTDs, DOCTYPE declarations, and entity declarations, which are rejected by
   design;

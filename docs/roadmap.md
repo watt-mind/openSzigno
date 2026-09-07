@@ -324,22 +324,81 @@ is written out in
   always named so a reader can disagree with the reading and see exactly what
   it rested on.
 
-### M4: encrypted payload decryption
+### M4: encrypted payload decryption — done
 
-Extract documents whose transform chain contains `encrypt`, using key material
-supplied by the user. Scope:
+Shipped. `extract --decrypt-key` reverses the `encrypt` transform. See
+[architecture.md](architecture.md#decryption) for the full contract. What
+landed:
 
-- key and passphrase input through a file or an environment variable, never a
-  command-line argument that would land in the process table or shell history;
-- key material excluded from every log line, error message, and JSON field;
-- the same bounded decoding limits applied to decrypted output as to any other
-  payload;
-- decryption reported as a distinct capability flag, and never conflated with
-  signature verification.
+- **What `encrypt` actually is, established from the sources.** The
+  specification says only "S/MIME encryption" and names no algorithm. Microsec's
+  own `eszigno3` reference CLI documents `cm_decrypt` as RFC 5652 CMS and
+  `export_recipient_infos` as exporting the recipients' certificates and
+  encrypted keys, so the decoded payload is read as a DER `ContentInfo`
+  carrying `id-envelopedData`.
+- **A named subset**: `KeyTransRecipientInfo` recipients identified by
+  `issuerAndSerialNumber` or `subjectKeyIdentifier`, RSAES-PKCS1-v1_5 and
+  RSAES-OAEP (MGF1, SHA-1/256/384/512) key transport, AES-128/192/256-CBC
+  content encryption, and DES-EDE3-CBC only behind `--allow-legacy-ciphers`.
+- **No key material in the repository.** The tests generate their RSA keys at
+  run time from a fixed seed rather than committing them, and no line of the
+  tree spells a complete PEM private-key armour header, so a secret scanner has
+  nothing to find and no rule has to be allowlisted.
+- **Key material never on the command line**: `--decrypt-key`,
+  `--decrypt-cert`, `--decrypt-passphrase-file`, or
+  `OPENSZIGNO_DECRYPT_PASSPHRASE`. Key bytes, the passphrase, and anything
+  derived from them appear in no log line, message, warning, JSON field, or
+  fixture, which a test asserts over stdout, stderr, and the envelope.
+- **The same bounds as any other payload**, plus a plaintext bounded before
+  allocation by the ciphertext length and re-checked against
+  `max_decoded_document_bytes` afterwards, with the ZIP rules applied to a
+  `zip` transform underneath unchanged.
+- **A capability, not a verdict**: `inspect` reports
+  `encrypted_extraction: "with_key"`, `extract` marks a decrypted document
+  `decrypted: true`, and nothing about the verification boundary moves.
+- **Skips, not failures**, for reasons about one document:
+  `document_skipped_no_matching_recipient`,
+  `document_skipped_unsupported_cipher`, and
+  `document_skipped_legacy_cipher`, each naming the algorithm OID where there
+  is one. `decrypt_failed` carries the fixed message `decryption failed` so
+  that the tool cannot be used as a padding oracle.
 
-Until this ships, an encrypted document is reported with
-`encrypted_document_unsupported` and skipped by `extract` with
-`document_skipped_encrypted`.
+Residuals deliberately left out of M4:
+
+- **The framing could not be confirmed.** No source available here says whether
+  a producer ever wraps the CMS message in MIME headers rather than emitting
+  bare DER under the Base64 transform. Bare DER is what is implemented; a
+  MIME-wrapped payload is reported as `invalid_cms` rather than guessed at.
+- **Neither could the recipient-identifier form in the wild.** The
+  specification is silent and the maintainers' private corpus holds no
+  encrypted document to check against, so both `issuerAndSerialNumber` and
+  `subjectKeyIdentifier` are implemented and neither is known to be the one
+  Microsec emits.
+- **No PKCS#12.** A `.p12`/`.pfx` keystore has to be converted with `openssl`
+  first, which
+  [architecture.md](architecture.md#key-material) shows. Adding a keystore
+  parser would widen the attack surface for a step the operator can do once.
+- **No PKCS#11.** A key on a smart card or HSM cannot be used. The reference
+  CLI supports it; openSzigno would need a module loader, which is a large
+  dependency for a case no one has asked for yet.
+- **`RecipientInfo` forms other than `ktri` are ignored**, so a `kari`
+  (key-agreement, ECDH) recipient reads as no matching recipient rather than as
+  an unsupported algorithm. Naming it would mean parsing structures that
+  cannot be acted on.
+- **`es:RecipientCertificateList` is not read.** The element is optional and
+  advisory; the authoritative recipient list is the CMS `RecipientInfos`,
+  which is what the matching uses.
+- **No AEAD.** RFC 5083 `AuthEnvelopedData` (AES-GCM) is recognised only to be
+  skipped. Nothing in the specification or the reference CLI suggests it is
+  produced; the reference CLI's cipher list is OpenSSL `enc` names, which are
+  CBC-era.
+- **Timing.** The RSA private-key operation runs through `rsa` 0.9, whose
+  non-constant-time behaviour is RUSTSEC-2023-0071. That advisory is accepted
+  in `deny.toml` on the grounds that the tool never held a private key; M4
+  makes it hold one for the length of one `extract` run. The exposure needs a
+  local attacker who can time that run, which is outside the threat model in
+  [SECURITY.md](../SECURITY.md), but the note in `deny.toml` was updated and
+  the ignore should be revisited when `rsa` 0.10 is stable.
 
 ## Field observations from the private corpus
 
