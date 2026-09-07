@@ -28,8 +28,8 @@ checked.
   `xades:UnsignedSignatureProperties`; such a signature is reported at an
   unsupported placement and caps the dossier at `indeterminate`, never
   `invalid`. See [Countersignatures](#countersignatures);
-- decryption of encrypted payloads, the M4 milestone described in
-  [roadmap.md](roadmap.md).
+- CMS recipient forms other than `KeyTransRecipientInfo`, and content
+  encryption outside the subset in [Decryption](#decryption).
 
 Permanent non-goals for this tool:
 
@@ -80,9 +80,12 @@ are captured by `Cargo.lock` and Cargo metadata.
   rather than by file extension. See [Namespace policy](#namespace-policy).
 - XML declarations naming UTF-8 or ISO-8859-2; an absent declaration is
   treated as UTF-8. A UTF-8 byte order mark is stripped.
-- Transform chains `base64` and `zip -> base64`. A chain containing `encrypt`
-  is reported as encrypted and skipped; any other chain is reported as an
-  unsupported transform chain.
+- Transform chains `base64`, `zip -> base64`, `encrypt -> base64`, and
+  `zip -> encrypt -> base64`. The specification fixes the forward order as
+  `zip? -> encrypt? -> base64`, so those four are the whole set; `encrypt` in
+  any other position is an unsupported transform chain, not an encrypted
+  document. A chain with `encrypt` is skipped unless `extract` was given a
+  decryption key; see [Decryption](#decryption).
 - Signature and timestamp material is counted for reporting only:
   `ds:Signature` elements in the XMLDSig namespace and `TimeStamp` elements in
   the dossier's own namespace.
@@ -321,6 +324,7 @@ under `data.limits`. They are not yet configurable on the command line; see
 | `list FILE` | Return deterministic document records, signature/timestamp presence, and the unverified signature inventory. | No |
 | `extract FILE --output DIR` | Decode supported documents, and the dossiers they embed, into a new or existing directory without overwriting files. | No |
 | `extract FILE --document SEL --stdout` | Decode exactly one document and write its raw payload bytes to stdout. Writes no files. | No |
+| `extract FILE --decrypt-key KEY` | The same, additionally decrypting documents whose transform chain contains `encrypt`. See [Decryption](#decryption). | No |
 | `validate-structure FILE` | Apply the project's strict structural rules without validating signatures. | No |
 | `verify FILE` | Verify every `ds:Signature`: canonicalization, reference digests, the signature value, the e-dossier reference-scope rules, and the certificate path. Cannot report a signature as `valid` in this release. | No |
 
@@ -339,6 +343,10 @@ All commands accept `--json` and `--allow-namespace <URI>` (repeatable).
 | `--max-depth <N>` | Nesting levels of embedded dossiers to expand, default 3; values above the hard cap of 8 are clamped to 8. |
 | `--document <SELECTOR>` | Extract only the named documents. Repeatable. See [Selecting documents](#selecting-documents). |
 | `--stdout` | Write one document's raw payload bytes to stdout. See [The payload stdout mode](#the-payload-stdout-mode). |
+| `--decrypt-key <FILE>` | RSA private key, PKCS#8 DER or PEM, plain or passphrase-protected, used to decrypt `encrypt` documents. See [Decryption](#decryption). |
+| `--decrypt-cert <FILE>` | The certificate belonging to `--decrypt-key`, PEM or DER. Optional when the key file is PEM and carries the certificate too. Requires `--decrypt-key`. |
+| `--decrypt-passphrase-file <FILE>` | Read the passphrase of an encrypted key from this file. Requires `--decrypt-key`. |
+| `--allow-legacy-ciphers` | Also decrypt DES-EDE3-CBC content. Requires `--decrypt-key`. |
 
 In JSON mode, stdout contains exactly one JSON object and diagnostics go to
 stderr. Document ordering is the source XML order. No command writes XML
@@ -449,7 +457,7 @@ writes one compact line; this is pretty-printed:
     "capabilities": {
       "base64_extraction": true,
       "cryptographic_verification": false,
-      "encrypted_extraction": false,
+      "encrypted_extraction": "with_key",
       "structural_validation": true,
       "zip_base64_extraction": true
     },
@@ -494,7 +502,7 @@ writes one compact line; this is pretty-printed:
 | --- | --- |
 | `inspect` | `dossier`, `limits`, `capabilities`. |
 | `list` | `dossier`, plus `documents`: an array in source order with `index`, `title`, `creation_date`, `mime_type` (`media_type`, `subtype`, `extension`, `charset`), `source_size`, `object_ref`, `transforms`, and `nested_dossier`. `source_size` is `null` when the profile omits `SourceSize`. |
-| `extract` | `extracted` (array of `document_index`, `dossier_path`, `filename`, `path`, `bytes`, `detected_type`, `declared_type`), `extracted_count`, `skipped_count`, `nested_dossiers_extracted`, `selected`. |
+| `extract` | `extracted` (array of `document_index`, `dossier_path`, `filename`, `path`, `bytes`, `detected_type`, `declared_type`, `decrypted`), `extracted_count`, `skipped_count`, `nested_dossiers_extracted`, `selected`. |
 | `validate-structure` | `valid_structure`, `documents`, `conformance_warnings`, `cryptographic_verification_performed` (always `false`). |
 | `verify` | `verdict`, `verification_time`, `policy`, `limits`, `counts`, `checks`, `signatures`. See [The `verify` command](#the-verify-command). |
 
@@ -513,10 +521,18 @@ Each `extracted` entry describes one written file:
 | `bytes` | Decoded size. |
 | `detected_type` | Content-sniffing result: `pdf`, `html`, `xml`, `dossier`, `zip`, `text`, or `binary`. |
 | `declared_type` | The MIME essence the dossier declares, which is often wrong. |
+| `decrypted` | `true` when an `encrypt` transform was reversed to produce these bytes. It says a supplied key unwrapped the content, never that anything was verified. |
 
 `extracted_count` counts every file written across the tree, `skipped_count`
 every document skipped across the tree, and `nested_dossiers_extracted` the
 embedded dossiers that were expanded.
+
+`extract --stdout` adds `decrypted` to its own `data` alongside
+`stdout_bytes` and `detected_type`, with the same meaning.
+
+`capabilities.encrypted_extraction` is the string `"with_key"`, not a boolean:
+`inspect` is never given a key, so it can only report that the *tool* can
+decrypt when `extract` is given one. The other capability fields stay boolean.
 
 `selected` is the resolved `--document` selection: an array of
 `{"index": <number>, "object_ref": <string>}` objects in source order, one per
@@ -593,7 +609,7 @@ Exit statuses are stable at the category level:
 | `0` | Operation completed (possibly with explicit skipped-document warnings). |
 | `2` | Command-line usage error, emitted by `clap`. |
 | `3` | Input/output error. |
-| `4` | Invalid, unsupported, or unsafe dossier structure. |
+| `4` | Invalid, unsupported, or unsafe dossier structure, or unusable decryption material. |
 | `5` | Payload decoding or safe-extraction failure. |
 | `6` | `verify` completed and at least one signature verdict is `invalid`. |
 | `7` | `verify` completed, no signature is `invalid`, and the overall verdict is `indeterminate`. |
@@ -653,6 +669,12 @@ I/O and extraction policy.
 | `zip_ratio_limit` | core | 5 | The ZIP member exceeds the compression-ratio limit. |
 | `unsafe_zip_member` | core | 5 | The member is a directory, a symlink, or has a non-basename path. |
 | `unsupported_zip_member` | core | 5 | The member uses encryption or an unsupported compression method. |
+| `invalid_decryption_key` | core | 4 | `--decrypt-key` is not an RSA private key in PKCS#8 DER or PEM form, or its passphrase is missing or wrong. The two are deliberately not told apart. |
+| `invalid_decryption_certificate` | core | 4 | `--decrypt-cert`, or the certificate inside the key file, is not a readable X.509 certificate with an RSA public key. |
+| `decryption_certificate_required` | core | 4 | `--decrypt-key` was given with no certificate, and the key file carries none. Without one the recipient this key belongs to cannot be recognised. |
+| `decryption_key_mismatch` | core | 4 | The certificate's public key is not the given key's public key. |
+| `invalid_cms` | core | 5 | An encrypted payload is not a well-formed CMS `EnvelopedData` `ContentInfo`, carries no encrypted content, or has a malformed initialisation vector or block length. |
+| `decrypt_failed` | core | 5 | Decryption failed. The message is exactly `decryption failed` and never says which step failed. |
 | `unsafe_output_name` | CLI | 5 | A document title or declared extension cannot be used as a filename, or the derived `<file>.d` directory name would be too long. |
 | `output_name_collision` | CLI | 5 | Residual: two outputs still map to the same name in one directory after deduplication. |
 | `output_exists` | CLI | 5 | A destination file already exists or cannot be created safely. |
@@ -669,10 +691,13 @@ Warning codes. Warnings never change the exit status by themselves:
 | Code | Emitted by | Meaning |
 | --- | --- | --- |
 | `cryptographic_verification_not_performed` | all commands | Signature or timestamp material is present but was not verified. |
-| `encrypted_document_unsupported` | all commands | A document declares the `encrypt` transform. |
+| `encrypted_document_unsupported` | all commands | A document declares the `encrypt` transform, and this run holds no decryption key. `extract --decrypt-key` does not emit it; what happened to each document is reported per document instead. |
 | `unsupported_transform_chain` | all commands | A document uses a transform chain other than `base64` or `zip -> base64`. |
 | `document_skipped_encrypted` | `extract` | An encrypted document was not extracted. |
 | `document_skipped_unsupported_transform` | `extract` | A document with an unsupported transform chain was not extracted. |
+| `document_skipped_no_matching_recipient` | `extract` | No CMS `RecipientInfo` names the certificate given with `--decrypt-key`. |
+| `document_skipped_unsupported_cipher` | `extract` | The message uses a key-transport or content-encryption algorithm outside the supported subset. The message names its OID. |
+| `document_skipped_legacy_cipher` | `extract` | The content is DES-EDE3-CBC and `--allow-legacy-ciphers` was not given. The message names its OID. |
 | `dangling_objref` | all commands | An `OBJREF` outside the dossier and document profiles resolves to no XML ID. |
 | `document_without_profile` | all commands | A `Document` has no `DocumentProfile` and was skipped. |
 | `source_size_missing` | all commands | A `DocumentProfile` declares no `SourceSize`, so the decoded length is not checked against one. |
@@ -2390,7 +2415,146 @@ in its own right. A TSA certificate that was actually revoked makes the check
 - Enforce fixed limits for dossier bytes, document count, decoded bytes, ZIP
   member count, per-member bytes, total bytes, and compression ratio.
 - Report document encryption, missing payload references, and unsupported
-  transform chains explicitly.
+  transform chains explicitly. Decrypt an encrypted document only when
+  `--decrypt-key` supplies a key, under the same limits and with the same
+  no-clobber, all-or-nothing behaviour as any other document; see
+  [Decryption](#decryption).
+
+## Decryption
+
+`extract --decrypt-key` reverses the `encrypt` transform. This is the M4
+milestone. **Decryption is not verification and never becomes it**: reading a
+document proves that a key could unwrap it, not that anybody signed it, and
+not that the signer is who a certificate says. Every statement in
+[Verification boundary](#verification-boundary) is unchanged by it, `verify` is
+unaffected, and `signatures_verified` stays `false`.
+
+### What `encrypt` is
+
+The e-dossier specification (§3.2.1.1.6 in both the English v1.2 prose and the
+Hungarian v1.5 PDF) says only:
+
+> `encrypt`: S/MIME encryption (optional)
+
+and adds that `es:RecipientCertificateList/es:RecipientCertificate` "may" list
+the certificates whose private keys can decrypt the payload. It fixes no
+algorithm, no recipient-identifier form, and no framing. That is the whole of
+what the format specification says.
+
+Microsec's own `eszigno3` reference CLI is the concrete evidence for what is
+actually produced. It documents `cm_decrypt` as "RFC5652 szerinti CMS
+titkosítás feloldása" — undoing CMS encryption per RFC 5652 — and
+`export_recipient_infos` as exporting "the recipients' certificates and the
+encrypted keys", which is the CMS `RecipientInfos` structure. Its
+`-encryptor_symm_alg` option takes OpenSSL cipher names (`aes-128-cbc` and the
+like) and **defaults to `des-ede3-cbc`**, and `-encryptor_key` takes a PEM or
+PKCS#12 private key.
+
+openSzigno therefore reads a decoded `encrypt` payload as a DER `ContentInfo`
+(RFC 5652 §3) whose content type is `id-envelopedData` (`1.2.840.113549.1.7.3`).
+This is what "S/MIME encryption" means in practice when the Base64 layer is
+applied on top of it by the surrounding transform chain.
+
+Two things could not be confirmed from any source available here and are
+recorded as residuals in [roadmap.md](roadmap.md): whether any producer wraps
+the CMS message in MIME headers instead of emitting bare DER, and whether
+`RecipientIdentifier` is ever anything but `issuerAndSerialNumber` in the
+wild. Both forms of the identifier are implemented; a MIME-wrapped payload
+would be reported as `invalid_cms`.
+
+### The supported subset
+
+| Layer | Accepted |
+| --- | --- |
+| Container | `ContentInfo` with `id-envelopedData` (RFC 5652 §6). RFC 5083 `id-ct-authEnvelopedData` is recognised only to be skipped as unsupported. |
+| Recipient | `KeyTransRecipientInfo` only, named by `issuerAndSerialNumber` or `subjectKeyIdentifier`. `kari`, `kekri`, `pwri`, and `ori` recipients are ignored when looking for a match. |
+| Key transport | RSAES-PKCS1-v1_5 (`1.2.840.113549.1.1.1`) and RSAES-OAEP (`1.2.840.113549.1.1.7`) with MGF1 and SHA-1, SHA-256, SHA-384, or SHA-512. The OAEP hash and the MGF1 hash must agree, and only the default empty label is accepted. |
+| Content encryption | AES-128-CBC, AES-192-CBC, AES-256-CBC. DES-EDE3-CBC only with `--allow-legacy-ciphers`. |
+
+DES-EDE3-CBC is off by default because it is weak — a 64-bit block and an
+effective strength far below its key length — and on behind a flag because it
+is what the reference implementation encrypted with by default, so refusing it
+outright would make real dossiers unreadable. The flag names the trade instead
+of hiding it, exactly as `--allow-legacy-algorithms` does in `verify`.
+
+### Key material
+
+| Input | Where it comes from |
+| --- | --- |
+| Private key | `--decrypt-key FILE`: PKCS#8, DER or PEM, `PRIVATE KEY` or `ENCRYPTED PRIVATE KEY`. |
+| Certificate | `--decrypt-cert FILE`, PEM or DER; or a `CERTIFICATE` block in a PEM key file. |
+| Passphrase | `--decrypt-passphrase-file FILE`, or the environment variable `OPENSZIGNO_DECRYPT_PASSPHRASE`. The file wins when both are set. |
+
+**No key or passphrase ever comes from the command line.** `argv` is readable
+by other processes on most systems and lands in shell history, so there is no
+`--decrypt-passphrase VALUE` flag and there never will be. A passphrase file's
+single trailing newline is stripped, because that is what an editor leaves
+behind; nothing else is trimmed, since a passphrase may legitimately start or
+end with a space. Key, certificate, and passphrase files are each capped at
+1 MiB.
+
+**No key material reaches any output.** The paths the caller typed may appear
+in messages, because that is how a failure is acted on. The key bytes, the
+passphrase, and anything derived from them never appear in a log line, an error
+message, a warning, the JSON envelope, or a fixture; a test asserts this over
+stdout, stderr, and the envelope on both a successful and a failing run. Key
+and passphrase buffers are zeroed when they are dropped.
+
+A certificate is required, and it is checked against the key: its public key
+must be the key's public key, or the run fails with `decryption_key_mismatch`.
+It is what makes a `RecipientInfo` recognisable, and matching by trial
+decryption instead would turn "this is somebody else's document" into "this
+key is wrong", which are different answers to different questions.
+
+openSzigno does not read PKCS#12 (`.p12`, `.pfx`). Convert one first:
+
+```sh
+openssl pkcs12 -in recipient.p12 -nocerts -out recipient.key.pem
+openssl pkcs12 -in recipient.p12 -clcerts -nokeys -out recipient.cert.pem
+```
+
+The first command writes a passphrase-protected PKCS#8 key, which
+`--decrypt-passphrase-file` reads; add `-nodes` to write it unprotected.
+
+### Where decryption sits, and the limits
+
+The chain is reversed in the order the specification fixes: Base64 first, then
+CMS decryption, then ZIP expansion. Every existing bound still applies, and the
+plaintext gets its own:
+
+- `max_base64_chars` and `max_decoded_document_bytes` bound the CMS message
+  itself, as they bound any payload;
+- the plaintext buffer is bounded **before it is allocated** by the ciphertext
+  length, which the plaintext can never exceed, and the decrypted length is
+  checked against `max_decoded_document_bytes` again once it exists;
+- a `zip` transform under the encryption is then expanded under the unchanged
+  ZIP rules: one member, a safe name, the expanded-size and compression-ratio
+  limits;
+- `max_total_decoded_bytes` counts decrypted documents like any other.
+
+### Outcomes
+
+A document that cannot be decrypted is a **skip with a warning**, not a failed
+run, whenever the reason is about *this* document rather than about the dossier
+or the key: another recipient's document, an algorithm outside the subset, a
+refused legacy cipher. A dossier can perfectly well hold documents addressed to
+several people, and `extract` should give a caller the ones they can read.
+
+| Situation | Result |
+| --- | --- |
+| Decrypted | The document is written, with `decrypted: true`. |
+| No `--decrypt-key` | `document_skipped_encrypted` warning, exit 0. |
+| No `RecipientInfo` names the certificate | `document_skipped_no_matching_recipient` warning, exit 0. |
+| Unsupported key transport or content cipher | `document_skipped_unsupported_cipher` warning naming the OID, exit 0. |
+| DES-EDE3-CBC without the flag | `document_skipped_legacy_cipher` warning naming the OID, exit 0. |
+| Key unwrap or padding failed | `decrypt_failed` error, exit 5. |
+| Not well-formed CMS | `invalid_cms` error, exit 5. |
+| Key, certificate, or passphrase unusable | `invalid_decryption_key`, `invalid_decryption_certificate`, `decryption_certificate_required`, or `decryption_key_mismatch`, exit 4, before the dossier is decoded. |
+
+`decrypt_failed` carries the fixed message `decryption failed` and nothing
+else. Distinguishing a failed RSA unwrap from a bad content-key length from a
+bad PKCS#7 padding is exactly the distinction a padding oracle is built out of,
+so the tool does not make it — not even in the human output.
 
 ## Verification boundary
 
@@ -2427,9 +2591,10 @@ evidence at all. See [Signature inventory](#signature-inventory). It is
 deliberately *not* emitted by `verify`, which reports what it actually did.
 
 Extracting a document is never proof that it was signed or that the signature
-is valid. A rejection is likewise not proof of forgery: the pinned algorithm
-policy refuses some genuine older dossiers, which is the correct trade and must
-not be misread.
+is valid, and neither is decrypting one: `--decrypt-key` shows that a key could
+unwrap a payload, which says nothing about who produced it. A rejection is
+likewise not proof of forgery: the pinned algorithm policy refuses some genuine
+older dossiers, which is the correct trade and must not be misread.
 
 `--online` widens where revocation data may come from and nothing else. It
 never relaxes a rule: a fetched CRL or OCSP response is judged by exactly the
@@ -2437,6 +2602,10 @@ offline rules, only URLs the certificates themselves publish are contacted, and
 a failed fetch is `revocation_status_unknown`, which blocks. A run that reaches
 `valid` with `--online` reached it on evidence that would have supported the
 same verdict had the operator downloaded the same files by hand.
+
+`--decrypt-key` likewise widens what `extract` can read and nothing else. It
+adds no cryptographic finding to any command, changes no verdict, and cannot
+be given to `verify` at all.
 
 Still outside the boundary: `xades:ArchiveTimeStamp` verification, XAdES level
 detection, scheme-level trusted-list `Qualifications` extensions, and

@@ -11,12 +11,14 @@ use std::process::ExitCode;
 
 use clap::{Args, Parser, Subcommand};
 use openszigno_core::{
-    DecodeOutcome, DetectedType, Dossier, Error as CoreError, KNOWN_COMPATIBLE_NAMESPACES, Limits,
-    ParseOptions, UnsupportedReason,
+    DecodeOutcome, DecryptOptions, DetectedType, Dossier, Error as CoreError,
+    KNOWN_COMPATIBLE_NAMESPACES, Limits, ParseOptions, RecipientKey, UnsupportedReason,
+    decode_document_with,
 };
 use serde::Serialize;
 use serde_json::{Value, json};
 use unicode_normalization::UnicodeNormalization;
+use zeroize::Zeroizing;
 
 use openszigno_verify::{
     MemoryRevocationStore, NoRevocation, RoxmltreeC14n, TrustListSnapshot, Verdict, VerifyOptions,
@@ -205,6 +207,32 @@ struct ExtractArgs {
     /// clamped to 8.
     #[arg(long, value_name = "N", default_value_t = 3)]
     max_depth: u32,
+    /// Decrypt encrypted documents with this RSA private key: PKCS#8, DER or
+    /// PEM, plain or passphrase-protected. The key is read from the file and
+    /// never from the command line. Without it, encrypted documents stay
+    /// skipped.
+    #[arg(long = "decrypt-key", value_name = "FILE")]
+    decrypt_key: Option<PathBuf>,
+    /// The certificate belonging to `--decrypt-key`, PEM or DER. It is what
+    /// makes a CMS recipient recognisable; it may be omitted when the key
+    /// file is PEM and carries the certificate alongside the key.
+    #[arg(long = "decrypt-cert", value_name = "FILE", requires = "decrypt_key")]
+    decrypt_cert: Option<PathBuf>,
+    /// Read the passphrase of an encrypted `--decrypt-key` from this file, one
+    /// trailing newline stripped. It takes precedence over the environment
+    /// variable OPENSZIGNO_DECRYPT_PASSPHRASE. A passphrase is never taken
+    /// from the command line.
+    #[arg(
+        long = "decrypt-passphrase-file",
+        value_name = "FILE",
+        requires = "decrypt_key"
+    )]
+    decrypt_passphrase_file: Option<PathBuf>,
+    /// Also decrypt documents whose content encryption is DES-EDE3-CBC. That
+    /// cipher is weak and is refused by default; it exists because it is what
+    /// the Microsec reference tool encrypted with by default.
+    #[arg(long = "allow-legacy-ciphers", requires = "decrypt_key")]
+    allow_legacy_ciphers: bool,
 }
 
 impl InputArgs {
@@ -293,6 +321,17 @@ impl CliError {
         }
     }
 
+    /// A problem with the caller's own decryption material rather than with
+    /// the dossier. Exit 4 is the "the inputs to this run are unusable"
+    /// status; nothing about the dossier has been judged.
+    fn decrypt_material(error: CoreError) -> Self {
+        Self {
+            code: error.code().as_str(),
+            message: error.message().to_owned(),
+            exit: 4,
+        }
+    }
+
     fn invalid(code: &'static str, message: impl Into<String>) -> Self {
         Self {
             code,
@@ -341,7 +380,30 @@ fn main() -> ExitCode {
                 recursive: !args.no_recursive,
                 max_depth: args.max_depth.min(MAX_NESTING_DEPTH),
             };
-            let result = extract(&args.file, args.output.as_deref(), &options, &request);
+            // The key is loaded before the dossier is touched, so an unusable
+            // key fails the run without having decoded anything.
+            let result = match load_recipient_key(&args) {
+                Ok(key) => {
+                    let decrypt = DecryptOptions {
+                        key: key.as_ref(),
+                        allow_legacy_ciphers: args.allow_legacy_ciphers,
+                    };
+                    extract(
+                        &args.file,
+                        args.output.as_deref(),
+                        &options,
+                        &request,
+                        decrypt,
+                    )
+                }
+                Err(error) => Err(failure(
+                    InputInfo {
+                        format: None,
+                        bytes: None,
+                    },
+                    error,
+                )),
+            };
             ("extract", args.json, result)
         }
         Command::ValidateStructure(args) => {
@@ -485,7 +547,7 @@ fn inspect(path: &Path, options: &ParseOptions) -> CliResult {
                 "structural_validation": true,
                 "base64_extraction": true,
                 "zip_base64_extraction": true,
-                "encrypted_extraction": false,
+                "encrypted_extraction": "with_key",
                 "cryptographic_verification": false
             }
         }),
@@ -791,6 +853,9 @@ struct PlanFile {
     name: String,
     path: String,
     bytes: Vec<u8>,
+    /// Whether an `encrypt` transform was reversed to obtain `bytes`. It says
+    /// a key unwrapped the content, never that anything was verified.
+    decrypted: bool,
     detected_type: &'static str,
     declared_type: String,
 }
@@ -822,6 +887,10 @@ struct PlanDir {
 /// State shared by every nesting level of one extraction run.
 struct Plan<'a> {
     options: &'a ParseOptions,
+    /// The decryption policy for this run. `DecryptOptions::default()` leaves
+    /// every encrypted document skipped, which is what `extract` does without
+    /// `--decrypt-key`.
+    decrypt: DecryptOptions<'a>,
     recursive: bool,
     max_depth: u32,
     /// Top-level document indices to extract, or `None` for all of them.
@@ -924,11 +993,12 @@ fn resolve_selector(dossier: &Dossier, selector: &str) -> Result<usize, CliError
     Ok(first.index)
 }
 
-fn extract(
+fn extract<'a>(
     path: &Path,
     output: Option<&Path>,
     options: &ParseOptions,
     request: &ExtractRequest<'_>,
+    decrypt: DecryptOptions<'a>,
 ) -> CliResult {
     let (bytes, dossier) = load(path, options)?;
     let input = valid_input(bytes.len());
@@ -951,18 +1021,26 @@ fn extract(
     };
 
     if request.to_stdout {
-        return extract_to_stdout(&dossier, selection.as_deref(), options, request, input);
+        return extract_to_stdout(
+            &dossier,
+            selection.as_deref(),
+            options,
+            request,
+            input,
+            decrypt,
+        );
     }
 
     let mut plan = Plan {
         options,
+        decrypt,
         recursive: request.recursive,
         max_depth: request.max_depth,
         selection: selection
             .as_ref()
             .map(|selected| selected.iter().map(|item| item.index).collect()),
         total: 0,
-        warnings: dossier_warnings(&dossier),
+        warnings: dossier_warnings_with(&dossier, decrypt.key.is_some()),
         skipped: 0,
         nested_dossiers: 0,
     };
@@ -1039,6 +1117,7 @@ fn extract_to_stdout(
     options: &ParseOptions,
     request: &ExtractRequest<'_>,
     input: InputInfo,
+    decrypt: DecryptOptions<'_>,
 ) -> CliResult {
     let refuse = |message: &str| {
         failure(
@@ -1068,11 +1147,10 @@ fn extract_to_stdout(
         .find(|item| item.index == index)
         .expect("the selection names a document of this dossier");
 
-    let decoded = match dossier
-        .decode_document(index, &options.limits)
+    let decoded = match decode_document_with(dossier, index, &options.limits, &decrypt)
         .map_err(|error| failure(input.clone(), CliError::extraction(error)))?
     {
-        DecodeOutcome::Decoded(decoded) => decoded.bytes,
+        DecodeOutcome::Decoded(decoded) => decoded,
         DecodeOutcome::Unsupported(reason) => {
             let notice = skip_notice(&index.to_string(), reason);
             return Err(failure(
@@ -1090,7 +1168,8 @@ fn extract_to_stdout(
     // `<file>.d` directory. One byte stream cannot carry both, so the caller
     // must say which they meant by passing --no-recursive.
     if request.recursive
-        && (document.nested_dossier || openszigno_core::sniff(&decoded) == DetectedType::Dossier)
+        && (document.nested_dossier
+            || openszigno_core::sniff(&decoded.bytes) == DetectedType::Dossier)
     {
         return Err(refuse(
             "the selected document embeds a dossier; pass --no-recursive to write its raw payload, or extract to a directory",
@@ -1098,7 +1177,7 @@ fn extract_to_stdout(
     }
 
     let selected_json = json!([{ "index": index, "object_ref": document.object_ref }]);
-    let detected = openszigno_core::sniff(&decoded);
+    let detected = openszigno_core::sniff(&decoded.bytes);
     Ok(Success {
         input,
         data: json!({
@@ -1107,11 +1186,12 @@ fn extract_to_stdout(
             "skipped_count": 0,
             "nested_dossiers_extracted": 0,
             "selected": selected_json,
-            "stdout_bytes": decoded.len(),
-            "detected_type": detected.as_str()
+            "stdout_bytes": decoded.bytes.len(),
+            "detected_type": detected.as_str(),
+            "decrypted": decoded.decrypted
         }),
-        warnings: dossier_warnings(dossier),
-        payload: Some(decoded),
+        warnings: dossier_warnings_with(dossier, decrypt.key.is_some()),
+        payload: Some(decoded.bytes),
         exit: 0,
     })
 }
@@ -1144,11 +1224,15 @@ impl Plan<'_> {
                 continue;
             }
             let dossier_path = format!("{prefix}{}", document.index);
-            let decoded = match dossier
-                .decode_document(document.index, &self.options.limits)
-                .map_err(CliError::extraction)?
+            let decoded = match decode_document_with(
+                dossier,
+                document.index,
+                &self.options.limits,
+                &self.decrypt,
+            )
+            .map_err(CliError::extraction)?
             {
-                DecodeOutcome::Decoded(decoded) => decoded.bytes,
+                DecodeOutcome::Decoded(decoded) => decoded,
                 DecodeOutcome::Unsupported(reason) => {
                     self.skipped += 1;
                     self.warnings.push(skip_notice(&dossier_path, reason));
@@ -1158,7 +1242,7 @@ impl Plan<'_> {
 
             self.total = self
                 .total
-                .checked_add(decoded.len() as u64)
+                .checked_add(decoded.bytes.len() as u64)
                 .ok_or_else(|| {
                     CliError::unsafe_output("total_size_limit", "aggregate decoded size overflowed")
                 })?;
@@ -1169,14 +1253,14 @@ impl Plan<'_> {
                 ));
             }
 
-            let detected = openszigno_core::sniff(&decoded);
+            let detected = openszigno_core::sniff(&decoded.bytes);
             let name = safe_output_name(document, fallback_extension(document, detected))?;
             let name = self.claim(&mut names, name, document.index, &dossier_path)?;
             let path = join_path(directory_path, &name);
             let subdirectory = self.plan_nested(
                 &Nested {
                     document,
-                    decoded: &decoded,
+                    decoded: &decoded.bytes,
                     dossier_path: &dossier_path,
                     name: &name,
                     directory_path,
@@ -1190,7 +1274,8 @@ impl Plan<'_> {
                     dossier_path,
                     name,
                     path,
-                    bytes: decoded,
+                    decrypted: decoded.decrypted,
+                    bytes: decoded.bytes,
                     detected_type: detected.as_str(),
                     declared_type: document.mime_type.essence(),
                 },
@@ -1369,16 +1454,129 @@ fn fallback_extension(
     detected.preferred_extension()
 }
 
+/// The environment variable an encrypted key's passphrase may come from.
+///
+/// A passphrase must never be a command-line argument: `argv` is readable by
+/// every process on most systems and lands in shell history. A file is the
+/// documented way; this variable exists for callers that have no place to put
+/// one, and `--decrypt-passphrase-file` wins when both are present.
+const PASSPHRASE_ENV: &str = "OPENSZIGNO_DECRYPT_PASSPHRASE";
+
+/// The largest decryption-material file this tool reads. A key, a certificate,
+/// and a passphrase are all small; the bound keeps a mistyped path from
+/// reading something huge into memory.
+const MAX_DECRYPT_FILE_BYTES: u64 = 1024 * 1024;
+
+/// Load the recipient key `extract` was given, or `None` when it was given
+/// none.
+///
+/// Nothing read here — key bytes, passphrase, or certificate — is ever placed
+/// in a message, a warning, or the JSON envelope. The paths may appear,
+/// because the caller typed them and they are how a failure is acted on; the
+/// contents never do.
+fn load_recipient_key(args: &ExtractArgs) -> Result<Option<RecipientKey>, CliError> {
+    let Some(key_path) = args.decrypt_key.as_deref() else {
+        return Ok(None);
+    };
+    let key = read_decrypt_file(key_path, "decryption key")?;
+    let certificate = args
+        .decrypt_cert
+        .as_deref()
+        .map(|path| read_decrypt_file(path, "decryption certificate"))
+        .transpose()?;
+    let passphrase = passphrase(args)?;
+    RecipientKey::load(
+        &key,
+        passphrase.as_deref().map(|bytes| &bytes[..]),
+        certificate.as_deref().map(|bytes| &bytes[..]),
+    )
+    .map(Some)
+    .map_err(CliError::decrypt_material)
+}
+
+/// The passphrase for an encrypted key: the file if one was named, otherwise
+/// the environment variable, otherwise none.
+///
+/// A file's single trailing newline is stripped, because that is what an
+/// editor or `echo` leaves behind and no user means it to be part of the
+/// secret. Nothing else is trimmed: a passphrase may legitimately begin or end
+/// with a space.
+fn passphrase(args: &ExtractArgs) -> Result<Option<Zeroizing<Vec<u8>>>, CliError> {
+    if let Some(path) = args.decrypt_passphrase_file.as_deref() {
+        let mut bytes = read_decrypt_file(path, "decryption passphrase")?;
+        if bytes.last() == Some(&b'\n') {
+            bytes.pop();
+            if bytes.last() == Some(&b'\r') {
+                bytes.pop();
+            }
+        }
+        return Ok(Some(bytes));
+    }
+    Ok(std::env::var_os(PASSPHRASE_ENV).map(|value| {
+        #[cfg(unix)]
+        let bytes = {
+            use std::os::unix::ffi::OsStrExt as _;
+            value.as_os_str().as_bytes().to_vec()
+        };
+        #[cfg(not(unix))]
+        let bytes = value.to_string_lossy().into_owned().into_bytes();
+        Zeroizing::new(bytes)
+    }))
+}
+
+/// Read one small decryption-material file.
+///
+/// `what` names the kind of file in the error, never the path's contents. The
+/// buffer zeroes itself when it is dropped, so key and passphrase bytes do not
+/// linger in freed memory.
+fn read_decrypt_file(path: &Path, what: &str) -> Result<Zeroizing<Vec<u8>>, CliError> {
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|_| CliError::io(format!("the {what} file could not be inspected")))?;
+    if !metadata.is_file() {
+        return Err(CliError::io(format!(
+            "the {what} path is not a regular file"
+        )));
+    }
+    if metadata.len() > MAX_DECRYPT_FILE_BYTES {
+        return Err(CliError::io(format!("the {what} file is too large")));
+    }
+    fs::read(path)
+        .map(Zeroizing::new)
+        .map_err(|_| CliError::io(format!("the {what} file could not be read")))
+}
+
 fn skip_notice(dossier_path: &str, reason: UnsupportedReason) -> Notice {
     match reason {
         UnsupportedReason::Encrypted => Notice {
             code: "document_skipped_encrypted".to_owned(),
-            message: format!("document {dossier_path} was not extracted because it is encrypted"),
+            message: format!(
+                "document {dossier_path} was not extracted because it is encrypted and no --decrypt-key was given"
+            ),
         },
         UnsupportedReason::TransformChain => Notice {
             code: "document_skipped_unsupported_transform".to_owned(),
             message: format!(
                 "document {dossier_path} was not extracted because its transform chain is unsupported"
+            ),
+        },
+        UnsupportedReason::NoMatchingRecipient => Notice {
+            code: "document_skipped_no_matching_recipient".to_owned(),
+            message: format!(
+                "document {dossier_path} was not extracted because none of its CMS recipients names the certificate given for the decryption key"
+            ),
+        },
+        // The OID is the sender's algorithm choice, not payload content, so
+        // naming it is safe and is the only way a caller can act on this.
+        UnsupportedReason::UnsupportedCipher { oid } => Notice {
+            code: "document_skipped_unsupported_cipher".to_owned(),
+            message: format!(
+                "document {dossier_path} was not extracted because it uses the unsupported algorithm {oid}"
+            ),
+        },
+        UnsupportedReason::LegacyCipher { oid } => Notice {
+            code: "document_skipped_legacy_cipher".to_owned(),
+            message: format!(
+                "document {dossier_path} was not extracted because it uses the legacy cipher {oid}; pass --allow-legacy-ciphers to decrypt it anyway"
             ),
         },
     }
@@ -1424,7 +1622,8 @@ impl Writer {
                 "path": entry.file.path,
                 "bytes": entry.file.bytes.len(),
                 "detected_type": entry.file.detected_type,
-                "declared_type": entry.file.declared_type
+                "declared_type": entry.file.declared_type,
+                "decrypted": entry.file.decrypted
             }));
 
             if let Some(nested) = &entry.subdirectory {
@@ -1581,7 +1780,16 @@ fn dossier_overview(dossier: &Dossier) -> Value {
 /// Every warning a reading command reports for a dossier: what the tool
 /// cannot do with it, and how it deviates from the default profile.
 fn dossier_warnings(dossier: &Dossier) -> Vec<Notice> {
-    let mut warnings = capability_warnings(dossier);
+    dossier_warnings_with(dossier, false)
+}
+
+/// The same warnings for a run that may hold a decryption key.
+///
+/// With a key, `encrypted_document_unsupported` would be untrue: the document
+/// is encrypted, and this run can try to decrypt it. What actually happened to
+/// it is reported per document by `skip_notice` instead.
+fn dossier_warnings_with(dossier: &Dossier, decryption_available: bool) -> Vec<Notice> {
+    let mut warnings = capability_warnings(dossier, decryption_available);
     warnings.extend(structural_warnings(dossier));
     warnings
 }
@@ -1598,7 +1806,7 @@ fn structural_warnings(dossier: &Dossier) -> Vec<Notice> {
         .collect()
 }
 
-fn capability_warnings(dossier: &Dossier) -> Vec<Notice> {
+fn capability_warnings(dossier: &Dossier, decryption_available: bool) -> Vec<Notice> {
     let mut warnings = Vec::new();
     if dossier.signatures_present > 0 || dossier.timestamps_present > 0 {
         warnings.push(Notice {
@@ -1608,13 +1816,15 @@ fn capability_warnings(dossier: &Dossier) -> Vec<Notice> {
     }
     for document in &dossier.documents {
         if document.transforms.iter().any(|item| item == "encrypt") {
-            warnings.push(Notice {
-                code: "encrypted_document_unsupported".to_owned(),
-                message: format!(
-                    "document {} is encrypted and cannot be extracted",
-                    document.index
-                ),
-            });
+            if !decryption_available {
+                warnings.push(Notice {
+                    code: "encrypted_document_unsupported".to_owned(),
+                    message: format!(
+                        "document {} is encrypted; only `extract --decrypt-key` can read it",
+                        document.index
+                    ),
+                });
+            }
         } else if !matches!(
             document.transforms.as_slice(),
             [base64] if base64 == "base64"
@@ -2338,7 +2548,7 @@ mod tests {
             &Limits::default(),
         )
         .expect("the fixture parses");
-        let warnings = capability_warnings(&dossier);
+        let warnings = capability_warnings(&dossier, false);
         let codes: Vec<&str> = warnings
             .iter()
             .map(|warning| warning.code.as_str())

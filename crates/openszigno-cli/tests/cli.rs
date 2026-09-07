@@ -639,7 +639,7 @@ fn inspect_reports_the_limits_and_the_missing_capabilities() {
             "structural_validation": true,
             "base64_extraction": true,
             "zip_base64_extraction": true,
-            "encrypted_extraction": false,
+            "encrypted_extraction": "with_key",
             "cryptographic_verification": false
         })
     );
@@ -725,7 +725,8 @@ fn extract_reports_what_it_wrote_and_what_it_skipped() {
             "path": "kept.txt",
             "bytes": 10,
             "detected_type": "text",
-            "declared_type": "text/plain"
+            "declared_type": "text/plain",
+            "decrypted": false
         }])
     );
     assert_eq!(response["data"]["nested_dossiers_extracted"], 0);

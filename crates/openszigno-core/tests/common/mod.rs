@@ -5,6 +5,8 @@
 //! several test binaries, so some are unused in any single one.
 #![allow(dead_code)]
 
+pub mod envelope;
+
 use std::io::Write;
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};

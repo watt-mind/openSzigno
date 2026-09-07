@@ -37,9 +37,50 @@ Equally, a rejection is not proof of forgery: the pinned algorithm policy
 refuses SHA-1, RSA below 2048 bits, and other weak algorithms outright, which
 will reject some genuine older dossiers.
 
-`xades:ArchiveTimeStamp` is reported but not verified, and payload decryption
-is a planned milestone; both are described in
+`xades:ArchiveTimeStamp` is reported but not verified; see
 [docs/roadmap.md](docs/roadmap.md).
+
+**Decryption is not verification either.** `extract --decrypt-key` can undo the
+`encrypt` transform, which shows that the supplied key could unwrap the
+payload. It establishes nothing about who produced the document, and it does
+not change any command's verdict.
+
+## How key material is handled
+
+`extract --decrypt-key` is the only place openSzigno touches a private key.
+
+- **Never from the command line.** The key, its certificate, and its passphrase
+  all come from files, or the passphrase from the environment variable
+  `OPENSZIGNO_DECRYPT_PASSPHRASE`. There is no flag that takes a passphrase as
+  an argument value, because `argv` is readable by other processes on most
+  systems and lands in shell history.
+- **Never in any output.** Key bytes, the passphrase, and anything derived from
+  them never appear in a log line, an error message, a warning, the JSON
+  envelope, or a test fixture. The file paths the caller typed may appear,
+  because that is how a failure is acted on. A test asserts the absence of key
+  and passphrase material on stdout, on stderr, and in the envelope, on both a
+  successful and a failing run.
+- **Zeroed after use.** Key and passphrase buffers are zeroed when they are
+  dropped.
+- **None of it lives in this repository.** No private key, in any encoding, is
+  committed here, synthetic or not. The decryption tests generate their keys at
+  run time from a fixed seed, so the suite stays deterministic without storing
+  key material, and no line of this repository spells a complete PEM
+  private-key armour header. A secret scanner cannot tell a synthetic key from
+  a real one, so the project stores none and allowlists no scanner rule.
+- **Never sent anywhere.** Decryption is entirely local. `--online` is a
+  `verify` flag and fetches only revocation data; no command ever transmits key
+  material.
+- **Read-only and bounded.** Key, certificate, and passphrase files are opened
+  read-only and capped at 1 MiB each.
+- **Failures say nothing useful to an attacker.** A failed decryption is the
+  fixed message `decryption failed`, which does not distinguish a failed RSA
+  unwrap from a bad content-key length from bad padding — that distinction is
+  what a padding oracle is built out of. A wrong passphrase and a malformed key
+  are likewise the same answer.
+
+openSzigno never creates, signs, timestamps, or encrypts anything, so it holds
+a private key only for the duration of one `extract` run.
 
 ## Network exposure
 
@@ -94,6 +135,9 @@ openSzigno aims to guarantee that a hostile input cannot:
   exactly one object on stdout and all diagnostics go to stderr;
 - cause openSzigno to disclose input paths, document titles, or payload
   content in an error message;
+- learn anything about a decryption key from how a decryption failed, or cause
+  key or passphrase material to reach stdout, stderr, the JSON envelope, or an
+  extracted file;
 - cause openSzigno to make a network connection without `--online`, or, with
   it, to any destination other than a URL published inside a certificate being
   validated — including through a redirect, an environment proxy, or a scheme
@@ -140,6 +184,9 @@ The safety mechanisms behind these are documented in
   descriptor-relative implementation is meant to close them.
 - Disclosure of an input path, document title, or payload content in a
   message, warning, error, or diagnostic.
+- Disclosure of `--decrypt-key` material or its passphrase in any output, or a
+  distinguishable failure that turns openSzigno into a padding oracle for a
+  key the operator supplied.
 - Any output that states or implies that a signature, timestamp, certificate,
   or dossier is valid.
 - Contamination of stdout in `--json` mode, or an exit status that
@@ -147,11 +194,16 @@ The safety mechanisms behind these are documented in
 
 ## Out of scope
 
-- The absence of decryption support or of `xades:ArchiveTimeStamp` imprint
-  verification. Both are documented behaviour — see
+- The absence of `xades:ArchiveTimeStamp` imprint verification, or of CMS
+  recipient and cipher forms outside the subset in
+  [docs/architecture.md](docs/architecture.md#decryption). Both are documented
+  behaviour — see
   [docs/architecture.md](docs/architecture.md#archive-timestamps) for why the
   archive-timestamp imprint was left unimplemented rather than guessed at — and
   are tracked as roadmap items, not vulnerabilities.
+- The weakness of DES-EDE3-CBC itself. It is refused unless
+  `--allow-legacy-ciphers` is given, and the flag exists because it is what the
+  Microsec reference tool encrypted with by default.
 - An `indeterminate` verdict on a dossier you believe is good, when the cause
   is trust or revocation material you did not supply. Supplying it is the
   operator's job, and [docs/trust.md](docs/trust.md) describes how.

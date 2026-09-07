@@ -25,6 +25,12 @@ pub enum ErrorCode {
     ZipRatioLimit,
     UnsafeZipMember,
     UnsupportedZipMember,
+    InvalidDecryptionKey,
+    InvalidDecryptionCertificate,
+    DecryptionCertificateRequired,
+    DecryptionKeyMismatch,
+    InvalidCms,
+    DecryptFailed,
 }
 
 impl ErrorCode {
@@ -50,6 +56,12 @@ impl ErrorCode {
             Self::ZipRatioLimit => "zip_ratio_limit",
             Self::UnsafeZipMember => "unsafe_zip_member",
             Self::UnsupportedZipMember => "unsupported_zip_member",
+            Self::InvalidDecryptionKey => "invalid_decryption_key",
+            Self::InvalidDecryptionCertificate => "invalid_decryption_certificate",
+            Self::DecryptionCertificateRequired => "decryption_certificate_required",
+            Self::DecryptionKeyMismatch => "decryption_key_mismatch",
+            Self::InvalidCms => "invalid_cms",
+            Self::DecryptFailed => "decrypt_failed",
         }
     }
 }

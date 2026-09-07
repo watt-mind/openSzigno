@@ -25,6 +25,8 @@ serde_json.workspace = true
 sha2.workspace = true
 unicode-normalization.workspace = true
 ureq.workspace = true
+# Key and passphrase buffers zero themselves when dropped.
+zeroize.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 rustix.workspace = true
@@ -34,12 +36,19 @@ rustix.workspace = true
 # synthetic PKI and XMLDSig signer under `crates/openszigno-verify/tests/common`
 # rather than keeping a second copy. Signing is a permanent non-goal of the
 # shipped tool; none of this reaches a shipped crate.
+aes.workspace = true
 base64.workspace = true
+cbc.workspace = true
+cipher.workspace = true
 cms = "0.2"
 const-oid.workspace = true
 der.workspace = true
+des.workspace = true
 p256.workspace = true
 p384.workspace = true
+pkcs8.workspace = true
+rand_chacha.workspace = true
+rand_core.workspace = true
 rcgen = { workspace = true, features = ["x509-parser"] }
 rsa.workspace = true
 sha1.workspace = true
