@@ -25,6 +25,15 @@ git switch -c fix/zip-ratio-check
 Open the pull request against `develop`. Keep it focused: one behavioural
 change per pull request, with its tests.
 
+## Reporting issues
+
+- Search existing issues and pull requests first.
+- Use the bug or feature template; blank issues are disabled.
+- Never attach a real dossier or include private paths, titles, payload
+  data, or signer details — reproduce with a synthetic input.
+- Report vulnerabilities privately per [SECURITY.md](SECURITY.md), never as a
+  public issue.
+
 ## Commit messages
 
 Use Conventional Commits. The type is required; the scope is optional and is

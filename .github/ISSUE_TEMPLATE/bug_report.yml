@@ -1,0 +1,64 @@
+name: Bug report
+description: Report a reproducible problem in openSzigno
+title: "bug: "
+labels:
+  - type:bug
+  - source:human
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping improve openSzigno. For vulnerabilities, stop here and report privately as described in [SECURITY.md](../../SECURITY.md) instead of filing a public issue.
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched existing issues and pull requests for this problem.
+          required: true
+        - label: This report does not contain a real dossier, private paths, document titles, payload contents, certificate data, or any personal data. I reproduced it with a synthetic input.
+          required: true
+  - type: textarea
+    id: observed
+    attributes:
+      label: What happened?
+      description: Describe the observed behavior and its impact.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: How can we reproduce it?
+      description: Provide the smallest deterministic sequence, including exact commands. Attach a synthetic .es3 input or describe how to generate one — never attach a real dossier.
+      placeholder: |
+        1. Run `openszigno validate-structure input.es3 --json`
+        2. Observe ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: openSzigno commit or version
+      description: Commit SHA or release version, plus the output of `openszigno --version`.
+      placeholder: v0.1.0 / abc1234
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, architecture, and (for source builds) rustc version, with secrets removed.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Logs or additional context
+      description: Paste only the minimum useful, redacted output (stable error codes and exit statuses help most). Attachments are welcome.
