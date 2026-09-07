@@ -528,6 +528,7 @@ pub fn verify(bytes: &[u8], options: &VerifyOptions<'_>) -> Result<VerifyReport,
                 });
             } else {
                 let outcome = revocation::check_path(&revocation::PathRevocationInput {
+                    anchors: &anchors,
                     path: &path.path,
                     candidates: &candidates,
                     data: &revocation_data,
@@ -545,6 +546,7 @@ pub fn verify(bytes: &[u8], options: &VerifyOptions<'_>) -> Result<VerifyReport,
                     entry.revocation = Some(status);
                 }
                 report.checks.push(outcome.check);
+                report.checks.extend(outcome.notes);
             }
             report.chain = chain;
         } else {

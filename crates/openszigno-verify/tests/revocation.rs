@@ -1737,3 +1737,374 @@ fn each_chain_names_itself_in_its_revocation_message() {
         "got {messages:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// RFC 6960 section 2.2: the trusted responder model
+// ---------------------------------------------------------------------------
+//
+// Real national hierarchies run one central responder for every CA the
+// operator runs, issued by a sibling CA rather than by whichever CA issued the
+// certificate being asked about. A verifier that implements only the
+// delegation model of section 4.2.2.2 rejects every one of those answers as
+// unauthorised, which is what this build did before M3.
+
+/// A hierarchy shaped like the ones that made this necessary: a root, an
+/// issuing CA under it that issues the signer, and a *separate* CA under the
+/// same root that issues the central OCSP responder.
+struct Central {
+    root_der: Vec<u8>,
+    issuing_der: Vec<u8>,
+    sibling_der: Vec<u8>,
+    signer_der: Vec<u8>,
+    signer_key: TestKey,
+    responder_der: Vec<u8>,
+    /// The same responder key and subject, issued under an unrelated root the
+    /// caller does not trust.
+    foreign_responder_der: Vec<u8>,
+    foreign_root_der: Vec<u8>,
+}
+
+fn central(responder_eku: &[&str]) -> Central {
+    let root_key = rsa_key(keys::ROOT_RSA2048);
+    let issuing_key = rsa_key(keys::INTERMEDIATE_RSA2048);
+    let signer_key = rsa_key(keys::SIGNER_RSA2048);
+    let responder_key = rsa_key(keys::THIRD_RSA2048);
+    let foreign_root_key = rsa_key(keys::SECOND_RSA2048);
+
+    let root = self_signed(
+        &CertSpec::ca("openSzigno Test Root", BasicConstraints::Unconstrained),
+        &root_key,
+    );
+    let issuing = issued_by(
+        &CertSpec::ca("openSzigno Issuing CA", BasicConstraints::Constrained(0)),
+        &issuing_key,
+        &root,
+        &root_key,
+    );
+    let signer = issued_by(
+        &CertSpec::signer("openSzigno Test Signer"),
+        &signer_key,
+        &issuing,
+        &issuing_key,
+    );
+    // A sibling CA under the same root: this is what issues the responder in
+    // the hierarchies the trusted-responder model exists for.
+    let sibling = issued_by(
+        &CertSpec::ca("openSzigno Responder CA", BasicConstraints::Constrained(0)),
+        &rsa_key(keys::INTERMEDIATE_RSA2048),
+        &root,
+        &root_key,
+    );
+    let mut responder_spec = CertSpec::signer("openSzigno Central OCSP Responder");
+    if !responder_eku.is_empty() {
+        responder_spec.custom_extensions = vec![extended_key_usage_extension(responder_eku, false)];
+    }
+    let responder = issued_by(
+        &responder_spec,
+        &responder_key,
+        &sibling,
+        &rsa_key(keys::INTERMEDIATE_RSA2048),
+    );
+
+    let foreign_root = self_signed(
+        &CertSpec::ca("openSzigno Unrelated Root", BasicConstraints::Unconstrained),
+        &foreign_root_key,
+    );
+    let foreign_responder = issued_by(
+        &responder_spec,
+        &rsa_key(keys::THIRD_RSA2048),
+        &foreign_root,
+        &foreign_root_key,
+    );
+
+    Central {
+        root_der: root.der,
+        issuing_der: issuing.der,
+        sibling_der: sibling.der,
+        signer_der: signer.der,
+        signer_key,
+        responder_der: responder.der,
+        foreign_responder_der: foreign_responder.der,
+        foreign_root_der: foreign_root.der,
+    }
+}
+
+/// A dossier whose `CertificateValues` carry the intermediates both chains
+/// need, which is where a real dossier carries them.
+fn central_dossier(pki: &Central) -> String {
+    let mut signature = document_signature(vec![pki.signer_der.clone()]);
+    signature.signing_certificate = Some(SigningCertificateSpec::v1(pki.signer_der.clone()));
+    signature.certificate_values = vec![pki.issuing_der.clone(), pki.sibling_der.clone()];
+    dossier(signature, &pki.signer_key)
+}
+
+/// An OCSP response about the signer, produced by the given responder.
+fn central_response(pki: &Central, responder_der: &[u8]) -> Vec<u8> {
+    let mut spec = OcspSpec::new(
+        pki.issuing_der.clone(),
+        pki.signer_der.clone(),
+        rsa_key(keys::THIRD_RSA2048),
+    );
+    spec.responder_der = Some(responder_der.to_vec());
+    spec.include_responder_certificate = true;
+    spec.sha256_cert_id = true;
+    build_ocsp(&spec)
+}
+
+/// A CRL from the issuing CA, so the signer's chain can be completed without
+/// the OCSP response under test.
+fn issuing_crl(pki: &Central) -> Vec<u8> {
+    build_crl(&CrlSpec::new(
+        pki.issuing_der.clone(),
+        rsa_key(keys::INTERMEDIATE_RSA2048),
+    ))
+}
+
+/// A CRL from the root, covering the intermediates.
+fn root_crl(pki: &Central) -> Vec<u8> {
+    build_crl(&CrlSpec::new(
+        pki.root_der.clone(),
+        rsa_key(keys::ROOT_RSA2048),
+    ))
+}
+
+/// A central responder the caller's own anchor vouches for is accepted, and
+/// the report says which model authorised it.
+#[test]
+fn a_central_responder_under_a_configured_anchor_is_accepted() {
+    let pki = central(&[ID_KP_OCSP_SIGNING]);
+    let xml = central_dossier(&pki);
+    let report = run(
+        &xml,
+        vec![pki.root_der.clone()],
+        vec![root_crl(&pki)],
+        vec![central_response(&pki, &pki.responder_der)],
+    );
+
+    let entry = report.signatures[0].chain[0]
+        .revocation
+        .as_ref()
+        .expect("the end-entity certificate has a revocation answer");
+    assert_eq!(entry.status, RevocationStatus::Good);
+    assert_eq!(entry.source, Some(RevocationOrigin::StoreOcsp));
+    assert_eq!(
+        entry.responder_model,
+        Some(openszigno_verify::revocation::ResponderModel::Trusted)
+    );
+    // Reported, because this model rests on the caller's trust store rather
+    // than on the issuing CA's word and a reader is entitled to know which.
+    assert_check(&report, CheckCode::OcspResponderTrusted, CheckStatus::Info);
+    assert_check(&report, CheckCode::RevocationOk, CheckStatus::Passed);
+}
+
+/// Without `id-kp-OCSPSigning` the certificate is just a certificate under a
+/// trusted root, and a certificate under a trusted root is not a responder.
+#[test]
+fn a_central_responder_without_the_ocsp_signing_eku_is_refused() {
+    let pki = central(&[]);
+    let xml = central_dossier(&pki);
+    let report = run(
+        &xml,
+        vec![pki.root_der.clone()],
+        Vec::new(),
+        vec![central_response(&pki, &pki.responder_der)],
+    );
+
+    let entry = report.signatures[0].chain[0]
+        .revocation
+        .as_ref()
+        .expect("the end-entity certificate has a revocation answer");
+    assert_eq!(entry.status, RevocationStatus::Unknown);
+    assert_eq!(entry.responder_model, None);
+    assert_absent(&report, CheckCode::OcspResponderTrusted);
+    assert_check(
+        &report,
+        CheckCode::RevocationDataInvalid,
+        CheckStatus::Unknown,
+    );
+}
+
+/// A responder that reaches no configured anchor authorises nothing, however
+/// well formed its response is. This is the property that keeps the model from
+/// being a way in: the authority is the caller's store.
+#[test]
+fn a_responder_under_an_untrusted_root_is_refused() {
+    let pki = central(&[ID_KP_OCSP_SIGNING]);
+    let mut signature = document_signature(vec![pki.signer_der.clone()]);
+    signature.signing_certificate = Some(SigningCertificateSpec::v1(pki.signer_der.clone()));
+    // The foreign responder's own root travels with the dossier, so it is a
+    // path candidate — and still not an anchor, which is the whole point.
+    signature.certificate_values = vec![
+        pki.issuing_der.clone(),
+        pki.sibling_der.clone(),
+        pki.foreign_root_der.clone(),
+    ];
+    let xml = dossier(signature, &pki.signer_key);
+    let report = run(
+        &xml,
+        vec![pki.root_der.clone()],
+        Vec::new(),
+        vec![central_response(&pki, &pki.foreign_responder_der)],
+    );
+
+    let entry = report.signatures[0].chain[0]
+        .revocation
+        .as_ref()
+        .expect("the end-entity certificate has a revocation answer");
+    assert_eq!(entry.status, RevocationStatus::Unknown);
+    assert_eq!(entry.responder_model, None);
+    assert_absent(&report, CheckCode::OcspResponderTrusted);
+}
+
+/// The issuing CA answering for itself is the strongest model available, and
+/// it is the one reported even when the trust store would also have accepted a
+/// trusted responder.
+#[test]
+fn the_issuer_model_takes_precedence() {
+    let pki = central(&[ID_KP_OCSP_SIGNING]);
+    let xml = central_dossier(&pki);
+    let mut spec = OcspSpec::new(
+        pki.issuing_der.clone(),
+        pki.signer_der.clone(),
+        rsa_key(keys::INTERMEDIATE_RSA2048),
+    );
+    spec.responder_der = None;
+    spec.include_responder_certificate = false;
+    spec.sha256_cert_id = true;
+    let report = run(
+        &xml,
+        vec![pki.root_der.clone()],
+        vec![root_crl(&pki)],
+        vec![build_ocsp(&spec)],
+    );
+
+    let entry = report.signatures[0].chain[0]
+        .revocation
+        .as_ref()
+        .expect("the end-entity certificate has a revocation answer");
+    assert_eq!(
+        entry.responder_model,
+        Some(openszigno_verify::revocation::ResponderModel::Issuer)
+    );
+    assert_absent(&report, CheckCode::OcspResponderTrusted);
+}
+
+/// A responder the issuing CA delegated to is reported as `delegated`, not as
+/// `trusted`, even when it would also chain to a configured anchor: the CA's
+/// own word wins over the caller's configuration where both are available.
+#[test]
+fn the_delegated_model_takes_precedence_over_the_trusted_one() {
+    let pki = central(&[ID_KP_OCSP_SIGNING]);
+    // This responder is issued by the certificate's *own* issuing CA, and that
+    // CA chains to the configured root, so both models would accept it.
+    let mut responder_spec = CertSpec::signer("openSzigno Delegated OCSP Responder");
+    responder_spec.custom_extensions =
+        vec![extended_key_usage_extension(&[ID_KP_OCSP_SIGNING], false)];
+    let issuing = x509_issued(&pki);
+    let responder = issued_by(
+        &responder_spec,
+        &rsa_key(keys::THIRD_RSA2048),
+        &issuing,
+        &rsa_key(keys::INTERMEDIATE_RSA2048),
+    );
+    let xml = central_dossier(&pki);
+    let report = run(
+        &xml,
+        vec![pki.root_der.clone()],
+        vec![root_crl(&pki)],
+        vec![central_response(&pki, &responder.der)],
+    );
+
+    let entry = report.signatures[0].chain[0]
+        .revocation
+        .as_ref()
+        .expect("the end-entity certificate has a revocation answer");
+    assert_eq!(
+        entry.responder_model,
+        Some(openszigno_verify::revocation::ResponderModel::Delegated)
+    );
+    assert_absent(&report, CheckCode::OcspResponderTrusted);
+}
+
+// ---------------------------------------------------------------------------
+// Tier fallback: an unusable answer must not end the search
+// ---------------------------------------------------------------------------
+
+/// The case the corpus hit: an OCSP response this build cannot authorise, and
+/// a perfectly good CRL two tiers down. The CRL must answer, and the refusal
+/// must stay visible rather than being quietly forgotten.
+#[test]
+fn an_unusable_ocsp_answer_falls_through_to_a_crl() {
+    let pki = central(&[]);
+    let xml = central_dossier(&pki);
+    let report = run(
+        &xml,
+        vec![pki.root_der.clone()],
+        vec![issuing_crl(&pki), root_crl(&pki)],
+        vec![central_response(&pki, &pki.responder_der)],
+    );
+
+    let entry = report.signatures[0].chain[0]
+        .revocation
+        .as_ref()
+        .expect("the end-entity certificate has a revocation answer");
+    assert_eq!(entry.status, RevocationStatus::Good);
+    assert_eq!(entry.source, Some(RevocationOrigin::StoreCrl));
+    let detail = entry
+        .detail
+        .as_deref()
+        .expect("the refused answer is recorded on the entry that succeeded");
+    assert!(detail.contains("was refused because"), "{detail}");
+    assert!(detail.contains("used instead"), "{detail}");
+    assert_check(&report, CheckCode::RevocationOk, CheckStatus::Passed);
+    // And the summary carries it too, so a reader who only looks at the checks
+    // still learns that the responder was not usable.
+    let summary = report.signatures[0]
+        .checks
+        .iter()
+        .find(|check| check.code == CheckCode::RevocationOk)
+        .expect("the summary is present");
+    assert!(summary.message.contains("refused"), "{}", summary.message);
+}
+
+/// When nothing rescues it, the refusal is the reported reason and it says
+/// why, rather than leaving an operator to guess.
+#[test]
+fn an_unusable_ocsp_answer_alone_names_why_it_was_refused() {
+    let pki = central(&[]);
+    let xml = central_dossier(&pki);
+    let report = run(
+        &xml,
+        vec![pki.root_der.clone()],
+        Vec::new(),
+        vec![central_response(&pki, &pki.responder_der)],
+    );
+
+    let summary = report.signatures[0]
+        .checks
+        .iter()
+        .find(|check| check.code == CheckCode::RevocationDataInvalid)
+        .expect("the summary is present");
+    assert!(
+        summary.message.contains("trusted responder"),
+        "{}",
+        summary.message
+    );
+}
+
+/// The issuing CA certificate, rebuilt so a test can issue under it.
+fn x509_issued(pki: &Central) -> common::Issued {
+    let root_key = rsa_key(keys::ROOT_RSA2048);
+    let root = self_signed(
+        &CertSpec::ca("openSzigno Test Root", BasicConstraints::Unconstrained),
+        &root_key,
+    );
+    let issued = issued_by(
+        &CertSpec::ca("openSzigno Issuing CA", BasicConstraints::Constrained(0)),
+        &rsa_key(keys::INTERMEDIATE_RSA2048),
+        &root,
+        &root_key,
+    );
+    assert_eq!(issued.der, pki.issuing_der, "the rebuild is deterministic");
+    issued
+}

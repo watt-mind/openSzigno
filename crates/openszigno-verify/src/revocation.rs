@@ -76,7 +76,7 @@ const OID_CRL_REASON: ObjectIdentifier = ObjectIdentifier::new_unwrap("2.5.29.21
 const OID_CERTIFICATE_ISSUER: ObjectIdentifier = ObjectIdentifier::new_unwrap("2.5.29.29");
 const OID_INVALIDITY_DATE: ObjectIdentifier = ObjectIdentifier::new_unwrap("2.5.29.24");
 const OID_CRL_DISTRIBUTION_POINTS: ObjectIdentifier = ObjectIdentifier::new_unwrap("2.5.29.31");
-const OID_KP_OCSP_SIGNING: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.3.6.1.5.5.7.3.9");
+use crate::certs::OID_KP_OCSP_SIGNING;
 
 const OID_SHA1: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.3.14.3.2.26");
 const OID_SHA256: ObjectIdentifier = ObjectIdentifier::new_unwrap("2.16.840.1.101.3.4.2.1");
@@ -127,6 +127,58 @@ impl RevocationOrigin {
             Self::OnlineOcsp => "online_ocsp",
         }
     }
+
+    /// How to name this source in a sentence.
+    const fn describe(self) -> &'static str {
+        match self {
+            Self::EmbeddedCrl => "a CRL the signature embeds",
+            Self::EmbeddedOcsp => "an OCSP response the signature embeds",
+            Self::StoreCrl => "a CRL from the revocation store",
+            Self::StoreOcsp => "an OCSP response from the revocation store",
+            Self::OnlineCrl => "a CRL fetched online",
+            Self::OnlineOcsp => "an OCSP response fetched online",
+        }
+    }
+}
+
+/// Which RFC 6960 model authorised the responder that answered.
+///
+/// RFC 6960 section 2.2 gives a relying party three ways to accept an OCSP
+/// response, and openSzigno implements all three with a fixed precedence:
+///
+/// 1. **`issuer`** — the CA that issued the queried certificate signed the
+///    response itself. Nothing more is needed and nothing weaker is preferred.
+/// 2. **`delegated`** — a certificate that CA issued, carrying
+///    `id-kp-OCSPSigning`, signed it. The CA's own signature over that
+///    certificate is the delegation.
+/// 3. **`trusted`** — the responder is one the *relying party* trusts
+///    directly: its certificate carries `id-kp-OCSPSigning` and its path
+///    validates to a configured trust anchor at `producedAt`, even though the
+///    queried certificate's issuer never delegated to it.
+///
+/// The third exists because central responders are real. A national CA
+/// operator commonly runs one responder for every CA in its hierarchy, issued
+/// by a sibling CA rather than by whichever CA issued the certificate being
+/// asked about; a verifier that implemented only the first two models rejects
+/// every one of those answers as unauthorised. Its authority is the caller's
+/// trust store, which is why it comes last: it rests on what the operator
+/// configured rather than on what the issuing CA said.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResponderModel {
+    Issuer,
+    Delegated,
+    Trusted,
+}
+
+impl ResponderModel {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Issuer => "issuer",
+            Self::Delegated => "delegated",
+            Self::Trusted => "trusted",
+        }
+    }
 }
 
 /// What was concluded about one certificate.
@@ -165,6 +217,15 @@ pub struct CertificateRevocation {
     pub next_update: Option<String>,
     /// OCSP only.
     pub produced_at: Option<String>,
+    /// OCSP only: which RFC 6960 model authorised the responder that answered.
+    pub responder_model: Option<ResponderModel>,
+    /// A sentence about data that was consulted and could not be used: why an
+    /// answer was refused, and — when a later source answered instead — which
+    /// one did. Present on an entry that ended `unknown` *and* on one that
+    /// succeeded after something earlier was refused, because "a CRL saved
+    /// this" is exactly what an operator debugging an OCSP responder needs to
+    /// be told.
+    pub detail: Option<String>,
 }
 
 impl CertificateRevocation {
@@ -178,6 +239,8 @@ impl CertificateRevocation {
             this_update: None,
             next_update: None,
             produced_at: None,
+            responder_model: None,
+            detail: None,
         }
     }
 
@@ -251,6 +314,11 @@ pub struct PathRevocationInput<'a> {
     pub path: &'a [ParsedCertificate],
     /// Untrusted certificates offered as CRL signers and OCSP responders.
     pub candidates: &'a [ParsedCertificate],
+    /// The configured trust anchors, which are what the RFC 6960 section 2.2
+    /// "trusted responder" model rests on. Nothing else in this module uses
+    /// them: a CRL signer and a delegated responder are authorised by the
+    /// issuing CA, not by the caller's store.
+    pub anchors: &'a [ParsedCertificate],
     pub data: &'a RevocationData<'a>,
     pub time: UnixTime,
     /// Whether the validation time is *proven* — that is, whether it came from
@@ -270,6 +338,13 @@ pub struct PathRevocation {
     pub per_certificate: Vec<CertificateRevocation>,
     /// The single check the path contributes to the signature's verdict.
     pub check: Check,
+    /// Informational checks about *how* an answer was obtained, which report
+    /// rather than decide and so never block: currently
+    /// `ocsp_responder_trusted`, emitted when a response was accepted under
+    /// the RFC 6960 section 2.2 trusted-responder model, because that rests on
+    /// the caller's own trust store rather than on the issuing CA's word and a
+    /// reader is entitled to know which it was.
+    pub notes: Vec<Check>,
 }
 
 /// The check that reports the policy actually applied, so the machine output
@@ -303,12 +378,13 @@ pub fn is_covered(
     subject: &ParsedCertificate,
     issuer: &ParsedCertificate,
     candidates: &[ParsedCertificate],
+    anchors: &[ParsedCertificate],
     data: &RevocationData<'_>,
     time: UnixTime,
     limits: &VerifyLimits,
 ) -> bool {
     matches!(
-        check_certificate(subject, issuer, candidates, data, time, limits).status,
+        check_certificate(subject, issuer, candidates, anchors, data, time, limits).status,
         RevocationStatus::Good | RevocationStatus::Revoked
     )
 }
@@ -323,6 +399,7 @@ pub fn check_path(input: &PathRevocationInput<'_>) -> PathRevocation {
     let PathRevocationInput {
         path,
         candidates,
+        anchors,
         data,
         time,
         // `summarise` reads it from the input; destructuring it here would
@@ -352,6 +429,7 @@ pub fn check_path(input: &PathRevocationInput<'_>) -> PathRevocation {
                     role.as_str()
                 ),
             ),
+            notes: Vec::new(),
         };
     }
     if path.len() < 2 {
@@ -373,21 +451,37 @@ pub fn check_path(input: &PathRevocationInput<'_>) -> PathRevocation {
                     role.as_str()
                 ),
             ),
+            notes: Vec::new(),
         };
     }
 
     let mut per_certificate = Vec::with_capacity(path.len());
     for window in path.windows(2) {
         per_certificate.push(check_certificate(
-            &window[0], &window[1], candidates, data, time, limits,
+            &window[0], &window[1], candidates, anchors, data, time, limits,
         ));
     }
     per_certificate.push(CertificateRevocation::trust_anchor());
 
     let check = summarise(path, &per_certificate, input);
+    let trusted = per_certificate
+        .iter()
+        .filter(|entry| entry.responder_model == Some(ResponderModel::Trusted))
+        .count();
+    let mut notes = Vec::new();
+    if trusted > 0 {
+        notes.push(Check::info(
+            CheckCode::OcspResponderTrusted,
+            format!(
+                "in {}, {trusted} certificate(s) were answered for by an OCSP responder the issuing CA did not delegate to, accepted under RFC 6960 section 2.2 because its certificate carries id-kp-OCSPSigning and chains to a configured trust anchor",
+                input.role.as_str()
+            ),
+        ));
+    }
     PathRevocation {
         per_certificate,
         check,
+        notes,
     }
 }
 
@@ -507,12 +601,12 @@ fn summarise(
         CheckCode::RevocationDataStale,
         CheckCode::RevocationStatusUnknown,
     ] {
-        if let Some((index, _)) = entries
+        if let Some((index, entry)) = entries
             .iter()
             .enumerate()
             .find(|(_, entry)| entry.code == code.as_str())
         {
-            return Check::unknown(code, message_for(code, path, index, input));
+            return Check::unknown(code, message_for(code, path, index, entry, input));
         }
     }
     if let Some((index, entry)) = entries
@@ -542,10 +636,15 @@ fn summarise(
             )
         };
     }
+    let note = entries
+        .iter()
+        .find_map(|entry| entry.detail.as_deref())
+        .map(|detail| format!("; {detail}"))
+        .unwrap_or_default();
     Check::passed(
         CheckCode::RevocationOk,
         format!(
-            "in {chain}, fresh, verified revocation data covers all {checked} non-anchor certificates"
+            "in {chain}, fresh, verified revocation data covers all {checked} non-anchor certificates{note}"
         ),
     )
 }
@@ -554,14 +653,20 @@ fn message_for(
     code: CheckCode,
     path: &[ParsedCertificate],
     index: usize,
+    entry: &CertificateRevocation,
     input: &PathRevocationInput<'_>,
 ) -> String {
     let what = describe(path, index);
     let chain = input.role.as_str();
     match code {
-        CheckCode::RevocationDataInvalid => format!(
-            "in {chain}, the revocation data for {what} could not be used: it was not signed by an authorised issuer, or it uses a form this build refuses"
-        ),
+        CheckCode::RevocationDataInvalid => match entry.detail.as_deref() {
+            Some(detail) => {
+                format!("in {chain}, the revocation data for {what} could not be used: {detail}")
+            }
+            None => format!(
+                "in {chain}, the revocation data for {what} could not be used: it was not signed by an authorised issuer, or it uses a form this build refuses"
+            ),
+        },
         CheckCode::RevocationDataStale => format!(
             "in {chain}, the revocation data for {what} had expired before the validation time{}",
             crl_hint(&path[index])
@@ -591,6 +696,7 @@ enum Answer {
         this_update: UnixTime,
         next_update: Option<UnixTime>,
         produced_at: Option<UnixTime>,
+        responder_model: Option<ResponderModel>,
     },
     Revoked {
         time: UnixTime,
@@ -598,12 +704,15 @@ enum Answer {
         this_update: UnixTime,
         next_update: Option<UnixTime>,
         produced_at: Option<UnixTime>,
+        responder_model: Option<ResponderModel>,
     },
     /// The data is well formed and authorised but says nothing about this
     /// certificate, or has expired.
     Stale,
-    /// The data could not be used at all.
-    Invalid,
+    /// The data could not be used at all, and why. The reason is reported,
+    /// because "unusable" without a cause is exactly the message an operator
+    /// cannot act on.
+    Invalid(&'static str),
     /// The data is about some other certificate; not a finding.
     NotApplicable,
 }
@@ -613,6 +722,7 @@ fn check_certificate(
     subject: &ParsedCertificate,
     issuer: &ParsedCertificate,
     candidates: &[ParsedCertificate],
+    anchors: &[ParsedCertificate],
     data: &RevocationData<'_>,
     time: UnixTime,
     limits: &VerifyLimits,
@@ -634,6 +744,12 @@ fn check_certificate(
     ];
 
     let mut fallback: Option<CertificateRevocation> = None;
+    // The first source that was consulted and refused. An unusable answer must
+    // never end the search — a central responder this build cannot authorise
+    // is a very ordinary thing to meet, and the CRL two tiers down answers the
+    // same question — but it must stay visible, whether or not something later
+    // rescued the certificate.
+    let mut refused: Option<(RevocationOrigin, &'static str)> = None;
     for (origin, items) in tiers {
         for item in items.iter().take(limits.max_revocation_items) {
             if item.len() > MAX_ITEM_BYTES {
@@ -642,7 +758,9 @@ fn check_certificate(
             let answer = match origin {
                 RevocationOrigin::EmbeddedOcsp
                 | RevocationOrigin::StoreOcsp
-                | RevocationOrigin::OnlineOcsp => ocsp_answer(item, subject, issuer, time),
+                | RevocationOrigin::OnlineOcsp => {
+                    ocsp_answer(item, subject, issuer, candidates, anchors, time, limits)
+                }
                 RevocationOrigin::EmbeddedCrl
                 | RevocationOrigin::StoreCrl
                 | RevocationOrigin::OnlineCrl => {
@@ -651,13 +769,20 @@ fn check_certificate(
             };
             match answer {
                 Answer::NotApplicable => continue,
-                Answer::Invalid => {
+                Answer::Invalid(reason) => {
+                    if refused.is_none() {
+                        refused = Some((origin, reason));
+                    }
                     fallback.get_or_insert_with(|| {
                         let mut entry = CertificateRevocation::plain(
                             RevocationStatus::Unknown,
                             CheckCode::RevocationDataInvalid,
                         );
                         entry.source = Some(origin);
+                        entry.detail = Some(format!(
+                            "{} was refused because {reason}",
+                            origin.describe()
+                        ));
                         entry
                     });
                 }
@@ -675,6 +800,7 @@ fn check_certificate(
                     this_update,
                     next_update,
                     produced_at,
+                    responder_model,
                 } => {
                     let mut entry = CertificateRevocation::plain(
                         RevocationStatus::Good,
@@ -684,6 +810,8 @@ fn check_certificate(
                     entry.this_update = Some(format_rfc3339(this_update));
                     entry.next_update = next_update.map(format_rfc3339);
                     entry.produced_at = produced_at.map(format_rfc3339);
+                    entry.responder_model = responder_model;
+                    entry.detail = superseded(refused, origin);
                     return entry;
                 }
                 Answer::Revoked {
@@ -692,6 +820,7 @@ fn check_certificate(
                     this_update,
                     next_update,
                     produced_at,
+                    responder_model,
                 } => {
                     let (status, code) = if revoked_at <= time {
                         (RevocationStatus::Revoked, CheckCode::CertRevoked)
@@ -708,6 +837,8 @@ fn check_certificate(
                     entry.this_update = Some(format_rfc3339(this_update));
                     entry.next_update = next_update.map(format_rfc3339);
                     entry.produced_at = produced_at.map(format_rfc3339);
+                    entry.responder_model = responder_model;
+                    entry.detail = superseded(refused, origin);
                     return entry;
                 }
             }
@@ -719,6 +850,19 @@ fn check_certificate(
             CheckCode::RevocationStatusUnknown,
         )
     })
+}
+
+/// The sentence recording that something was refused before `used` answered.
+fn superseded(
+    refused: Option<(RevocationOrigin, &'static str)>,
+    used: RevocationOrigin,
+) -> Option<String> {
+    let (origin, reason) = refused?;
+    Some(format!(
+        "{} was refused because {reason}; {} was used instead",
+        origin.describe(),
+        used.describe()
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -733,7 +877,7 @@ fn crl_answer(
     time: UnixTime,
 ) -> Answer {
     let Ok(crl) = CertificateList::from_der(der) else {
-        return Answer::Invalid;
+        return Answer::Invalid("it is not a decodable CRL");
     };
     let tbs = &crl.tbs_cert_list;
 
@@ -749,18 +893,22 @@ fn crl_answer(
         for extension in extensions.iter() {
             if extension.extn_id == OID_DELTA_CRL_INDICATOR {
                 // A delta CRL is meaningless without the base it amends.
-                return Answer::Invalid;
+                return Answer::Invalid("it is a delta CRL and the base it amends is not to hand");
             }
             if extension.critical && !IMPLEMENTED_CRITICAL_CRL.contains(&extension.extn_id) {
-                return Answer::Invalid;
+                return Answer::Invalid(
+                    "it marks an extension critical whose semantics this build does not implement",
+                );
             }
             if extension.extn_id == OID_ISSUING_DISTRIBUTION_POINT {
                 let Ok(point) = IssuingDistributionPoint::from_der(extension.extn_value.as_bytes())
                 else {
-                    return Answer::Invalid;
+                    return Answer::Invalid("its issuingDistributionPoint could not be decoded");
                 };
                 if !idp_covers(&point, subject) {
-                    return Answer::Invalid;
+                    return Answer::Invalid(
+                        "its issuingDistributionPoint describes a scope that does not cover this certificate",
+                    );
                 }
             }
         }
@@ -768,7 +916,9 @@ fn crl_answer(
 
     // The signature, by the CA itself or by a delegate it authorised.
     if !crl_signature_verifies(&crl, issuer, candidates, time) {
-        return Answer::Invalid;
+        return Answer::Invalid(
+            "it was not signed by the issuing CA or by a delegate that CA authorised to sign CRLs",
+        );
     }
 
     let this_update = crate::certs::unix_time(tbs.this_update);
@@ -793,6 +943,7 @@ fn crl_answer(
             this_update,
             next_update,
             produced_at: None,
+            responder_model: None,
         };
     };
     revoked_from_entry(entry, this_update, next_update)
@@ -809,19 +960,25 @@ fn revoked_from_entry(
             if extension.extn_id == OID_CERTIFICATE_ISSUER {
                 // An entry that names a different certificate issuer is an
                 // indirect-CRL entry, which this build refuses.
-                return Answer::Invalid;
+                return Answer::Invalid("one of its entries names a different certificate issuer");
             }
             if extension.critical && !IMPLEMENTED_ENTRY.contains(&extension.extn_id) {
-                return Answer::Invalid;
+                return Answer::Invalid(
+                    "one of its entries marks an extension critical that this build does not implement",
+                );
             }
             if extension.extn_id == OID_CRL_REASON {
                 let Ok(code) = CrlReason::from_der(extension.extn_value.as_bytes()) else {
-                    return Answer::Invalid;
+                    return Answer::Invalid(
+                        "one of its entries carries an undecodable reason code",
+                    );
                 };
                 if code == CrlReason::RemoveFromCRL {
                     // `removeFromCRL` only means anything in a delta CRL, and
                     // delta CRLs are refused, so this entry is incoherent.
-                    return Answer::Invalid;
+                    return Answer::Invalid(
+                        "one of its entries says removeFromCRL outside a delta CRL",
+                    );
                 }
                 reason = Some(reason_name(code));
             }
@@ -833,6 +990,7 @@ fn revoked_from_entry(
         this_update,
         next_update,
         produced_at: None,
+        responder_model: None,
     }
 }
 
@@ -943,11 +1101,15 @@ const fn reason_name(reason: CrlReason) -> &'static str {
 // OCSP, RFC 6960
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 fn ocsp_answer(
     der: &[u8],
     subject: &ParsedCertificate,
     issuer: &ParsedCertificate,
+    candidates: &[ParsedCertificate],
+    anchors: &[ParsedCertificate],
     time: UnixTime,
+    limits: &VerifyLimits,
 ) -> Answer {
     // An `EncapsulatedOCSPValue` holds a whole `OCSPResponse`; a store file may
     // hold either that or a bare `BasicOCSPResponse`.
@@ -956,22 +1118,22 @@ fn ocsp_answer(
             if response.response_status != OcspResponseStatus::Successful {
                 // A responder that reported a failure carries no status to
                 // believe; reading past it would turn a refusal into an answer.
-                return Answer::Invalid;
+                return Answer::Invalid("its OCSPResponseStatus is not successful");
             }
             let Some(bytes) = response.response_bytes else {
-                return Answer::Invalid;
+                return Answer::Invalid("it carries no response bytes");
             };
             if bytes.response_type != const_oid::db::rfc6960::ID_PKIX_OCSP_BASIC {
-                return Answer::Invalid;
+                return Answer::Invalid("its response type is not id-pkix-ocsp-basic");
             }
             match BasicOcspResponse::from_der(bytes.response.as_bytes()) {
                 Ok(basic) => basic,
-                Err(_) => return Answer::Invalid,
+                Err(_) => return Answer::Invalid("its BasicOCSPResponse could not be decoded"),
             }
         }
         Err(_) => match BasicOcspResponse::from_der(der) {
             Ok(basic) => basic,
-            Err(_) => return Answer::Invalid,
+            Err(_) => return Answer::Invalid("it is not a decodable OCSP response"),
         },
     };
 
@@ -984,11 +1146,22 @@ fn ocsp_answer(
         return Answer::NotApplicable;
     };
 
-    if !responder_authorised(&basic, issuer, time) {
-        return Answer::Invalid;
-    }
-
     let produced_at = generalized(&basic.tbs_response_data.produced_at.0);
+    let Some(responder_model) = responder_authorised(
+        &basic,
+        issuer,
+        candidates,
+        anchors,
+        produced_at,
+        time,
+        limits,
+    ) else {
+        return Answer::Invalid(
+            "the responder is not the issuing CA, is not a responder that CA delegated to, and does not chain to a configured trust anchor as a trusted responder",
+        );
+    };
+    let responder_model = Some(responder_model);
+
     let this_update = generalized(&single.this_update.0);
     let next_update = single.next_update.as_ref().map(|time| generalized(&time.0));
     if !covers(this_update, next_update, time) {
@@ -1000,6 +1173,7 @@ fn ocsp_answer(
             this_update,
             next_update,
             produced_at: Some(produced_at),
+            responder_model,
         },
         CertStatus::Unknown(_) => Answer::Stale,
         CertStatus::Revoked(info) => Answer::Revoked {
@@ -1008,6 +1182,7 @@ fn ocsp_answer(
             this_update,
             next_update,
             produced_at: Some(produced_at),
+            responder_model,
         },
     }
 }
@@ -1062,44 +1237,128 @@ fn digest_by_oid(oid: ObjectIdentifier, bytes: &[u8]) -> Option<Vec<u8>> {
     }
 }
 
-/// RFC 6960 section 4.2.2.2: a response is authorised when the CA signed it
-/// itself, or when a certificate the CA issued carries `id-kp-OCSPSigning`.
+/// Which RFC 6960 model, if any, authorises this response.
+///
+/// Three models, tried in this order, and the order is the point:
+///
+/// 1. **Issuer.** The CA that issued the queried certificate signed the
+///    response itself. It is the strongest answer available and nothing weaker
+///    is looked at once it holds.
+/// 2. **Delegated** (section 4.2.2.2). A certificate that same CA issued,
+///    naming itself in the `ResponderID`, carrying `id-kp-OCSPSigning` and
+///    valid at the time asked about, signed it. The CA's signature over the
+///    responder certificate *is* the delegation, so this needs no trust store.
+/// 3. **Trusted responder** (section 2.2). The responder is one the relying
+///    party trusts directly: it carries `id-kp-OCSPSigning` and its path
+///    validates to a configured trust anchor at `producedAt`, even though the
+///    queried certificate's issuer never delegated to it.
+///
+/// The third model is not a relaxation of the first two, it is the third thing
+/// RFC 6960 has always allowed, and real hierarchies need it: a national CA
+/// operator commonly runs **one** responder for every CA it operates, issued
+/// by a sibling CA rather than by whichever CA issued the certificate being
+/// asked about. A verifier implementing only the delegation model rejects
+/// every one of those answers as unauthorised, which is what openSzigno did
+/// before M3 and is why 50 real responses came back
+/// `revocation_data_invalid`.
+///
+/// What keeps it honest is where the authority comes from. A delegated
+/// responder is vouched for by the issuing CA; a trusted responder is vouched
+/// for by the **caller's own trust store or trusted list**, through a full
+/// path validation with `id-kp-OCSPSigning` required on the leaf. A responder
+/// that reaches no configured anchor authorises nothing, so this can never
+/// admit a response the operator did not already choose to trust the signer
+/// of. It is tried last so that a CA's own word always wins over the caller's
+/// configuration where both are available.
 fn responder_authorised(
     basic: &BasicOcspResponse,
     issuer: &ParsedCertificate,
+    candidates: &[ParsedCertificate],
+    anchors: &[ParsedCertificate],
+    produced_at: UnixTime,
     time: UnixTime,
-) -> bool {
+    limits: &VerifyLimits,
+) -> Option<ResponderModel> {
     let Ok(message) = basic.tbs_response_data.to_der() else {
-        return false;
+        return None;
     };
-    let Some(signature) = basic.signature.as_bytes() else {
-        return false;
-    };
+    let signature = basic.signature.as_bytes()?;
     let algorithm = basic.signature_algorithm.oid;
+    let responder = &basic.tbs_response_data.responder_id;
 
-    if responder_names(&basic.tbs_response_data.responder_id, issuer)
+    // 1. The issuing CA answered for itself.
+    if responder_names(responder, issuer)
         && verify_der_signature(&issuer.certificate, algorithm, &message, signature).is_ok()
     {
-        return true;
+        return Some(ResponderModel::Issuer);
     }
 
-    let delegates = basic.certs.as_deref().unwrap_or_default();
-    delegates.iter().any(|certificate| {
-        let Ok(der) = certificate.to_der() else {
-            return false;
-        };
-        let Some(parsed) =
-            ParsedCertificate::from_der(&der, crate::certs::CertificateSource::OcspResponse)
-        else {
-            return false;
-        };
-        responder_names(&basic.tbs_response_data.responder_id, &parsed)
-            && parsed.has_ocsp_signing_eku()
+    // The certificates the response carries, plus everything else the run has
+    // to hand. A central responder's own certificate usually travels with the
+    // response; its issuing CA usually does not, and comes from the dossier's
+    // `CertificateValues` or the trust store instead.
+    let mut offered: Vec<ParsedCertificate> = Vec::new();
+    for certificate in basic.certs.as_deref().unwrap_or_default() {
+        if let Ok(der) = certificate.to_der()
+            && let Some(parsed) =
+                ParsedCertificate::from_der(&der, crate::certs::CertificateSource::OcspResponse)
+        {
+            offered.push(parsed);
+        }
+    }
+    let named: Vec<&ParsedCertificate> = offered
+        .iter()
+        .chain(candidates.iter())
+        .filter(|parsed| responder_names(responder, parsed))
+        .collect();
+
+    // 2. A responder the issuing CA delegated to.
+    for parsed in &named {
+        if parsed.has_ocsp_signing_eku()
             && parsed.is_valid_at(time)
             && parsed.issuer_der() == issuer.subject_der()
-            && crate::certs::verify_issued_by(&parsed, issuer)
+            && crate::certs::verify_issued_by(parsed, issuer)
             && verify_der_signature(&parsed.certificate, algorithm, &message, signature).is_ok()
-    })
+        {
+            return Some(ResponderModel::Delegated);
+        }
+    }
+
+    // 3. A responder the caller trusts directly.
+    //
+    // The path is validated at `producedAt`, which is the instant the
+    // responder asserts it made the statement: a responder certificate that
+    // had expired by then was not entitled to say anything, and one that
+    // expired afterwards said it while it still was. `keyUsage` is enforced by
+    // the same path validator that enforces it everywhere else.
+    if anchors.is_empty() {
+        return None;
+    }
+    for parsed in &named {
+        if !parsed.has_ocsp_signing_eku() {
+            continue;
+        }
+        if verify_der_signature(&parsed.certificate, algorithm, &message, signature).is_err() {
+            continue;
+        }
+        let pool: Vec<ParsedCertificate> = offered
+            .iter()
+            .chain(candidates.iter())
+            .cloned()
+            .collect::<Vec<_>>();
+        let outcome = crate::certs::validate_path(
+            parsed,
+            &crate::certs::dedup(pool),
+            anchors,
+            produced_at,
+            limits,
+            crate::certs::PathPurpose::OcspSigning,
+        );
+        if outcome.code == CheckCode::CertPathOk {
+            return Some(ResponderModel::Trusted);
+        }
+    }
+    None
 }
 
 /// Whether a `ResponderID` names this certificate, by subject name or by the

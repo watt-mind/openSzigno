@@ -68,6 +68,10 @@ pub const OID_KP_TIME_STAMPING: ObjectIdentifier =
     ObjectIdentifier::new_unwrap("1.3.6.1.5.5.7.3.8");
 /// `id-kp-documentSigning`, RFC 9336. The purpose that exists precisely for
 /// signing documents, rather than for authenticating a host or a mailbox.
+/// `id-kp-OCSPSigning`, which RFC 6960 requires on a responder certificate
+/// that is not the CA itself.
+pub const OID_KP_OCSP_SIGNING: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.3.6.1.5.5.7.3.9");
+
 pub const OID_KP_DOCUMENT_SIGNING: ObjectIdentifier =
     ObjectIdentifier::new_unwrap("1.3.6.1.5.5.7.3.36");
 /// `szOID_KP_DOCUMENT_SIGNING`, Microsoft's "Document Signing" extended key
@@ -158,6 +162,12 @@ pub enum PathPurpose {
     /// A timestamp authority certificate, which RFC 3161 requires to carry a
     /// critical `extendedKeyUsage` of exactly `id-kp-timeStamping`.
     TimeStamping,
+    /// An OCSP responder certificate, validated to an anchor under the RFC
+    /// 6960 section 2.2 "trusted responder" model. It must carry
+    /// `id-kp-OCSPSigning`, which is the whole point of the model: a responder
+    /// the relying party trusts directly, rather than one the queried
+    /// certificate's own CA delegated to.
+    OcspSigning,
 }
 
 /// One link of a reported chain.
@@ -833,6 +843,7 @@ fn check_path(
                         || usages.contains(&OID_MS_DOCUMENT_SIGNING)
                 }
                 PathPurpose::TimeStamping => usages.contains(&OID_KP_TIME_STAMPING),
+                PathPurpose::OcspSigning => usages.contains(&OID_KP_OCSP_SIGNING),
             };
         let non_repudiation = path[0]
             .extension::<KeyUsage>()
@@ -878,6 +889,7 @@ fn check_path(
             || match purpose {
                 PathPurpose::Signing => usages.contains(&OID_KP_DOCUMENT_SIGNING),
                 PathPurpose::TimeStamping => usages.contains(&OID_KP_TIME_STAMPING),
+                PathPurpose::OcspSigning => usages.contains(&OID_KP_OCSP_SIGNING),
             };
         if !permitted {
             return Err((

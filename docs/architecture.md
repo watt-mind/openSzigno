@@ -1207,12 +1207,64 @@ certificate is not a usable one.
 
 **OCSP**, per RFC 6960: the `OCSPResponseStatus` must be `successful`; the
 `certID` must match the certificate, by issuer-name hash, issuer-key hash and
-serial number; the responder must be the issuing CA itself or a delegate that
-CA issued which carries `id-kp-OCSPSigning`, identified `byName` or `byKey`;
-and the signature must verify under the pinned allowlist. The nonce is
-deliberately ignored: offline validation replays a response produced for
-someone else's request, so a nonce could never match and demanding one would
-make every archived response unusable.
+serial number; the responder must be **authorised** (below); and the signature
+must verify under the pinned allowlist. The nonce is deliberately ignored:
+offline validation replays a response produced for someone else's request, so a
+nonce could never match and demanding one would make every archived response
+unusable.
+
+#### How a responder is authorised
+
+RFC 6960 section 2.2 gives a relying party three ways to accept a response, and
+openSzigno implements all three under a fixed precedence. Whichever one applied
+is reported in `chain[].revocation.responder_model`.
+
+| Model | What it requires | Where the authority comes from |
+| --- | --- | --- |
+| `issuer` | The CA that issued the queried certificate signed the response itself. | The CA. |
+| `delegated` | A certificate that same CA issued, naming itself in the `ResponderID`, carrying `id-kp-OCSPSigning` and valid at the validation time, signed it. | The CA's signature over the responder certificate *is* the delegation, so no trust store is needed. |
+| `trusted` | The responder carries `id-kp-OCSPSigning` and its own path validates to a **configured trust anchor** — trust store or trusted list — at the response's `producedAt`, under the same path rules and `keyUsage` checks every other chain gets. | The caller's own trust material. |
+
+The third model is not a relaxation of the first two; it is the third thing
+RFC 6960 has always allowed, and real hierarchies need it. A national CA
+operator commonly runs **one** responder for every CA it operates, issued by a
+sibling CA rather than by whichever CA issued the certificate being asked
+about. A verifier implementing only the delegation model rejects every one of
+those answers as unauthorised — which is what this project did before M3, and
+what made real Microsec OCSP responses come back `revocation_data_invalid`.
+
+What keeps it honest is where the authority sits. A trusted responder is
+vouched for by the caller's own store, through a full path validation with
+`id-kp-OCSPSigning` required on the leaf; a responder that reaches no
+configured anchor authorises nothing. So this can never admit a response whose
+signer the operator had not already chosen to trust, and it is tried **last**,
+so a CA's own word always wins where both apply. The path is validated at
+`producedAt`, the instant the responder asserts it spoke: a certificate that
+had expired by then was not entitled to say anything, and one that expired
+afterwards said it while it still was.
+
+`ocsp_responder_trusted` (`info`) is emitted when the third model was used, so
+a reader can tell an answer that rests on the issuing CA from one that rests on
+their own trust store. It reports rather than decides, so it never blocks.
+
+#### Tier fallback
+
+**An unusable answer never ends the search.** The tiers above are consulted in
+order, and a source that is found but refused — an OCSP response no model
+authorises, a delta CRL, a CRL from a partition this certificate does not name
+— is recorded and the next tier is tried. Only when every tier has been
+exhausted is `revocation_data_invalid` or `revocation_status_unknown` reported.
+A central responder this build cannot authorise is a very ordinary thing to
+meet, and the CA's CRL two tiers down answers the same question.
+
+The refusal stays visible either way. `chain[].revocation.detail` carries a
+sentence saying what was refused and why — and, when a later source answered,
+which one did: *"an OCSP response fetched online was refused because …; a CRL
+fetched online was used instead"*. The path summary repeats it, so a reader who
+only looks at the checks still learns that the responder was not usable. A
+certificate that ends `unknown` gets the same sentence naming the cause, rather
+than the generic "not signed by an authorised issuer, or it uses a form this
+build refuses" that gave an operator nothing to act on.
 
 SHA-1 is accepted in the `certID` and nowhere else. Those hashes identify which
 certificate a response is about, they are not a signature, and RFC 6960 makes
@@ -1441,7 +1493,9 @@ verify anything.
               "reason": null,
               "this_update": "2020-05-15T00:00:00Z",
               "next_update": "2020-07-01T00:00:00Z",
-              "produced_at": "2020-05-15T00:00:00Z"
+              "produced_at": "2020-05-15T00:00:00Z",
+              "responder_model": "delegated",
+              "detail": null
             }
           },
           { "subject_cn": "…", "issuer_cn": "…", "serial_hex": "…",
@@ -1451,7 +1505,8 @@ verify anything.
             "revocation": { "status": "trust_anchor",
               "code": "revocation_not_checked", "source": null,
               "revocation_time": null, "reason": null,
-              "this_update": null, "next_update": null, "produced_at": null } }
+              "this_update": null, "next_update": null, "produced_at": null,
+              "responder_model": null, "detail": null } }
         ],
         "references": [
           {
@@ -1499,7 +1554,8 @@ verify anything.
                 "revocation": { "status": "good", "code": "revocation_ok",
                   "source": "store_crl", "revocation_time": null,
                   "reason": null, "this_update": "2020-05-01T00:00:00Z",
-                  "next_update": "2020-07-01T00:00:00Z", "produced_at": null } }
+                  "next_update": "2020-07-01T00:00:00Z", "produced_at": null,
+                  "responder_model": null, "detail": null } }
             ],
             "verified": true,
             "checks": [
@@ -1547,6 +1603,9 @@ Notes on the shape:
   `revoked_after_validation_time`, `unknown`, `not_checked`, or
   `trust_anchor`, and `source` is one of `embedded_crl`, `embedded_ocsp`,
   `store_crl`, `store_ocsp`, `online_crl`, or `online_ocsp`.
+  `responder_model` is `issuer`, `delegated` or `trusted` for an answer that
+  came from OCSP and `null` otherwise; `detail` carries the sentence about a
+  source that was consulted and refused, whether or not a later one answered.
   The anchor's entry is always `trust_anchor`, because the
   anchor is never asked about; the whole object is `null` only when no path was
   built at all.
@@ -1675,7 +1734,8 @@ verify), and `revocation_not_checked` (the caller switched revocation off).
 | `cert_revoked_after_validation_time` | `info` / `unknown` | A certificate was revoked *after* the instant being validated, so that revocation did not apply then. `info` when the validation time was **proven** by a fully verified signature timestamp, `unknown` when it was merely asserted by `--at` or the clock. Never `passed`: the certificate really was revoked, and the message gives the time and reason. |
 | `revocation_status_unknown` | `unknown` | No usable revocation data covers a certificate in the path, or no path was built to ask about. Under `--online`, also emitted once per failed fetch, naming the URL and the failure class (`timeout`, `http status <code>`, `too large`, `redirect`, `invalid`, `transport`). Blocking either way: a fetch that did not happen leaves the certificate exactly as uncovered as it was. |
 | `revocation_data_stale` | `unknown` | The data's `nextUpdate` had passed at the validation time, or it carries none and its `thisUpdate` precedes it. Also the OCSP `unknown` status. |
-| `revocation_data_invalid` | `unknown` | Data was found but could not be used: signed by someone unauthorised, a delta or indirect CRL, an unimplemented `issuingDistributionPoint` form, a critical CRL extension this build does not implement, or an OCSP response whose status is not `successful`. `unknown`, not `failed`: unusable data means the tool could not answer. |
+| `revocation_data_invalid` | `unknown` | Every source that covered a certificate was found but could not be used: signed by someone unauthorised, a delta or indirect CRL, an unimplemented `issuingDistributionPoint` form, a critical CRL extension this build does not implement, or an OCSP response whose status is not `successful`. The message names the cause. Emitted only after every tier has been tried. `unknown`, not `failed`: unusable data means the tool could not answer. |
+| `ocsp_responder_trusted` | `info` | An OCSP response was accepted under the RFC 6960 section 2.2 trusted-responder model: the responder is not the issuing CA and that CA did not delegate to it, but its certificate carries `id-kp-OCSPSigning` and chains to a configured anchor. Reported because this rests on the caller's trust store rather than on the issuing CA's word. |
 | `trust_list_loaded` | `info` | A `--trust-list` file was read; the message says how many anchors it contributed. |
 | `trust_list_unverified` | `unknown` | A trusted list was used without `--trust-list-signer`, so its own signature was not checked. Blocking. |
 | `trust_list_signature_ok` | `passed` | The list's enveloped XMLDSig signature verified against the supplied signer certificate and covers the whole document. |

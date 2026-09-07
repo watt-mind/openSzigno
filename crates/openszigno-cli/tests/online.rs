@@ -201,6 +201,21 @@ fn good_crl(pki: &Pki) -> Vec<u8> {
     ))
 }
 
+/// A well-formed OCSP response about the signer, signed by a certificate no
+/// model this build implements can authorise: it is not the issuing CA, that
+/// CA did not issue it, and it carries no `id-kp-OCSPSigning`.
+fn unauthorised_ocsp(pki: &Pki) -> Vec<u8> {
+    let mut spec = OcspSpec::new(
+        pki.root_der.clone(),
+        pki.signer_der.clone(),
+        rsa_key(keys::SECOND_RSA2048),
+    );
+    spec.responder_der = Some(pki.other_root_der.clone());
+    spec.include_responder_certificate = true;
+    spec.sha256_cert_id = true;
+    build_ocsp(&spec)
+}
+
 fn good_ocsp(pki: &Pki) -> Vec<u8> {
     let mut spec = OcspSpec::new(
         pki.root_der.clone(),
@@ -418,6 +433,37 @@ fn nothing_is_fetched_for_a_certificate_the_offline_store_already_covers() {
             .iter()
             .any(|check| check.contains("http status")),
         "no fetch was attempted: {:?}",
+        checks(&report)
+    );
+}
+
+/// The case the corpus hit, end to end: the responder answers, its answer
+/// cannot be authorised, and the CRL two tiers down has to be fetched anyway.
+///
+/// A run that stopped at "the server replied" would never fetch the CRL and
+/// would leave the certificate uncovered, which is exactly what made 50 real
+/// responses look like a dead end.
+#[test]
+fn an_unusable_ocsp_answer_does_not_stop_the_crl_from_being_fetched() {
+    let (_pki, dossier_path, store, _fixture) = with_urls(Some("/ca.crl"), Some("/ocsp"), |pki| {
+        vec![
+            ("/ocsp", Reply::Body(unauthorised_ocsp(pki))),
+            ("/ca.crl", Reply::Body(good_crl(pki))),
+        ]
+    });
+
+    let report = verify_online(&dossier_path, &store, &[]);
+    assert_eq!(
+        end_entity_source(&report).as_deref(),
+        Some("online_crl"),
+        "{:?}",
+        checks(&report)
+    );
+    assert!(
+        checks(&report)
+            .iter()
+            .any(|check| check.starts_with("revocation_ok=passed") && check.contains("refused")),
+        "the refused answer stays visible: {:?}",
         checks(&report)
     );
 }

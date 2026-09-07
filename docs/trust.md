@@ -320,11 +320,52 @@ There is no grace period, on purpose. A grace period is a decision to accept
 data that has expired, which is exactly the decision a verifier must not make
 silently.
 
+### Which OCSP responders are believed
+
+RFC 6960 gives three ways for a responder to be authorised, and openSzigno
+accepts all three, in this order:
+
+1. **The issuing CA answered for itself.** Nothing else is needed.
+2. **A responder that CA delegated to** — a certificate the CA issued, carrying
+   `id-kp-OCSPSigning`. The CA's signature over that certificate is the
+   delegation.
+3. **A responder you trust directly.** Its certificate carries
+   `id-kp-OCSPSigning` and its own path validates to an anchor in your
+   `--trust-store` or `--trust-list`, at the response's `producedAt`.
+
+The third one is what makes a real Hungarian dossier verify. Microsec, like
+most national CA operators, runs **one** OCSP responder for every CA it
+operates, and that responder's certificate is issued by a sibling CA rather
+than by whichever CA issued the certificate being asked about. Until M3 this
+tool implemented only the first two models and refused every one of those
+responses as unauthorised; supplying the operator's root as an anchor now
+covers the responder as well as the CAs.
+
+The report says which model applied, in
+`chain[].revocation.responder_model` (`issuer`, `delegated`, `trusted`), and
+emits `ocsp_responder_trusted` (`info`) when the third one was used. Nothing
+about the third model is looser than the other two: a responder that reaches no
+anchor **you** configured authorises nothing, so it can only accept a signer you
+had already chosen to trust.
+
+### One unusable answer is not the end
+
+Sources are consulted in the priority order above, and a source that is found
+but refused does not stop the search: the next tier is tried, and only when
+they are all exhausted is the certificate reported as uncovered. An OCSP
+response this build cannot authorise, followed by the CA's own CRL, ends as
+`good` from the CRL.
+
+The refusal stays in the report either way. `chain[].revocation.detail` says
+what was refused and why, and which source answered instead, and the path
+summary repeats it — so a `revocation_ok` that was rescued by a CRL still tells
+you your responder was not usable, which is the thing worth fixing.
+
 ### What makes data unusable
 
 | Situation | Code | Status |
 | --- | --- | --- |
-| A CRL or response signed by someone the CA did not authorise | `revocation_data_invalid` | `unknown` |
+| A CRL signed by someone the CA did not authorise, or an OCSP response no responder model above accepts | `revocation_data_invalid` | `unknown` |
 | A delta CRL, an indirect CRL, a scope restricted to reasons or attribute certificates | `revocation_data_invalid` | `unknown` |
 | A partitioned CRL naming a distribution point the certificate does not | `revocation_data_invalid` | `unknown` |
 | A critical CRL extension this build does not implement | `revocation_data_invalid` | `unknown` |
@@ -334,6 +375,8 @@ silently.
 
 All of them are `unknown`, never `failed`: unusable data means the tool could
 not answer, which is a different statement from "this certificate was revoked".
+Each is reported only after every source has been tried, and the message names
+the cause rather than saying only that something was wrong.
 
 ### A revocation dated after the signature
 

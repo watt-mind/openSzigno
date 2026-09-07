@@ -632,7 +632,13 @@ fn verify_command(args: &VerifyArgs) -> CliResult {
                     )
                 })?;
             let limits = openszigno_verify::VerifyLimits::default();
-            let fetched = fetcher.fill_gaps(&certificates, &data, clock.unix_time(), &limits);
+            let anchors: Vec<Vec<u8>> = trust
+                .anchors()
+                .iter()
+                .map(|anchor| anchor.der.clone())
+                .collect();
+            let fetched =
+                fetcher.fill_gaps(&certificates, &anchors, &data, clock.unix_time(), &limits);
             if let Some(directory) = &args.online_cache {
                 online::write_cache(directory, &fetched).map_err(|message| {
                     failure(

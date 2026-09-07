@@ -281,6 +281,15 @@ is written out in
   `certID` names the certificate's serial number, so a CA can see that someone
   is validating that certificate now. `--online-cache` plus a later offline run
   is the workflow for anyone who cares.
+- **The trusted-responder model rests on the caller's trust store.** Accepting
+  a responder the issuing CA never delegated to is what RFC 6960 section 2.2
+  provides for and what real central responders need, but it does move part of
+  the authority from the PKI to the operator's configuration. An operator who
+  anchors a root has, by that act, accepted every OCSP responder under it that
+  carries `id-kp-OCSPSigning`. The check is a full path validation with the
+  EKU required and the path validated at `producedAt`, and the model is tried
+  last, but the widening is real and is reported through
+  `ocsp_responder_trusted` so it is never silent.
 - **The `certID` uses SHA-256 only.** RFC 6960 makes SHA-1 the default and some
   responders answer only about a SHA-1 `certID`. Those simply yield no usable
   answer and the certificate stays `revocation_status_unknown`, which is the

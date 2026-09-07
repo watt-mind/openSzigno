@@ -146,6 +146,7 @@ impl Fetcher {
     pub fn fill_gaps(
         &self,
         certificates: &[Vec<u8>],
+        anchors: &[Vec<u8>],
         data: &RevocationData<'_>,
         time: i64,
         limits: &VerifyLimits,
@@ -156,6 +157,14 @@ impl Fetcher {
                 .filter_map(|der| ParsedCertificate::from_der(der, CertificateSource::KeyInfo))
                 .collect(),
         );
+        // The trust anchors, which are what the RFC 6960 section 2.2 trusted
+        // responder model rests on. Coverage has to be asked with them, or a
+        // response a run *will* accept would look uncovered here and provoke a
+        // fetch nobody needed.
+        let anchors: Vec<ParsedCertificate> = anchors
+            .iter()
+            .filter_map(|der| ParsedCertificate::from_der(der, CertificateSource::TrustStore))
+            .collect();
         let mut fetched = Fetched::default();
         let mut tried: BTreeSet<String> = BTreeSet::new();
         let mut budget = MAX_CERTIFICATES;
@@ -176,14 +185,13 @@ impl Fetcher {
             }) else {
                 continue;
             };
-            if is_covered(subject, issuer, &parsed, data, time, limits) {
+            if is_covered(subject, issuer, &parsed, &anchors, data, time, limits) {
                 continue;
             }
             budget -= 1;
 
             // OCSP first: it answers about this certificate, where a CRL is a
             // list that may run to megabytes.
-            let mut answered = false;
             if let Some(request) = ocsp_request(subject, issuer) {
                 for url in subject
                     .ocsp_responder_urls()
@@ -197,7 +205,6 @@ impl Fetcher {
                         Ok(bytes) => match classify(&bytes) {
                             Ok((RevocationItemKind::Ocsp, der)) => {
                                 fetched.ocsp.push(der);
-                                answered = true;
                                 break;
                             }
                             _ => fetched.checks.push(failure(&url, FailureClass::Invalid)),
@@ -206,7 +213,22 @@ impl Fetcher {
                     }
                 }
             }
-            if answered {
+            // Obtaining a response is not the same as being answered by one.
+            // A well-formed response this build cannot authorise, one about
+            // another certificate, or a stale one leaves the certificate
+            // exactly as uncovered as it was — so the question is put to the
+            // verifier's own code again, with what was just fetched, before
+            // the CRL is skipped. Stopping at "the server replied" is what
+            // made a central responder look like a dead end.
+            if is_covered(
+                subject,
+                issuer,
+                &parsed,
+                &anchors,
+                &probe(data, &fetched),
+                time,
+                limits,
+            ) {
                 continue;
             }
             for url in subject
@@ -320,6 +342,16 @@ fn failure(url: &str, class: FailureClass) -> Check {
             class.describe()
         ),
     )
+}
+
+/// `data` widened with everything fetched so far, so coverage can be asked
+/// again without re-reading anything from disk.
+fn probe<'a>(data: &RevocationData<'a>, fetched: &'a Fetched) -> RevocationData<'a> {
+    RevocationData {
+        online_crls: &fetched.crls,
+        online_ocsp: &fetched.ocsp,
+        ..*data
+    }
 }
 
 /// Bound and strip a URL before it reaches a message, exactly as every other

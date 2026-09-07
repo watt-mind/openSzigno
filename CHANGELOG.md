@@ -79,6 +79,35 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
 
 ### Changed (M3)
 
+- **OCSP responders are now authorised under all three RFC 6960 models.**
+  Alongside the issuing CA answering for itself and a responder that CA
+  delegated to, a **trusted responder** (section 2.2) is accepted: one whose
+  certificate carries `id-kp-OCSPSigning` and whose own path validates to a
+  configured trust anchor — trust store or trusted list — at the response's
+  `producedAt`, even though the queried certificate's issuer never delegated to
+  it. Central responders are how real national hierarchies are built: one
+  responder answers for every CA the operator runs, issued by a sibling CA, and
+  a verifier implementing only the delegation model rejected every one of those
+  answers. The authority is the caller's own trust material, checked by a full
+  path validation, so this can never admit a response whose signer the operator
+  had not already chosen to trust; the issuer and delegated models keep
+  precedence. Which model applied is reported in
+  `chain[].revocation.responder_model` (`issuer`, `delegated`, `trusted`), and
+  the new `ocsp_responder_trusted` (`info`) check names the third one when it
+  is used.
+- **A refused source no longer ends the search.** An OCSP response no model
+  authorises, a delta CRL, an out-of-scope CRL — any source that is found and
+  refused — is recorded and the remaining tiers are tried, so an unusable OCSP
+  answer followed by a good CRL now ends as `good` from the CRL.
+  `revocation_data_invalid` and `revocation_status_unknown` are reported only
+  after every tier has been exhausted. The refusal stays visible: the new
+  `chain[].revocation.detail` field says what was refused, why, and which
+  source answered instead, and the path summary repeats it. The
+  `revocation_data_invalid` message now names the cause instead of listing
+  every possible one.
+- Under `--online`, a fetched OCSP response no longer stops the CRL from being
+  fetched. Obtaining a response is not the same as being answered by one, so
+  coverage is re-tested with what was just fetched before the CRL is skipped.
 - `revocation_status_unknown` is now also emitted per failed `--online` fetch,
   with the URL and failure class in the message. It remains `unknown` and
   blocking either way.

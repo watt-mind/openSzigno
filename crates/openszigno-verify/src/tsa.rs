@@ -418,6 +418,7 @@ pub fn verify_token(input: &TokenInput<'_>) -> TokenOutcome {
         let mut chain = path.chain;
         if !path.path.is_empty() {
             let outcome = crate::revocation::check_path(&crate::revocation::PathRevocationInput {
+                anchors: input.anchors,
                 path: &path.path,
                 candidates: &candidates,
                 data: &input.revocation,
@@ -435,6 +436,7 @@ pub fn verify_token(input: &TokenInput<'_>) -> TokenOutcome {
                 entry.revocation = Some(status);
             }
             checks.push(outcome.check);
+            checks.extend(outcome.notes);
         }
 
         // --- Ordering against the claimed signing time ----------------------
