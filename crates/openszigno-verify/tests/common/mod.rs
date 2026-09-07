@@ -48,6 +48,8 @@ pub const ENVELOPED_URI: &str = "http://www.w3.org/2000/09/xmldsig#enveloped-sig
 pub const XSLT_URI: &str = "http://www.w3.org/TR/1999/REC-xslt-19991116";
 pub const XPATH_URI: &str = "http://www.w3.org/TR/1999/REC-xpath-19991116";
 pub const SIGNED_PROPERTIES_TYPE: &str = "http://uri.etsi.org/01903#SignedProperties";
+/// ETSI EN 319 132-1 clause 5.2.7.1 / TS 101903 clause 7.2.4.1.
+pub const COUNTERSIGNED_SIGNATURE_TYPE: &str = "http://uri.etsi.org/01903#CountersignedSignature";
 
 /// A signing key in both the shapes the helper needs: `rcgen`'s, for issuing
 /// certificates, and the RustCrypto one, for signing `ds:SignedInfo`.
@@ -281,6 +283,22 @@ impl RefSpec {
         }
     }
 
+    /// A reference over a countersigned `ds:SignatureValue`, carrying the
+    /// `CountersignedSignature` `Type`. The attribute is corroboration only;
+    /// what the reference resolves to is what decides.
+    pub fn countersigned(uri: &str) -> Self {
+        Self {
+            reference_type: Some(COUNTERSIGNED_SIGNATURE_TYPE.to_owned()),
+            ..Self::to(uri)
+        }
+    }
+
+    /// Drop the `Type` attribute, so only resolution can decide.
+    pub fn untyped(mut self) -> Self {
+        self.reference_type = None;
+        self
+    }
+
     pub fn with_transforms(mut self, transforms: &[&str]) -> Self {
         self.transforms = transforms.iter().map(|value| (*value).to_owned()).collect();
         self
@@ -295,6 +313,10 @@ impl RefSpec {
 /// How one `ds:Signature` should look.
 pub struct SigSpec {
     pub id: String,
+    /// The placeholder tag `build` fills this signature's digests and value
+    /// under, and the suffix of its `sigobj-`/`sp-` element ids. Unique per
+    /// signature in one dossier.
+    pub tag: String,
     pub c14n: String,
     pub signature_method: String,
     pub references: Vec<RefSpec>,
@@ -332,8 +354,54 @@ pub struct SigSpec {
     pub revocation_in_validation_data: bool,
     /// Certificates to encapsulate inside the `TimeStampValidationData`.
     pub validation_data_certificates: Vec<Vec<u8>>,
-    /// An `Id` on `ds:SignatureValue`, so an `xades:Include` can name it.
+    /// An `Id` on `ds:SignatureValue`, so an `xades:Include` or a
+    /// countersignature's `ds:Reference` can name it.
     pub signature_value_id: Option<String>,
+    /// The `es:SignatureProfile/es:Type` value, `signature` by default and
+    /// `countersignature` for the e-dossier countersignature form
+    /// (e-dossier specification clause 3.2.1.3.4.1.3).
+    pub signature_profile_type: String,
+    /// Enveloped countersignatures placed in this signature's
+    /// `xades:UnsignedSignatureProperties`.
+    pub countersignatures: Vec<CounterSignatureSpec>,
+}
+
+/// One `xades:CounterSignature` element and the signatures inside it.
+///
+/// ETSI EN 319 132-1 clause 5.2.7.2 defines `CounterSignatureType` as a
+/// sequence of exactly one `ds:Signature`; holding two is the ambiguous shape
+/// the verifier must refuse rather than guess at.
+pub struct CounterSignatureSpec {
+    pub signatures: Vec<SigSpec>,
+    /// The element that holds them. `None` is `xades:CounterSignature`; any
+    /// other name is a nesting the e-dossier and XAdES rules do not describe.
+    pub wrapper: Option<String>,
+}
+
+impl CounterSignatureSpec {
+    pub fn new(signature: SigSpec) -> Self {
+        Self {
+            signatures: vec![signature],
+            wrapper: None,
+        }
+    }
+
+    /// Two nested signatures in one `xades:CounterSignature`.
+    pub fn ambiguous(first: SigSpec, second: SigSpec) -> Self {
+        Self {
+            signatures: vec![first, second],
+            wrapper: None,
+        }
+    }
+
+    /// A signature nested under something that is not an
+    /// `xades:CounterSignature`.
+    pub fn in_wrapper(signature: SigSpec, wrapper: &str) -> Self {
+        Self {
+            signatures: vec![signature],
+            wrapper: Some(wrapper.to_owned()),
+        }
+    }
 }
 
 /// How the signed `SigningCertificate` property should look.
@@ -422,6 +490,93 @@ impl TimestampSpec {
     }
 }
 
+/// Where a container `es:TimeStamp` sits.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TimestampPlacement {
+    /// A direct child of `es:Dossier`.
+    Dossier,
+    /// A direct child of the first `es:Document`.
+    Document,
+    /// A child of `es:Documents`, which the format does not describe.
+    Stray,
+}
+
+/// One container `es:TimeStamp`, which M3 verifies over the elements its
+/// `xades:Include` children name.
+pub struct ContainerTimestampSpec {
+    pub placement: TimestampPlacement,
+    /// The `xades:Include` URIs, in the order they are emitted, which is also
+    /// the order their canonical forms are concatenated in.
+    pub includes: Vec<String>,
+    /// The `ds:CanonicalizationMethod` of the timestamp element, if any.
+    pub c14n: Option<String>,
+    /// The token, or `None` to emit an undecodable placeholder.
+    pub token: Option<TimestampSpec>,
+    /// Emit an `xades:ReferenceInfo`, a selection form this build refuses.
+    pub reference_info: bool,
+    /// Digest something other than the included elements.
+    pub wrong_imprint: bool,
+}
+
+impl ContainerTimestampSpec {
+    pub fn dossier(token: TimestampSpec) -> Self {
+        Self {
+            placement: TimestampPlacement::Dossier,
+            includes: vec!["#dossier-profile".to_owned(), "#documents".to_owned()],
+            c14n: None,
+            token: Some(token),
+            reference_info: false,
+            wrong_imprint: false,
+        }
+    }
+
+    pub fn document(token: TimestampSpec) -> Self {
+        Self {
+            placement: TimestampPlacement::Document,
+            includes: vec!["#prof0".to_owned(), "#obj0".to_owned()],
+            token: Some(token),
+            c14n: None,
+            reference_info: false,
+            wrong_imprint: false,
+        }
+    }
+}
+
+/// A further `es:Document` inside `es:Documents`, for the coverage cases.
+pub struct ExtraDocumentSpec {
+    /// The `Id` of the payload `ds:Object`, which is also the profile's
+    /// `OBJREF`.
+    pub id: String,
+    pub payload: String,
+    /// Emit an `es:DocumentProfile`. Without one the core parser skips the
+    /// document and reports `document_without_profile`.
+    pub profile: bool,
+    /// Declare the embedded-dossier MIME type, so the model flags the
+    /// document `nested_dossier`.
+    pub nested_dossier: bool,
+}
+
+impl ExtraDocumentSpec {
+    pub fn new(id: &str) -> Self {
+        Self {
+            id: id.to_owned(),
+            payload: BASE64.encode("sibling"),
+            profile: true,
+            nested_dossier: false,
+        }
+    }
+
+    pub fn without_profile(mut self) -> Self {
+        self.profile = false;
+        self
+    }
+
+    pub fn nested(mut self) -> Self {
+        self.nested_dossier = true;
+        self
+    }
+}
+
 /// The whole synthetic dossier.
 pub struct DossierSpec {
     pub namespace: String,
@@ -431,9 +586,13 @@ pub struct DossierSpec {
     /// An extra copy of the payload object, placed outside the signed document,
     /// for the signature-wrapping cases.
     pub decoy_object: Option<(String, String)>,
-    /// Emit a dossier-level `es:TimeStamp`, which M3 validates and this
-    /// release only reports.
+    /// Further documents, in source order after the signed one.
+    pub extra_documents: Vec<ExtraDocumentSpec>,
+    /// Emit a bare `es:TimeStamp` with no data selection, which is the shape
+    /// this build reports as not checked.
     pub dossier_timestamp: bool,
+    /// Container `es:TimeStamp` elements with a real `xades:Include` selection.
+    pub container_timestamps: Vec<ContainerTimestampSpec>,
 }
 
 impl Default for DossierSpec {
@@ -444,7 +603,9 @@ impl Default for DossierSpec {
             document_signature: None,
             dossier_signature: None,
             decoy_object: None,
+            extra_documents: Vec::new(),
             dossier_timestamp: false,
+            container_timestamps: Vec::new(),
         }
     }
 }
@@ -453,6 +614,7 @@ impl Default for DossierSpec {
 pub fn document_signature(certificates: Vec<Vec<u8>>) -> SigSpec {
     SigSpec {
         id: "sig-doc".to_owned(),
+        tag: "doc".to_owned(),
         c14n: C14N_EXC.to_owned(),
         signature_method: RSA_SHA256_URI.to_owned(),
         references: vec![
@@ -478,6 +640,8 @@ pub fn document_signature(certificates: Vec<Vec<u8>>) -> SigSpec {
         revocation_in_validation_data: false,
         validation_data_certificates: Vec::new(),
         signature_value_id: None,
+        signature_profile_type: "signature".to_owned(),
+        countersignatures: Vec::new(),
     }
 }
 
@@ -485,6 +649,7 @@ pub fn document_signature(certificates: Vec<Vec<u8>>) -> SigSpec {
 pub fn dossier_signature(certificates: Vec<Vec<u8>>) -> SigSpec {
     SigSpec {
         id: "sig-frame".to_owned(),
+        tag: "frame".to_owned(),
         c14n: C14N_EXC.to_owned(),
         signature_method: RSA_SHA256_URI.to_owned(),
         references: vec![
@@ -510,6 +675,24 @@ pub fn dossier_signature(certificates: Vec<Vec<u8>>) -> SigSpec {
         revocation_in_validation_data: false,
         validation_data_certificates: Vec::new(),
         signature_value_id: None,
+        signature_profile_type: "signature".to_owned(),
+        countersignatures: Vec::new(),
+    }
+}
+
+/// An enveloped XAdES countersignature over the `ds:SignatureValue` whose `Id`
+/// is `parent_value_id`, for placement in that signature's
+/// `xades:UnsignedSignatureProperties`.
+pub fn countersignature(tag: &str, certificates: Vec<Vec<u8>>, parent_value_id: &str) -> SigSpec {
+    SigSpec {
+        id: format!("sig-{tag}"),
+        tag: tag.to_owned(),
+        references: vec![
+            RefSpec::countersigned(&format!("#{parent_value_id}")),
+            RefSpec::to(&format!("#sigobj-{tag}")),
+            RefSpec::signed_properties(&format!("#sp-{tag}")),
+        ],
+        ..document_signature(certificates)
     }
 }
 
@@ -522,7 +705,8 @@ pub fn dossier_signature(certificates: Vec<Vec<u8>>) -> SigSpec {
 /// signature, exactly as it would in a real countersigned dossier.
 pub fn build(spec: &DossierSpec, keys: &[(&str, &TestKey)]) -> String {
     let mut xml = render(spec);
-    for (tag, signature) in signatures(spec) {
+    for signature in signatures(spec) {
+        let tag = signature.tag.as_str();
         for (index, reference) in signature.references.iter().enumerate() {
             // A reference that resolves to nothing gets a syntactically valid
             // placeholder: the verifier must reject it long before any digest
@@ -548,6 +732,32 @@ pub fn build(spec: &DossierSpec, keys: &[(&str, &TestKey)]) -> String {
             };
             xml = xml.replace(&format!("@@TIMESTAMP-{tag}@@"), &BASE64.encode(&token));
         }
+    }
+    // Container timestamps come last: a dossier-level one covers `es:Documents`,
+    // which holds every document signature's `ds:SignatureValue`. Within them,
+    // the inner ones are filled first for the same reason — a dossier
+    // timestamp covers the `es:Document` a document timestamp sits in.
+    let mut order: Vec<usize> = (0..spec.container_timestamps.len()).collect();
+    order.sort_by_key(|index| {
+        matches!(
+            spec.container_timestamps[*index].placement,
+            TimestampPlacement::Dossier
+        )
+    });
+    for index in order {
+        let timestamp = &spec.container_timestamps[index];
+        let Some(token) = &timestamp.token else {
+            continue;
+        };
+        let mut imprint = canonical_includes(&xml, timestamp);
+        if timestamp.wrong_imprint {
+            imprint.push(b'!');
+        }
+        let der = match &token.raw_token {
+            Some(bytes) => bytes.clone(),
+            None => build_timestamp_token(token, &imprint),
+        };
+        xml = xml.replace(&format!("@@CONTAINER-TS-{index}@@"), &BASE64.encode(&der));
     }
     xml
 }
@@ -837,12 +1047,17 @@ fn render(spec: &DossierSpec) -> String {
         spec.payload
     ));
     if let Some(signature) = &spec.document_signature {
-        out.push_str(&render_signature(signature, "doc", namespace));
+        out.push_str(&render_signature(signature, namespace));
     }
     if spec.dossier_timestamp {
         out.push_str(
             "<es:TimeStamp><xades:EncapsulatedTimeStamp xmlns:xades=\"http://uri.etsi.org/01903/v1.3.2#\">AA==</xades:EncapsulatedTimeStamp></es:TimeStamp>",
         );
+    }
+    for (index, timestamp) in spec.container_timestamps.iter().enumerate() {
+        if timestamp.placement == TimestampPlacement::Document {
+            out.push_str(&render_container_timestamp(timestamp, index));
+        }
     }
     out.push_str("</es:Document>");
     if let Some((id, payload)) = &spec.decoy_object {
@@ -860,15 +1075,114 @@ fn render(spec: &DossierSpec) -> String {
 </es:Document>"
         ));
     }
+    for document in &spec.extra_documents {
+        let id = &document.id;
+        let profile = if document.profile {
+            let mime = if document.nested_dossier {
+                "<es:MIME-Type type=\"application\" subtype=\"nldossier2\" extension=\"dosszie\"/>"
+            } else {
+                "<es:MIME-Type type=\"text\" subtype=\"plain\" extension=\"txt\"/>"
+            };
+            format!(
+                "<es:DocumentProfile Id=\"prof-{id}\" OBJREF=\"{id}\">\
+<es:Title>sibling</es:Title>\
+<es:CreationDate>2020-01-01T00:00:00Z</es:CreationDate>\
+<es:Format>{mime}</es:Format>\
+<es:BaseTransform><es:Transform Algorithm=\"base64\"/></es:BaseTransform>\
+</es:DocumentProfile>"
+            )
+        } else {
+            String::new()
+        };
+        out.push_str(&format!(
+            "<es:Document>{profile}<ds:Object Id=\"{id}\">{}</ds:Object></es:Document>",
+            document.payload
+        ));
+    }
+    for (index, timestamp) in spec.container_timestamps.iter().enumerate() {
+        if timestamp.placement == TimestampPlacement::Stray {
+            out.push_str(&render_container_timestamp(timestamp, index));
+        }
+    }
     out.push_str("</es:Documents>");
+    for (index, timestamp) in spec.container_timestamps.iter().enumerate() {
+        if timestamp.placement == TimestampPlacement::Dossier {
+            out.push_str(&render_container_timestamp(timestamp, index));
+        }
+    }
     if let Some(signature) = &spec.dossier_signature {
-        out.push_str(&render_signature(signature, "frame", namespace));
+        out.push_str(&render_signature(signature, namespace));
     }
     out.push_str("</es:Dossier>");
     out
 }
 
-fn render_signature(spec: &SigSpec, tag: &str, namespace: &str) -> String {
+/// One container `es:TimeStamp`, with its token left as a placeholder that
+/// [`build`] fills in once every signature value exists.
+fn render_container_timestamp(spec: &ContainerTimestampSpec, index: usize) -> String {
+    let mut out = String::from(
+        "<es:TimeStamp xmlns:xades=\"http://uri.etsi.org/01903/v1.3.2#\" xmlns:ds=\"http://www.w3.org/2000/09/xmldsig#\">",
+    );
+    if let Some(c14n) = &spec.c14n {
+        out.push_str(&format!(
+            "<ds:CanonicalizationMethod Algorithm=\"{c14n}\"/>"
+        ));
+    }
+    if spec.reference_info {
+        out.push_str("<xades:ReferenceInfo URI=\"#obj0\"/>");
+    }
+    for uri in &spec.includes {
+        out.push_str(&format!(
+            "<xades:Include URI=\"{uri}\" referencedData=\"true\"/>"
+        ));
+    }
+    match &spec.token {
+        Some(_) => out.push_str(&format!(
+            "<xades:EncapsulatedTimeStamp>@@CONTAINER-TS-{index}@@</xades:EncapsulatedTimeStamp>"
+        )),
+        None => {
+            out.push_str("<xades:EncapsulatedTimeStamp>not base64!!</xades:EncapsulatedTimeStamp>")
+        }
+    }
+    out.push_str("</es:TimeStamp>");
+    out
+}
+
+/// The octets a container `es:TimeStamp` covers: each included element
+/// canonicalized on its own, concatenated in `Include` order.
+pub fn canonical_includes(xml: &str, spec: &ContainerTimestampSpec) -> Vec<u8> {
+    let source = XmlSource::decode(xml.as_bytes(), &Limits::default()).expect("decodes");
+    let tree = source.parse_tree(&Limits::default()).expect("parses");
+    let algorithm = spec
+        .c14n
+        .as_deref()
+        .and_then(C14nAlgorithm::from_uri)
+        .unwrap_or(C14nAlgorithm::Inclusive { comments: false });
+    let mut octets = Vec::new();
+    for uri in &spec.includes {
+        let id = uri.trim_start_matches('#');
+        let Some(node) = tree
+            .descendants()
+            .find(|node| node.attribute("Id") == Some(id))
+        else {
+            continue;
+        };
+        octets.extend_from_slice(
+            &RoxmltreeC14n
+                .canonicalize(
+                    source.text(),
+                    &NodeSet::subtree(node).without_comments(),
+                    algorithm,
+                    &[],
+                )
+                .expect("canonicalizes"),
+        );
+    }
+    octets
+}
+
+fn render_signature(spec: &SigSpec, namespace: &str) -> String {
+    let tag = spec.tag.as_str();
     let mut out = String::new();
     out.push_str(&format!("<ds:Signature Id=\"{}\">", spec.id));
     out.push_str("<ds:SignedInfo>");
@@ -926,9 +1240,10 @@ fn render_signature(spec: &SigSpec, tag: &str, namespace: &str) -> String {
             "<ds:Object Id=\"sigobj-{tag}\">\
 <es:SignatureProfile xmlns:es=\"{namespace}\" Id=\"sigprof-{tag}\">\
 <es:SignerName>Synthetic Signer</es:SignerName>\
-<es:Type>signature</es:Type>\
+<es:Type>{}</es:Type>\
 <es:Generator>openSzigno test helper</es:Generator>\
-</es:SignatureProfile></ds:Object>"
+</es:SignatureProfile></ds:Object>",
+            spec.signature_profile_type
         )
     } else {
         String::new()
@@ -1030,6 +1345,20 @@ fn render_signature(spec: &SigSpec, tag: &str, namespace: &str) -> String {
     }
     if let Some(name) = &spec.extra_unsigned_property {
         unsigned.push_str(&format!("<xades:{name}/>"));
+    }
+    // Enveloped countersignatures. Everything here is unsigned qualifying
+    // material, so nesting one changes no digest of the signature it is
+    // nested in.
+    for element in &spec.countersignatures {
+        let wrapper = element
+            .wrapper
+            .as_deref()
+            .unwrap_or("xades:CounterSignature");
+        unsigned.push_str(&format!("<{wrapper}>"));
+        for nested in &element.signatures {
+            unsigned.push_str(&render_signature(nested, namespace));
+        }
+        unsigned.push_str(&format!("</{wrapper}>"));
     }
     let unsigned = if unsigned.is_empty() {
         String::new()
@@ -1185,15 +1514,30 @@ fn sign_signed_info(xml: &str, spec: &SigSpec, key: &TestKey) -> String {
     BASE64.encode(bytes)
 }
 
-fn signatures(spec: &DossierSpec) -> Vec<(&'static str, &SigSpec)> {
+/// Every signature in fill order: each signature before the countersignatures
+/// nested in it, and the document signature before the frame.
+///
+/// The order is load bearing. A countersignature digests the countersigned
+/// `ds:SignatureValue`, so that value must already be filled in; and the frame
+/// signature covers `es:Documents`, which holds both, so it is filled last.
+fn signatures(spec: &DossierSpec) -> Vec<&SigSpec> {
     let mut list = Vec::new();
-    if let Some(signature) = &spec.document_signature {
-        list.push(("doc", signature));
-    }
-    if let Some(signature) = &spec.dossier_signature {
-        list.push(("frame", signature));
+    for signature in [&spec.document_signature, &spec.dossier_signature]
+        .into_iter()
+        .flatten()
+    {
+        collect_signatures(signature, &mut list);
     }
     list
+}
+
+fn collect_signatures<'a>(signature: &'a SigSpec, into: &mut Vec<&'a SigSpec>) {
+    into.push(signature);
+    for element in &signature.countersignatures {
+        for nested in &element.signatures {
+            collect_signatures(nested, into);
+        }
+    }
 }
 
 /// A hand-encoded `nameConstraints` extension, so a test can express subtree
@@ -1707,6 +2051,7 @@ pub const STATUS_GRANTED: &str = "http://uri.etsi.org/TrstSvc/TrustedList/Svcsta
 pub const STATUS_WITHDRAWN: &str = "http://uri.etsi.org/TrstSvc/TrustedList/Svcstatus/withdrawn";
 pub const STATUS_UNDER_SUPERVISION: &str =
     "http://uri.etsi.org/TrstSvc/TrustedList/Svcstatus/undersupervision";
+pub const STATUS_ACCREDITED: &str = "http://uri.etsi.org/TrstSvc/TrustedList/Svcstatus/accredited";
 
 /// One `TSPService` to write into a synthetic list.
 pub struct TlService {
@@ -1721,6 +2066,14 @@ pub struct TlService {
     /// Emit a `DigitalId` that names a subject rather than supplying a
     /// certificate, which must contribute no anchor.
     pub subject_name_only: bool,
+    /// An `X509SubjectName` identity, as an RFC 4514 string.
+    pub subject_name: Option<String>,
+    /// An `X509SKI` identity, as raw `subjectKeyIdentifier` octets.
+    pub subject_key_identifier: Option<Vec<u8>>,
+    /// Extra `ServiceName` entries as (`xml:lang`, name), emitted **before**
+    /// the English one, so a test can prove the English name is preferred
+    /// rather than merely first.
+    pub extra_names: Vec<(String, String)>,
 }
 
 impl TlService {
@@ -1733,6 +2086,27 @@ impl TlService {
             status_starting_time: "2016-07-01T00:00:00Z".to_owned(),
             history: Vec::new(),
             subject_name_only: false,
+            subject_name: None,
+            subject_key_identifier: None,
+            extra_names: Vec::new(),
+        }
+    }
+
+    /// A service whose only digital identity is an `X509SKI`.
+    pub fn by_ski(name: &str, ski: Vec<u8>) -> Self {
+        Self {
+            certificates: Vec::new(),
+            subject_key_identifier: Some(ski),
+            ..Self::ca_qc(name, Vec::new())
+        }
+    }
+
+    /// A service whose only digital identity is an `X509SubjectName`.
+    pub fn by_subject_name(name: &str, subject: &str) -> Self {
+        Self {
+            certificates: Vec::new(),
+            subject_name: Some(subject.to_owned()),
+            ..Self::ca_qc(name, Vec::new())
         }
     }
 }
@@ -1817,8 +2191,12 @@ pub fn build_trust_list(spec: &TrustListSpec) -> String {
             "<tsl:ServiceTypeIdentifier>{}</tsl:ServiceTypeIdentifier>",
             service.service_type
         ));
+        out.push_str("<tsl:ServiceName>");
+        for (lang, name) in &service.extra_names {
+            out.push_str(&format!("<tsl:Name xml:lang=\"{lang}\">{name}</tsl:Name>"));
+        }
         out.push_str(&format!(
-            "<tsl:ServiceName><tsl:Name xml:lang=\"en\">{}</tsl:Name></tsl:ServiceName>",
+            "<tsl:Name xml:lang=\"en\">{}</tsl:Name></tsl:ServiceName>",
             service.name
         ));
         out.push_str("<tsl:ServiceDigitalIdentity>");
@@ -1826,6 +2204,17 @@ pub fn build_trust_list(spec: &TrustListSpec) -> String {
             out.push_str(
                 "<tsl:DigitalId><tsl:X509SubjectName>CN=Named Only,C=HU</tsl:X509SubjectName></tsl:DigitalId>",
             );
+        }
+        if let Some(subject) = &service.subject_name {
+            out.push_str(&format!(
+                "<tsl:DigitalId><tsl:X509SubjectName>{subject}</tsl:X509SubjectName></tsl:DigitalId>"
+            ));
+        }
+        if let Some(ski) = &service.subject_key_identifier {
+            out.push_str(&format!(
+                "<tsl:DigitalId><tsl:X509SKI>{}</tsl:X509SKI></tsl:DigitalId>",
+                BASE64.encode(ski)
+            ));
         }
         for certificate in &service.certificates {
             out.push_str(&format!(
@@ -1986,4 +2375,20 @@ pub fn crl_distribution_point_extension(uri: &str) -> rcgen::CustomExtension {
         .to_der()
         .expect("the distribution points encode");
     rcgen::CustomExtension::from_oid_content(&[2, 5, 29, 31], encoded)
+}
+
+/// An `authorityInfoAccess` extension naming one OCSP responder, which is
+/// where `--online` learns a URL to POST a request to.
+pub fn authority_info_access_extension(uri: &str) -> rcgen::CustomExtension {
+    use der::Encode as _;
+    let description = x509_cert::ext::pkix::AccessDescription {
+        access_method: const_oid::ObjectIdentifier::new_unwrap("1.3.6.1.5.5.7.48.1"),
+        access_location: x509_cert::ext::pkix::name::GeneralName::UniformResourceIdentifier(
+            der::asn1::Ia5String::new(uri).expect("the URI encodes"),
+        ),
+    };
+    let encoded = vec![description]
+        .to_der()
+        .expect("the access descriptions encode");
+    rcgen::CustomExtension::from_oid_content(&[1, 3, 6, 1, 5, 5, 7, 1, 1], encoded)
 }

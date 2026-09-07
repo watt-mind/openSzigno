@@ -16,10 +16,10 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 use common::{
-    CertSpec, CrlSpec, DossierSpec, RevokedSpec, SigSpec, SigningCertificateSpec, TestKey,
-    TimestampSpec, TlService, TrustListSpec, build, build_crl, build_trust_list,
-    document_signature, extended_key_usage_extension, issued_by, keys, qc_statements_extension,
-    rsa_key, self_signed,
+    CertSpec, CounterSignatureSpec, CrlSpec, DossierSpec, RevokedSpec, SigSpec,
+    SigningCertificateSpec, TestKey, TimestampSpec, TlService, TrustListSpec, build, build_crl,
+    build_trust_list, countersignature, document_signature, extended_key_usage_extension,
+    issued_by, keys, qc_statements_extension, rsa_key, self_signed,
 };
 use rcgen::BasicConstraints;
 use serde_json::Value;
@@ -538,6 +538,53 @@ fn human_output_states_the_policy() {
     assert!(text.contains("not a legal opinion"), "{text}");
 }
 
+/// Human output names the signature a countersignature attests, so a reader
+/// never has to work it out from the placement alone.
+#[test]
+fn human_output_names_the_countersigned_signature() {
+    let pki = pki();
+    let stores = Stores::new(
+        &pki,
+        &[build_crl(&CrlSpec::new(
+            pki.root_der.clone(),
+            rsa_key(keys::ROOT_RSA2048),
+        ))],
+    );
+    let mut parent = signature(&pki);
+    parent.signature_value_id = Some("sigval-doc".to_owned());
+    let mut nested = countersignature("csig", vec![pki.signer_der.clone()], "sigval-doc");
+    nested.signing_certificate = Some(SigningCertificateSpec::v1(pki.signer_der.clone()));
+    parent.countersignatures = vec![CounterSignatureSpec::new(nested)];
+    let spec = DossierSpec {
+        document_signature: Some(parent),
+        ..Default::default()
+    };
+    let xml = build(
+        &spec,
+        &[("doc", &pki.signer_key), ("csig", &pki.signer_key)],
+    );
+    let directory = scratch();
+    let path = write_dossier(&directory, &xml);
+
+    let output = run(&[
+        "verify",
+        path.to_str().unwrap(),
+        "--at",
+        AT,
+        "--trust-store",
+        stores.trust().to_str().unwrap(),
+        "--revocation-store",
+        stores.revocation().to_str().unwrap(),
+    ]);
+    let text = String::from_utf8(output.stdout).expect("UTF-8");
+    assert!(text.contains("[1] countersignature signature: "), "{text}");
+    assert!(text.contains("(countersignature of signature 0)"), "{text}");
+    assert!(
+        text.contains("countersignature_binding_ok: passed"),
+        "{text}"
+    );
+}
+
 /// `--lotl` takes the national lists' signing certificates from the EU list of
 /// trusted lists, so one out-of-band certificate verifies both. The run still
 /// reaches `valid`.
@@ -606,4 +653,96 @@ fn the_lotl_bootstraps_a_national_list_signature() {
         .expect("an array");
     assert_eq!(lists.len(), 2);
     assert!(lists.iter().all(|list| list["signature_verified"] == true));
+}
+
+/// The exit-status half of the container-timestamp rule. A dossier whose every
+/// signature is `valid` must still exit `0` when it also carries an
+/// `es:TimeStamp` whose own timestamp authority the run cannot judge — no
+/// anchor for it, no revocation data for it. Carrying extra evidence must not
+/// cost a dossier its verdict, and a caller scripting on the exit status must
+/// not have to special-case it.
+#[test]
+fn an_unjudgeable_container_timestamp_still_exits_zero() {
+    use common::{ContainerTimestampSpec, TimestampPlacement};
+
+    let pki = pki();
+    let stores = Stores::new(
+        &pki,
+        &[build_crl(&CrlSpec::new(
+            pki.root_der.clone(),
+            rsa_key(keys::ROOT_RSA2048),
+        ))],
+    );
+
+    // A timestamp authority under a root the trust store does not hold.
+    let other_root_key = rsa_key(keys::SECOND_RSA2048);
+    let other_root = self_signed(
+        &CertSpec::ca(
+            "openSzigno Timestamping Root",
+            BasicConstraints::Unconstrained,
+        ),
+        &other_root_key,
+    );
+    let mut tsa_spec = CertSpec::signer("openSzigno Container TSA");
+    tsa_spec.custom_extensions = vec![extended_key_usage_extension(&[ID_KP_TIME_STAMPING], true)];
+    let container_tsa = issued_by(
+        &tsa_spec,
+        &rsa_key(keys::INTERMEDIATE_RSA2048),
+        &other_root,
+        &other_root_key,
+    );
+
+    let mut container = ContainerTimestampSpec::dossier(TimestampSpec::new(
+        rsa_key(keys::INTERMEDIATE_RSA2048),
+        container_tsa.der.clone(),
+        "2020-06-01T09:00:00Z",
+    ));
+    container.placement = TimestampPlacement::Dossier;
+
+    let spec = DossierSpec {
+        document_signature: Some(signature(&pki)),
+        container_timestamps: vec![container],
+        ..Default::default()
+    };
+    let xml = build(&spec, &[("doc", &pki.signer_key)]);
+    let directory = scratch();
+    let path = write_dossier(&directory, &xml);
+
+    let output = run(&[
+        "verify",
+        path.to_str().unwrap(),
+        "--json",
+        "--at",
+        AT,
+        "--trust-store",
+        stores.trust().to_str().unwrap(),
+        "--revocation-store",
+        stores.revocation().to_str().unwrap(),
+    ]);
+    let report = parse_json(&output);
+    assert_eq!(status(&output), 0, "checks: {}", report["data"]["checks"]);
+    assert_eq!(report["data"]["verdict"].as_str(), Some("valid"));
+    assert_eq!(
+        report["data"]["signatures"][0]["verdict"].as_str(),
+        Some("valid")
+    );
+    // The finding is not lost: the timestamp is reported unverified, with its
+    // own checks, and the dossier level carries an informational summary.
+    assert_eq!(report["data"]["counts"]["timestamps_verified"], 0);
+    assert_eq!(report["data"]["timestamps"][0]["verified"], false);
+    let dossier_checks = report["data"]["checks"]
+        .as_array()
+        .expect("the dossier checks are an array");
+    let summary = dossier_checks
+        .iter()
+        .find(|check| check["code"] == "dossier_timestamp_not_checked")
+        .expect("the container timestamp is summarised");
+    assert_eq!(summary["status"].as_str(), Some("info"));
+    // And nothing at the dossier level blocks.
+    for check in dossier_checks {
+        assert!(
+            matches!(check["status"].as_str(), Some("passed" | "info")),
+            "a dossier check blocks: {check}"
+        );
+    }
 }

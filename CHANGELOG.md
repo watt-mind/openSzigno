@@ -12,6 +12,402 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
 
 Nothing yet.
 
+## [0.4.0] - 2026-09-08
+
+### Added (M4: decryption of encrypted payloads)
+
+- **`extract --decrypt-key FILE`** decrypts documents whose transform chain
+  contains `encrypt`. The specification calls that transform "S/MIME
+  encryption" and names no algorithm; Microsec's own `eszigno3` reference CLI
+  documents its `cm_decrypt` as RFC 5652 CMS and exports per-recipient
+  encrypted keys, so the decoded payload is read as a DER `ContentInfo`
+  carrying `id-envelopedData`. The supported subset is
+  `KeyTransRecipientInfo` recipients named by `issuerAndSerialNumber` or
+  `subjectKeyIdentifier`, RSAES-PKCS1-v1_5 and RSAES-OAEP (MGF1 with
+  SHA-1/256/384/512) key transport, and AES-128/192/256-CBC content
+  encryption. See
+  [docs/architecture.md](docs/architecture.md#decryption).
+
+  ```sh
+  openszigno extract encrypted.es3 --output ./out \
+    --decrypt-key recipient.key.pem --decrypt-cert recipient.cert.pem
+  ```
+
+- **`--decrypt-cert FILE`**, PEM or DER, is the certificate that makes a CMS
+  recipient recognisable; it may be omitted when a PEM key file carries the
+  certificate alongside the key. It is checked against the key, and a
+  certificate that does not belong to it is `decryption_key_mismatch`.
+- **`--decrypt-passphrase-file FILE`** and the environment variable
+  `OPENSZIGNO_DECRYPT_PASSPHRASE` supply the passphrase of an encrypted
+  PKCS#8 key; the file wins when both are set, and one trailing newline is
+  stripped from the file. **No flag takes a key or a passphrase as an argument
+  value**, because `argv` is readable by other processes and lands in shell
+  history. All three of key, certificate, and passphrase files are capped at
+  1 MiB.
+- **`--allow-legacy-ciphers`** additionally decrypts DES-EDE3-CBC content.
+  It is off by default because 3DES is weak, and available because it is what
+  the Microsec reference tool encrypted with by default; without the flag such
+  a document is `document_skipped_legacy_cipher`, with the OID named.
+- **New JSON.** Each `extract` `extracted` entry gains `decrypted`, and
+  `extract --stdout` gains the same field in its `data`. It is `true` when an
+  `encrypt` transform was reversed. `schema_version` stays `1`; both are
+  additive.
+- **New error codes.** `invalid_decryption_key`,
+  `invalid_decryption_certificate`, `decryption_certificate_required`, and
+  `decryption_key_mismatch` (exit 4, raised before the dossier is decoded);
+  `invalid_cms` and `decrypt_failed` (exit 5). `decrypt_failed` carries the
+  fixed message `decryption failed` and never says which step failed, because
+  telling a bad RSA unwrap from bad padding is what a padding oracle is made
+  of.
+- **New warning codes.** `document_skipped_no_matching_recipient`,
+  `document_skipped_unsupported_cipher`, and
+  `document_skipped_legacy_cipher`. All three are skips at exit 0: a dossier
+  may legitimately hold documents addressed to several people, and `extract`
+  gives the caller the ones they can read.
+- **Key handling guarantees**, stated in
+  [SECURITY.md](SECURITY.md#how-key-material-is-handled) and covered by a test:
+  key bytes, the passphrase, and anything derived from them appear on neither
+  stdout nor stderr nor in the JSON envelope, on a successful or a failing run;
+  key and passphrase buffers are zeroed on drop; nothing is ever transmitted.
+
+### Changed (M4)
+
+- **`capabilities.encrypted_extraction` in `inspect --json` is now the string
+  `"with_key"`, not `false`.** `inspect` is never given a key, so it can only
+  report that the tool can decrypt when `extract` is given one. A consumer that
+  tested the field for truthiness now sees a truthy value, which is the correct
+  answer; one that compared it to `false` must compare it to `"with_key"`.
+  `schema_version` stays `1`: the field kept its name and its meaning, and the
+  other capability fields stay boolean.
+- **`encrypt` is now only recognised in the position the specification puts
+  it.** The forward chain is fixed as `zip? -> encrypt? -> base64`, so
+  `encrypt -> base64` and `zip -> encrypt -> base64` are encrypted documents
+  and `encrypt` anywhere else is `unsupported_transform_chain` /
+  `document_skipped_unsupported_transform` rather than
+  `encrypted_document_unsupported` / `document_skipped_encrypted`. Nothing
+  becomes extractable that was not before.
+- **`encrypted_document_unsupported` is not emitted by a run that holds a
+  decryption key**, because it would be untrue; what happened to each document
+  is reported per document instead. Its message now points at
+  `extract --decrypt-key` rather than saying the document cannot be extracted.
+- **The `RUSTSEC-2023-0071` note in `deny.toml`** was rewritten: the tool now
+  does perform an RSA private-key operation, locally, with a key the operator
+  supplied, for the length of one `extract` run. Exploiting the advisory needs
+  an attacker who can time that run on the operator's own machine, which is
+  outside the threat model; the ignore is still to be revisited when `rsa` 0.10
+  is stable.
+- **New dependencies**, all MIT OR Apache-2.0: `aes`, `cbc`, `cipher`, `cms`
+  (already used by `openszigno-verify`), `des`, `pkcs8` with `encryption`
+  (which brings `pkcs5`, `pbkdf2`, `scrypt`, `salsa20`), and `zeroize`.
+  `rand_chacha` and `rand_core` are test-only. `cargo deny check` passes.
+- **The decryption tests generate their RSA keys at run time**, from a fixed
+  seed through `ChaCha20Rng`, once per test binary. No private key, in any
+  encoding, is committed to this repository, and no line of it spells a
+  complete PEM private-key armour header: a secret scanner cannot tell a
+  synthetic key from a real one, so the project stores none and allowlists no
+  scanner rule.
+- **`rsa`, `num-bigint-dig`, `scrypt`, `salsa20`, and `sha2` are built at
+  `opt-level = 3` in the dev profile.** Generating an RSA key and running a
+  PKCS#8 key derivation unoptimized costs seconds each, which is what
+  generating test keys at run time would otherwise have added to every test
+  run. The code under test is not optimized, and release builds are unchanged.
+
+### Not implemented, deliberately (M4)
+
+- **PKCS#12 (`.p12`/`.pfx`) keystores.** Convert with `openssl` first; the
+  commands are in
+  [docs/architecture.md](docs/architecture.md#key-material). A keystore parser
+  is attack surface for a step the operator does once.
+- **PKCS#11.** A key on a smart card or HSM cannot be used.
+- **`RecipientInfo` forms other than `ktri`.** A key-agreement (`kari`)
+  recipient reads as no matching recipient rather than as a named unsupported
+  algorithm.
+- **RFC 5083 `AuthEnvelopedData` (AES-GCM).** Recognised only to be skipped.
+  Nothing in the specification or the reference CLI suggests it is produced.
+- **MIME-wrapped CMS.** No available source says whether any producer wraps the
+  message in MIME headers instead of emitting bare DER under the Base64
+  transform. Bare DER is what is read; anything else is `invalid_cms` rather
+  than a guess.
+- **`es:RecipientCertificateList`.** The element is optional and advisory; the
+  authoritative recipient list is the CMS `RecipientInfos`, which is what the
+  matching uses.
+
+### Added (M3: container timestamps, online revocation, trusted-list identities)
+
+- **Unverified signature inventory in `inspect` and `list`.** The structural
+  model now describes every `ds:Signature` and container `es:TimeStamp` a
+  dossier carries, built at parse time from the XML alone. Per signature:
+  `id`, `placement` (`document`, `dossier`, `nested_in_signature`, `other`),
+  `document_index`, `parent_signature_id`, `canonicalization_method`,
+  `signature_method`, `digest_methods`, `reference_count`, `reference_uris`
+  (same-document fragments, at most 16), `xades_namespace`,
+  `xades_properties` (at most 32), `evidence` (element counts of certificates,
+  CRLs, OCSP responses, signature timestamps, and archive timestamps),
+  `claimed_signing_time`, and `key_info_certificates`. Per container
+  timestamp: `placement`, `document_index`, `include_count`, and `has_token`.
+  It appears as `dossier.signature_inventory` in both commands' JSON, always
+  beside `"verified": false`, and human `inspect` prints one `(unverified)`
+  line per entry. **None of it is verified**: no cryptography is performed,
+  nothing is decoded, no certificate value is read, and no reference is
+  resolved. It reports what a dossier claims, never whether the claim is true;
+  `verify` remains the only command that answers that. `signatures_present`
+  and `timestamps_present` are unchanged, and `verify` is untouched. The
+  inventory describes at most 64 signatures and 64 container timestamps; a
+  dossier with more produces the new structural warning
+  `signature_inventory_truncated`, which, like every structural warning,
+  changes no exit status.
+- **`extract --document <SELECTOR>`**, repeatable, extracts only the documents
+  it names. A selector is either `#<index>` in source XML order or an exact
+  `object_ref` — the `ds:Object` `Id` the `DocumentProfile` `OBJREF` points at.
+  Matching is exact; a prefix matches nothing, so a selector cannot change
+  meaning as a dossier grows. An unmatched selector is `document_not_found`
+  (exit 4) and one matching several documents is `document_ambiguous`
+  (exit 4). Selectors never reach into an embedded dossier: a selector shaped
+  like a `dossier_path` (`2/0`) is refused with a message saying to extract
+  the embedded dossier and run `extract` on the resulting file. Everything
+  else is unchanged for the selected documents — the limits, naming and
+  deduplication, no-clobber semantics, all-or-nothing rollback, and recursion
+  into a selected embedded dossier. `skipped_count` counts only documents
+  skipped for capability reasons among the selection.
+- **`extract --stdout`** writes one document's decoded payload bytes to
+  standard output, byte for byte, with nothing else on the stream and every
+  diagnostic on stderr; no file is written. It needs exactly one resolved,
+  decodable document: anything else is `stdout_requires_single_document`
+  (exit 4), including a selected embedded dossier while recursion is on, which
+  `--no-recursive` resolves. An encrypted or unsupported document is
+  `document_not_extractable` (exit 5). `--stdout` with `--json` or with
+  `--output` is a usage error (exit 2); the JSON envelope is never moved to
+  stderr. A closed stdout stays exit 3.
+
+  ```sh
+  openszigno extract file.es3 --document '#0' --stdout > payload.pdf
+  ```
+
+- **`FILE` may be `-`** on every command, reading the dossier from standard
+  input through the one bounded reader the CLI uses for files. At most
+  `max_input_bytes + 1` bytes are read and reaching that is the usual
+  `input_too_large` (exit 4), with `input.bytes` `null` because the true size
+  of a stream that was not read to its end is unknown. The cap no longer
+  relies on filesystem metadata for either input. The dossier is buffered in
+  memory in full, which the format requires. stdin and stdout are independent,
+  so `-` and `--stdout` combine.
+- **New JSON.** `extract` gains `data.selected`: the resolved selection as an
+  array of `{index, object_ref}` in source order, or `null` when no
+  `--document` was given. `schema_version` stays `1`; the field is additive.
+- **Per-document signature coverage in `verify`.** For every `es:Document` in
+  `es:Documents`, in source order, the report now says which signatures cover
+  it and how: `direct` for a document-level signature placed in that document
+  whose reference scope is complete and whose references resolve to the
+  document's `es:DocumentProfile` and payload `ds:Object`, `frame` for a
+  dossier-level signature with a complete scope covering `es:Documents`.
+  Coverage is decided by resolved references and the implemented scope rules;
+  placement alone never grants it. States: `covered`, `covered_unverified`,
+  `uncovered`, `undetermined`, and `not_modelled` for a profile-less document
+  the parser skipped, listed with the parser's own reason. An embedded dossier
+  is covered like any other payload, and the report states that its own inner
+  signatures are **not** verified by this run: there is no implied recursion.
+- **New codes** `documents_all_covered` (`passed`, or `info` when a document is
+  covered only by signatures that did not verify), `documents_uncovered`
+  (`unknown`) and `documents_coverage_undetermined` (`unknown`). The two
+  blocking ones cap the **dossier** verdict at `indeterminate`, so a dossier
+  with an unsigned sibling document can no longer be `valid` however sound its
+  other signatures are: a verdict of `valid` has to mean the whole dossier's
+  content is signed. They are `unknown`, never `failed` — an unsigned sibling
+  is missing information, not evidence against a signature that did verify —
+  and they change no signature's own checks or verdict.
+- **New JSON.** `data.documents[]` carries `index`, `object_ref` (never a
+  title), `nested_dossier`, `coverage`, `covered_by[]` with each covering
+  signature's index, route and verdict, and an optional `reason`;
+  `data.counts` gains `documents_covered`, `documents_uncovered` and
+  `documents_undetermined`. Human output gains one coverage line per document.
+  `schema_version` stays `1`: every addition is additive and no existing field
+  changed meaning.
+- **Countersignatures in `verify`.** Both forms a dossier can carry one in are
+  now classified and verified. The XAdES enveloped form (ETSI EN 319 132-1
+  clause 5.2.7.2, ETSI TS 101903 V1.4.1 clause 7.2.4.2) is a `ds:Signature`
+  inside an `xades:CounterSignature` in the countersigned signature's
+  `xades:UnsignedSignatureProperties`; it gets its own placement,
+  `countersignature`, and is verified like any other signature. The e-dossier
+  form (e-dossier specification clauses 3.2.1.3.1 and 3.2.1.3.4.1.3) is an
+  ordinary sibling signature whose signed `es:SignatureProfile/es:Type` says
+  `countersignature`, including the deprecated Hungarian spelling; it keeps its
+  `document` or `dossier` placement and gains the role. Before this, a nested
+  countersignature reached the invalid-placement path, so a valid dossier could
+  be reported as carrying a signature at an undescribed placement.
+- **The countersignature reference scope and binding.** A countersignature
+  must cover the countersigned `ds:SignatureValue`, its own
+  `xades:SignedProperties`, and its own signature-profile object when it
+  carries one — and nothing about documents, because a countersignature
+  attests the parent signature and not the payload. It grants no document
+  coverage: coverage stays with the signature it attests. The
+  `CountersignedSignature` `ds:Reference/@Type` is corroboration only;
+  resolution decides.
+- **New codes** `countersignature_binding_ok` (`passed`),
+  `countersignature_binding_missing` (`failed`),
+  `countersignature_binding_mismatch` (`failed`, the countersignature-wrapping
+  check), `nested_signatures_unsupported` (`info`, on the countersigned
+  signature) and `signatures_unsupported` (`unknown`, on the dossier).
+- **Unsupported nesting is `unknown`-class, never `invalid`.** A signature
+  nested in a shape this build does not support — two `ds:Signature` elements
+  in one `xades:CounterSignature`, or a signature under something that is not
+  `xades:UnsignedSignatureProperties` — keeps its `sig_placement_invalid` with
+  a message that names the reason, but its verdict is left out of the dossier
+  verdict, which is capped at `indeterminate` by `signatures_unsupported`
+  instead. The signature it was dropped into is **not** affected: it records
+  `nested_signatures_unsupported` (`info`) and keeps its own verdict, because
+  it does not cover its own unsigned properties and nothing put there can
+  change what it says. A binding check that actually fails is still a finding
+  and still makes its signature `invalid`.
+- **New JSON.** `data.signatures[].placement` (`document`, `dossier`,
+  `countersignature`, `unknown`), `role` (`signature` or `countersignature`),
+  `parent_signature_index` and `countersigns`. The existing `scope` field is
+  kept as an alias of `placement` and always carries the same value, so no
+  consumer breaks. Human output names the countersigned signature:
+  `countersignature of signature 0`. `schema_version` stays `1`.
+
+- **`--online` revocation fetching**, implemented in the CLI. The
+  `openszigno-verify` crate stays network-free and structurally cannot open a
+  socket; everything fetched reaches it through the same `RevocationSource` a
+  `--revocation-store` file arrives through, and is judged by exactly the same
+  offline rules. CRLs come from the certificate's own `cRLDistributionPoints`
+  and OCSP responses from its `authorityInfoAccess` responders — never from a
+  URL in the dossier's XML — with the scheme exactly as published, a 5 s
+  connect and 20 s total timeout, 16 MiB and 64 KiB size caps, at most three
+  redirects and **none across hosts**, and no proxy from the environment unless
+  `--online-proxy URL` names one. OCSP requests are RFC 6960 `OCSPRequest`
+  bodies posted as `application/ocsp-request`, with a SHA-256 `certID` and no
+  nonce. Nothing is fetched for a certificate the caller's own material already
+  covers. New sources `online_crl` and `online_ocsp` in
+  `chain[].revocation.source`; `policy.revocation` reads `online`. A failed
+  fetch is one `revocation_status_unknown` (blocking) naming the URL and the
+  failure class — `timeout`, `http status <code>`, `too large`, `redirect`,
+  `invalid`, `transport` — never a panic and never a hang.
+- **`--online-cache DIR`** writes every fetched artefact into a
+  `--revocation-store` shaped directory, named by the SHA-256 of its own bytes,
+  so a later run with `--revocation-store DIR` and no `--online` reproduces the
+  result with no network at all.
+- **Container `es:TimeStamp` validation**, dossier-level and document-level.
+  Each `xades:Include` is resolved on the parser's ID space, the
+  reference-scope rule for timestamps is enforced (a dossier timestamp must
+  cover `es:DossierProfile` and `es:Documents`; a document timestamp its
+  `es:DocumentProfile` and the payload `ds:Object`), each included element is
+  canonicalized with the declared method and the results concatenated in
+  `Include` order per XAdES 7.1.4.3.1, and the token is verified by the
+  existing RFC 3161 machinery including the TSA path, its revocation, and
+  trust. New codes `dossier_timestamp_verified` (`info`),
+  `dossier_timestamp_invalid` (`failed`), `dossier_timestamp_not_checked`
+  (`info`) and the matching `document_timestamp_*` set. These never change a
+  signature's checks or verdict; an `_invalid` lowers the **dossier** verdict,
+  because an imprint that does not match is evidence the container was altered
+  after it was stamped.
+- **New JSON.** `data.timestamps[]` holds one entry per container
+  `es:TimeStamp` with its `kind`, `document_index`, token details and own
+  `checks`; `data.counts.timestamps_verified` counts the ones that verified
+  completely. `signatures[].timestamps[]` entries gain a `document_index`
+  field, always `null` for a signature timestamp. `schema_version` stays `1`:
+  every addition is additive and no existing field changed meaning.
+- **Trusted lists: the identity forms a real national list actually uses.**
+  `X509SKI` and `X509SubjectName` service digital identities are now read. They
+  contribute **no trust anchor** — an identity that names a certificate without
+  supplying one cannot grant trust — but they can decide `qualified` over a
+  chain some other anchor has already validated. An SKI is matched against a
+  certificate's `subjectKeyIdentifier`; a subject name is matched attribute by
+  attribute against the certificate's subject, exactly as written, with only
+  the ASN.1 string tag dropped because an RFC 4514 string cannot express it. No
+  case folding and no RFC 4518 preparation. Both are documented as weaker than
+  a certificate identity.
+- **Pre-eIDAS trusted-list statuses.** `undersupervision` and `accredited`
+  count as granted at a validation time **before 2016-07-01**, when eIDAS began
+  to apply, and never after it. The status that was honoured is named in the
+  `certificate_qualified` message, so an eIDAS `granted` and a historical
+  `accredited` are never reported as the same statement. This is what lets a
+  pre-2016 Hungarian signature report a qualified status instead of
+  `certificate_not_qualified` for a reason unrelated to the signature.
+- `ServiceName` now prefers the `xml:lang="en"` entry over document order.
+- `ureq` 3.4 (MIT OR Apache-2.0) with rustls, in the CLI only, for `--online`.
+  Its `gzip` and platform-proxy features are off. This pulls in `webpki-roots`,
+  whose licence `CDLA-Permissive-2.0` was added to `deny.toml`: it is Mozilla's
+  CA root *data*, permissive, with no reciprocity or source-disclosure
+  obligation.
+
+### Changed (M3)
+
+- **OCSP responders are now authorised under all three RFC 6960 models.**
+  Alongside the issuing CA answering for itself and a responder that CA
+  delegated to, a **trusted responder** (section 2.2) is accepted: one whose
+  certificate carries `id-kp-OCSPSigning` and whose own path validates to a
+  configured trust anchor — trust store or trusted list — at the response's
+  `producedAt`, even though the queried certificate's issuer never delegated to
+  it. Central responders are how real national hierarchies are built: one
+  responder answers for every CA the operator runs, issued by a sibling CA, and
+  a verifier implementing only the delegation model rejected every one of those
+  answers. The authority is the caller's own trust material, checked by a full
+  path validation, so this can never admit a response whose signer the operator
+  had not already chosen to trust; the issuer and delegated models keep
+  precedence. Which model applied is reported in
+  `chain[].revocation.responder_model` (`issuer`, `delegated`, `trusted`), and
+  the new `ocsp_responder_trusted` (`info`) check names the third one when it
+  is used.
+- **A refused source no longer ends the search.** An OCSP response no model
+  authorises, a delta CRL, an out-of-scope CRL — any source that is found and
+  refused — is recorded and the remaining tiers are tried, so an unusable OCSP
+  answer followed by a good CRL now ends as `good` from the CRL.
+  `revocation_data_invalid` and `revocation_status_unknown` are reported only
+  after every tier has been exhausted. The refusal stays visible: the new
+  `chain[].revocation.detail` field says what was refused, why, and which
+  source answered instead, and the path summary repeats it. The
+  `revocation_data_invalid` message now names the cause instead of listing
+  every possible one.
+- **A failed `--online` fetch is now `online_fetch_failed` (`info`), not a
+  blocking dossier-level `revocation_status_unknown`.** A failed fetch is a
+  fact about the network, not about a certificate; whether the missing data
+  mattered is answered by the chain that needed it, which still reports
+  `revocation_status_unknown` and still blocks. Emitting a second blocking
+  check per URL added nothing there and did harm: a fetch attempted for a
+  certificate no verdict depended on — an over-fetch, or the timestamp
+  authority of a container `es:TimeStamp` — dragged dossiers whose every
+  signature was `valid` down to `indeterminate` and exit `7`.
+- **Container-timestamp findings never block the dossier verdict.** Revocation,
+  path and trust findings about a container `es:TimeStamp`'s timestamp
+  authority live on that timestamp's entry in `data.timestamps[]`, with its own
+  `checks` and `verified: false`, and surface at the dossier level only as
+  `dossier_timestamp_not_checked` / `document_timestamp_not_checked` (`info`)
+  naming the cause. The aggregation is now stated explicitly in
+  `docs/architecture.md`: `valid` when every signature is `valid`, `invalid`
+  when any signature is — or when a container timestamp's imprint or token
+  contradicts the container — and `indeterminate` otherwise.
+- The `--online` OCSP `POST` now sets `Content-Length` explicitly. `ureq` sent
+  a sized, unchunked body already — the request is passed as a slice — but a
+  request whose end the peer has to infer is the shape that behaves
+  differently on different platforms, and a responder that does not implement
+  chunked requests answers one with a `400`. The test suite now asserts at the
+  server that exactly one `Content-Length` arrives, that nothing is chunked,
+  and that the whole body is read before the answer.
+- Under `--online`, a fetched OCSP response no longer stops the CRL from being
+  fetched. Obtaining a response is not the same as being answered by one, so
+  coverage is re-tested with what was just fetched before the CRL is skipped.
+- `revocation_status_unknown` is now also emitted per failed `--online` fetch,
+  with the URL and failure class in the message. It remains `unknown` and
+  blocking either way.
+- `revocation_policy` reports `online` for a run given `--online`.
+
+### Removed (M3)
+
+- The `dossier_timestamp_not_validated` check code, which existed only to say
+  that container timestamps were not validated yet. They are now validated, and
+  the `dossier_timestamp_*` / `document_timestamp_*` codes above replace it.
+
+### Not implemented, deliberately (M3)
+
+- `xades:ArchiveTimeStamp` verification. It remains `archive_timestamp_present`
+  (`info`). The XAdES 1.4.1 clause 8.2.1 imprint is under-specified in ways
+  only interoperability evidence can settle, this project has no consented
+  real-world B-LTA material to check an implementation against, and a synthetic
+  fixture generated by the same code that verifies it would prove only that the
+  implementation agrees with itself. No `poe_times` are recorded and an archive
+  timestamp does not extend the validation-time reasoning. The reasoning is in
+  `docs/architecture.md`, "Archive timestamps".
+
 ## [0.3.0] - 2026-09-07
 
 ### Added (M2 phase 3: revocation and EU trusted lists)
@@ -705,5 +1101,6 @@ This release performs no cryptographic verification of any kind.
 
 [0.1.0]: https://github.com/watt-mind/openSzigno/releases/tag/v0.1.0
 [0.2.0]: https://github.com/watt-mind/openSzigno/compare/v0.1.0...v0.2.0
-[Unreleased]: https://github.com/watt-mind/openSzigno/compare/v0.3.0...develop
+[Unreleased]: https://github.com/watt-mind/openSzigno/compare/v0.4.0...develop
+[0.4.0]: https://github.com/watt-mind/openSzigno/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/watt-mind/openSzigno/compare/v0.2.0...v0.3.0

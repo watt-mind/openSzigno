@@ -1,3 +1,4 @@
+mod online;
 mod output_dir;
 mod revocation_store;
 mod trust_store;
@@ -10,12 +11,14 @@ use std::process::ExitCode;
 
 use clap::{Args, Parser, Subcommand};
 use openszigno_core::{
-    DecodeOutcome, DetectedType, Dossier, Error as CoreError, KNOWN_COMPATIBLE_NAMESPACES, Limits,
-    ParseOptions, UnsupportedReason,
+    DecodeOutcome, DecryptOptions, DetectedType, Dossier, Error as CoreError,
+    KNOWN_COMPATIBLE_NAMESPACES, Limits, ParseOptions, RecipientKey, UnsupportedReason,
+    decode_document_with,
 };
 use serde::Serialize;
 use serde_json::{Value, json};
 use unicode_normalization::UnicodeNormalization;
+use zeroize::Zeroizing;
 
 use openszigno_verify::{
     MemoryRevocationStore, NoRevocation, RoxmltreeC14n, TrustListSnapshot, Verdict, VerifyOptions,
@@ -77,7 +80,7 @@ fn parse_validation_time(value: &str) -> Result<ValidationTime, String> {
 
 #[derive(Clone, Debug, Args)]
 struct VerifyArgs {
-    /// Input .es3 dossier.
+    /// Input .es3 dossier, or `-` to read it from standard input.
     file: PathBuf,
     /// Emit one stable JSON object on stdout.
     #[arg(long)]
@@ -117,8 +120,27 @@ struct VerifyArgs {
     /// Do not check revocation at all. Documented as producing at most
     /// `indeterminate`: a signature whose certificate might have been revoked
     /// is not one this tool will call valid.
-    #[arg(long = "no-revocation")]
+    #[arg(long = "no-revocation", conflicts_with_all = ["online", "online_cache", "online_proxy"])]
     no_revocation: bool,
+    /// Fetch revocation data the offline material does not cover, from the CRL
+    /// distribution points and AIA OCSP responders the certificates themselves
+    /// publish. This is the only thing that makes openszigno touch the
+    /// network, and it never contacts a URL that did not come out of a
+    /// certificate. Timeouts, size caps and a refusal to follow a redirect to
+    /// another host are fixed; everything fetched is checked by exactly the
+    /// same rules as offline material, so `--online` can only add data, never
+    /// relax a rule.
+    #[arg(long = "online")]
+    online: bool,
+    /// Write everything `--online` fetched into this directory, laid out like
+    /// a `--revocation-store`, so a later offline run reproduces this result.
+    #[arg(long = "online-cache", value_name = "DIR", requires = "online")]
+    online_cache: Option<PathBuf>,
+    /// Route `--online` fetches through this proxy. Without it no proxy is
+    /// used at all — in particular, none from `HTTP_PROXY` or its relatives,
+    /// which are deliberately ignored.
+    #[arg(long = "online-proxy", value_name = "URL", requires = "online")]
+    online_proxy: Option<String>,
     /// Validation time as an RFC 3339 timestamp. Overrides everything: without
     /// it, a signature whose timestamp fully verified is validated at that
     /// token's genTime, and otherwise at the current time.
@@ -139,7 +161,7 @@ impl VerifyArgs {
 
 #[derive(Clone, Debug, Args)]
 struct InputArgs {
-    /// Input .es3 dossier.
+    /// Input .es3 dossier, or `-` to read it from standard input.
     file: PathBuf,
     /// Emit one stable JSON object on stdout.
     #[arg(long)]
@@ -152,18 +174,32 @@ struct InputArgs {
 
 #[derive(Clone, Debug, Args)]
 struct ExtractArgs {
-    /// Input .es3 dossier.
+    /// Input .es3 dossier, or `-` to read it from standard input.
     file: PathBuf,
     /// Destination directory. Existing files are never overwritten.
-    #[arg(short, long)]
-    output: PathBuf,
+    #[arg(
+        short,
+        long,
+        required_unless_present = "stdout",
+        conflicts_with = "stdout"
+    )]
+    output: Option<PathBuf>,
     /// Emit one stable JSON object on stdout.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "stdout")]
     json: bool,
     /// Also accept a dossier whose root Dossier element is in this namespace,
     /// in addition to the known-compatible ones. Repeatable.
     #[arg(long = "allow-namespace", value_name = "URI")]
     allow_namespace: Vec<String>,
+    /// Extract only this document, named by its `object_ref` (the ds:Object Id
+    /// its DocumentProfile OBJREF points at) or as `#<index>` in source order.
+    /// Repeatable. Selectors never reach into an embedded dossier.
+    #[arg(long = "document", value_name = "SELECTOR")]
+    document: Vec<String>,
+    /// Write the selected document's raw payload bytes to standard output and
+    /// nothing else. Requires exactly one resolved, decodable document.
+    #[arg(long = "stdout")]
+    stdout: bool,
     /// Write embedded dossiers as raw payload files without expanding them.
     #[arg(long)]
     no_recursive: bool,
@@ -171,6 +207,32 @@ struct ExtractArgs {
     /// clamped to 8.
     #[arg(long, value_name = "N", default_value_t = 3)]
     max_depth: u32,
+    /// Decrypt encrypted documents with this RSA private key: PKCS#8, DER or
+    /// PEM, plain or passphrase-protected. The key is read from the file and
+    /// never from the command line. Without it, encrypted documents stay
+    /// skipped.
+    #[arg(long = "decrypt-key", value_name = "FILE")]
+    decrypt_key: Option<PathBuf>,
+    /// The certificate belonging to `--decrypt-key`, PEM or DER. It is what
+    /// makes a CMS recipient recognisable; it may be omitted when the key
+    /// file is PEM and carries the certificate alongside the key.
+    #[arg(long = "decrypt-cert", value_name = "FILE", requires = "decrypt_key")]
+    decrypt_cert: Option<PathBuf>,
+    /// Read the passphrase of an encrypted `--decrypt-key` from this file, one
+    /// trailing newline stripped. It takes precedence over the environment
+    /// variable OPENSZIGNO_DECRYPT_PASSPHRASE. A passphrase is never taken
+    /// from the command line.
+    #[arg(
+        long = "decrypt-passphrase-file",
+        value_name = "FILE",
+        requires = "decrypt_key"
+    )]
+    decrypt_passphrase_file: Option<PathBuf>,
+    /// Also decrypt documents whose content encryption is DES-EDE3-CBC. That
+    /// cipher is weak and is refused by default; it exists because it is what
+    /// the Microsec reference tool encrypted with by default.
+    #[arg(long = "allow-legacy-ciphers", requires = "decrypt_key")]
+    allow_legacy_ciphers: bool,
 }
 
 impl InputArgs {
@@ -259,6 +321,17 @@ impl CliError {
         }
     }
 
+    /// A problem with the caller's own decryption material rather than with
+    /// the dossier. Exit 4 is the "the inputs to this run are unusable"
+    /// status; nothing about the dossier has been judged.
+    fn decrypt_material(error: CoreError) -> Self {
+        Self {
+            code: error.code().as_str(),
+            message: error.message().to_owned(),
+            exit: 4,
+        }
+    }
+
     fn invalid(code: &'static str, message: impl Into<String>) -> Self {
         Self {
             code,
@@ -301,13 +374,36 @@ fn main() -> ExitCode {
         }
         Command::Extract(args) => {
             let options = args.parse_options();
-            let result = extract(
-                &args.file,
-                &args.output,
-                &options,
-                !args.no_recursive,
-                args.max_depth.min(MAX_NESTING_DEPTH),
-            );
+            let request = ExtractRequest {
+                selectors: &args.document,
+                to_stdout: args.stdout,
+                recursive: !args.no_recursive,
+                max_depth: args.max_depth.min(MAX_NESTING_DEPTH),
+            };
+            // The key is loaded before the dossier is touched, so an unusable
+            // key fails the run without having decoded anything.
+            let result = match load_recipient_key(&args) {
+                Ok(key) => {
+                    let decrypt = DecryptOptions {
+                        key: key.as_ref(),
+                        allow_legacy_ciphers: args.allow_legacy_ciphers,
+                    };
+                    extract(
+                        &args.file,
+                        args.output.as_deref(),
+                        &options,
+                        &request,
+                        decrypt,
+                    )
+                }
+                Err(error) => Err(failure(
+                    InputInfo {
+                        format: None,
+                        bytes: None,
+                    },
+                    error,
+                )),
+            };
             ("extract", args.json, result)
         }
         Command::ValidateStructure(args) => {
@@ -333,6 +429,17 @@ fn main() -> ExitCode {
             };
             let written = if json_mode {
                 write_json(&response)
+            } else if let Some(payload) = &success.payload {
+                // Payload mode: stdout carries the document's bytes and
+                // nothing else, so every diagnostic goes to stderr.
+                write_payload(payload).inspect(|()| {
+                    for warning in &response.warnings {
+                        write_diagnostic(&format!(
+                            "warning [{}]: {}",
+                            warning.code, warning.message
+                        ));
+                    }
+                })
             } else {
                 write_human_success(command, &response)
             };
@@ -413,6 +520,9 @@ struct Success {
     input: InputInfo,
     data: Value,
     warnings: Vec<Notice>,
+    /// Raw bytes to write to stdout instead of a human summary, set only by
+    /// `extract --stdout`. Never combined with `--json`, which `clap` refuses.
+    payload: Option<Vec<u8>>,
     /// The process exit status for a completed run. `0` for every command
     /// except `verify`, which reports its verdict through statuses 6 and 7.
     exit: u8,
@@ -437,11 +547,12 @@ fn inspect(path: &Path, options: &ParseOptions) -> CliResult {
                 "structural_validation": true,
                 "base64_extraction": true,
                 "zip_base64_extraction": true,
-                "encrypted_extraction": false,
+                "encrypted_extraction": "with_key",
                 "cryptographic_verification": false
             }
         }),
         warnings,
+        payload: None,
         exit: 0,
     })
 }
@@ -456,6 +567,7 @@ fn list(path: &Path, options: &ParseOptions) -> CliResult {
             "documents": dossier.documents,
         }),
         warnings,
+        payload: None,
         exit: 0,
     })
 }
@@ -472,6 +584,7 @@ fn validate_structure(path: &Path, options: &ParseOptions) -> CliResult {
             "cryptographic_verification_performed": false
         }),
         warnings,
+        payload: None,
         exit: 0,
     })
 }
@@ -540,6 +653,10 @@ fn verify_command(args: &VerifyArgs) -> CliResult {
                     loaded.push_check(check);
                 }
                 loaded.extend_anchors(list.anchors);
+                // The `X509SKI` and `X509SubjectName` identities never become
+                // anchors, but they can still say that a chain some other
+                // anchor validated is covered by a granted CA/QC service.
+                loaded.extend_services(list.service_identities);
             }
             store = loaded;
             &store
@@ -559,10 +676,11 @@ fn verify_command(args: &VerifyArgs) -> CliResult {
 
     let disabled = NoRevocation;
     let offline;
+    let mut online_checks: Vec<openszigno_verify::Check> = Vec::new();
     let revocation: &dyn openszigno_verify::RevocationSource = if args.no_revocation {
         &disabled
     } else {
-        offline = match &args.revocation_store {
+        let mut store = match &args.revocation_store {
             Some(directory) => revocation_store::load(directory).map_err(|message| {
                 failure(
                     input.clone(),
@@ -575,6 +693,62 @@ fn verify_command(args: &VerifyArgs) -> CliResult {
             })?,
             None => MemoryRevocationStore::default(),
         };
+        if args.online {
+            // Everything the run already has, so that nothing is fetched for a
+            // certificate the caller's own material already answers for. The
+            // question is put to the verifier's own offline code path, not to
+            // a cheaper approximation of it.
+            let (embedded_crls, embedded_ocsp) =
+                openszigno_verify::embedded_revocation_values(&bytes, &options)
+                    .map_err(|error| failure(input.clone(), CliError::structure(error)))?;
+            let mut certificates = openszigno_verify::embedded_certificates(&bytes, &options)
+                .map_err(|error| failure(input.clone(), CliError::structure(error)))?;
+            certificates.extend(trust.anchors().iter().map(|anchor| anchor.der.clone()));
+            certificates.extend(trust.intermediates().iter().cloned());
+            let data = openszigno_verify::revocation::RevocationData {
+                embedded_crls: &embedded_crls,
+                embedded_ocsp: &embedded_ocsp,
+                store_crls: openszigno_verify::RevocationSource::crls(&store),
+                store_ocsp: openszigno_verify::RevocationSource::ocsp_responses(&store),
+                online_crls: &[],
+                online_ocsp: &[],
+            };
+            let fetcher =
+                online::Fetcher::new(args.online_proxy.as_deref()).map_err(|message| {
+                    failure(
+                        input.clone(),
+                        CliError {
+                            code: "online_options_invalid",
+                            message,
+                            exit: 3,
+                        },
+                    )
+                })?;
+            let limits = openszigno_verify::VerifyLimits::default();
+            let anchors: Vec<Vec<u8>> = trust
+                .anchors()
+                .iter()
+                .map(|anchor| anchor.der.clone())
+                .collect();
+            let fetched =
+                fetcher.fill_gaps(&certificates, &anchors, &data, clock.unix_time(), &limits);
+            if let Some(directory) = &args.online_cache {
+                online::write_cache(directory, &fetched).map_err(|message| {
+                    failure(
+                        input.clone(),
+                        CliError {
+                            code: "online_cache_invalid",
+                            message,
+                            exit: 3,
+                        },
+                    )
+                })?;
+            }
+            online_checks = fetched.checks;
+            store.extend_online(fetched.crls, fetched.ocsp);
+            store = store.into_online();
+        }
+        offline = store;
         &offline
     };
     let mut verify_options = VerifyOptions::new(clock, trust, revocation, &backend);
@@ -585,6 +759,14 @@ fn verify_command(args: &VerifyArgs) -> CliResult {
     let mut report = verify_dossier(&bytes, &verify_options)
         .map_err(|error| failure(input.clone(), CliError::structure(error)))?;
     report.policy.trust_lists = snapshots;
+    // Informational, and deliberately not folded into the verdict. A fetch
+    // that did not happen leaves the certificate exactly as uncovered as it
+    // was, and that is reported — and blocks — on the chain that needed the
+    // data, by the verifier, which is the only thing that knows whether the
+    // gap mattered. Blocking here as well would let a fetch attempted for a
+    // certificate no verdict depended on sink a dossier whose every signature
+    // is valid.
+    report.checks.extend(online_checks);
     let exit = match report.verdict {
         Verdict::Invalid => 6,
         Verdict::Indeterminate => 7,
@@ -603,6 +785,7 @@ fn verify_command(args: &VerifyArgs) -> CliResult {
         // `cryptographic_verification_not_performed` is deliberately absent:
         // verification *was* attempted here, and the verdict says how it went.
         warnings: structural_warnings(&dossier),
+        payload: None,
         exit,
     })
 }
@@ -670,6 +853,9 @@ struct PlanFile {
     name: String,
     path: String,
     bytes: Vec<u8>,
+    /// Whether an `encrypt` transform was reversed to obtain `bytes`. It says
+    /// a key unwrapped the content, never that anything was verified.
+    decrypted: bool,
     detected_type: &'static str,
     declared_type: String,
 }
@@ -701,8 +887,16 @@ struct PlanDir {
 /// State shared by every nesting level of one extraction run.
 struct Plan<'a> {
     options: &'a ParseOptions,
+    /// The decryption policy for this run. `DecryptOptions::default()` leaves
+    /// every encrypted document skipped, which is what `extract` does without
+    /// `--decrypt-key`.
+    decrypt: DecryptOptions<'a>,
     recursive: bool,
     max_depth: u32,
+    /// Top-level document indices to extract, or `None` for all of them.
+    /// It applies at depth 0 only: `--document` never reaches into an
+    /// embedded dossier, so a selected nested dossier still expands whole.
+    selection: Option<Vec<usize>>,
     /// Decoded bytes across the whole tree, against `max_total_decoded_bytes`.
     total: u64,
     warnings: Vec<Notice>,
@@ -710,21 +904,143 @@ struct Plan<'a> {
     nested_dossiers: usize,
 }
 
-fn extract(
-    path: &Path,
-    output: &Path,
-    options: &ParseOptions,
+/// What one `extract` run was asked to do, apart from where it reads and
+/// writes.
+struct ExtractRequest<'a> {
+    selectors: &'a [String],
+    to_stdout: bool,
     recursive: bool,
     max_depth: u32,
+}
+
+/// One document a `--document` selector resolved to.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct Selected {
+    index: usize,
+    object_ref: String,
+}
+
+/// Resolve the `--document` selectors against one dossier's top-level
+/// documents.
+///
+/// A selector is either `#<index>` in source order or an exact `object_ref`.
+/// Prefixes are deliberately not accepted: a selector that identified a
+/// document only by a shorter string would silently change meaning when the
+/// dossier gains a document. The result is in source order, whatever order
+/// the selectors were given in, and a document named twice is listed once.
+fn resolve_selection(dossier: &Dossier, selectors: &[String]) -> Result<Vec<Selected>, CliError> {
+    let mut chosen: Vec<usize> = Vec::new();
+    for selector in selectors {
+        let index = resolve_selector(dossier, selector)?;
+        if !chosen.contains(&index) {
+            chosen.push(index);
+        }
+    }
+    chosen.sort_unstable();
+    Ok(chosen
+        .into_iter()
+        .map(|index| Selected {
+            index,
+            object_ref: dossier.documents[index].object_ref.clone(),
+        })
+        .collect())
+}
+
+/// Resolve one selector to a top-level document index.
+fn resolve_selector(dossier: &Dossier, selector: &str) -> Result<usize, CliError> {
+    // A `dossier_path` like `2/0` names a document inside an embedded dossier,
+    // which this flag deliberately cannot reach. Saying so beats letting it
+    // fall through to a bare "no such document".
+    if selector.contains('/') {
+        return Err(CliError::invalid(
+            "document_not_found",
+            "a --document selector cannot name a document inside an embedded dossier; extract the embedded dossier first and run extract on the file it produced",
+        ));
+    }
+    if let Some(digits) = selector.strip_prefix('#') {
+        let index: usize = digits.parse().map_err(|_| {
+            CliError::invalid(
+                "document_not_found",
+                "a #<index> --document selector must be a decimal document index",
+            )
+        })?;
+        return match dossier.documents.iter().any(|item| item.index == index) {
+            true => Ok(index),
+            false => Err(CliError::invalid(
+                "document_not_found",
+                format!("no document has index {index}"),
+            )),
+        };
+    }
+    let mut matches = dossier
+        .documents
+        .iter()
+        .filter(|document| document.object_ref == selector);
+    let first = matches.next().ok_or_else(|| {
+        // The selector is an XML ID from the caller's own dossier, not payload
+        // content, so echoing it is safe and makes the error usable.
+        CliError::invalid(
+            "document_not_found",
+            format!("no document has the object_ref {selector}"),
+        )
+    })?;
+    if matches.next().is_some() {
+        return Err(CliError::invalid(
+            "document_ambiguous",
+            format!("more than one document has the object_ref {selector}"),
+        ));
+    }
+    Ok(first.index)
+}
+
+fn extract<'a>(
+    path: &Path,
+    output: Option<&Path>,
+    options: &ParseOptions,
+    request: &ExtractRequest<'_>,
+    decrypt: DecryptOptions<'a>,
 ) -> CliResult {
     let (bytes, dossier) = load(path, options)?;
     let input = valid_input(bytes.len());
+
+    let selection = match request.selectors.is_empty() {
+        true => None,
+        false => Some(
+            resolve_selection(&dossier, request.selectors)
+                .map_err(|error| failure(input.clone(), error))?,
+        ),
+    };
+    let selected_json = match &selection {
+        Some(selected) => Value::Array(
+            selected
+                .iter()
+                .map(|item| json!({ "index": item.index, "object_ref": item.object_ref }))
+                .collect(),
+        ),
+        None => Value::Null,
+    };
+
+    if request.to_stdout {
+        return extract_to_stdout(
+            &dossier,
+            selection.as_deref(),
+            options,
+            request,
+            input,
+            decrypt,
+        );
+    }
+
     let mut plan = Plan {
         options,
-        recursive,
-        max_depth,
+        decrypt,
+        recursive: request.recursive,
+        max_depth: request.max_depth,
+        selection: selection
+            .as_ref()
+            .map(|selected| selected.iter().map(|item| item.index).collect()),
         total: 0,
-        warnings: dossier_warnings(&dossier),
+        warnings: dossier_warnings_with(&dossier, decrypt.key.is_some()),
         skipped: 0,
         nested_dossiers: 0,
     };
@@ -735,6 +1051,7 @@ fn extract(
         .plan_dossier(&dossier, String::new(), "", String::new(), 0)
         .map_err(|error| failure(input.clone(), error))?;
 
+    let output = output.expect("clap requires --output unless --stdout is given");
     let directory =
         OutputDir::open(output).map_err(|error| failure(input.clone(), error.into()))?;
     for entry in &root.entries {
@@ -778,9 +1095,103 @@ fn extract(
             "extracted": writer.extracted,
             "extracted_count": writer.extracted.len(),
             "skipped_count": plan.skipped,
-            "nested_dossiers_extracted": plan.nested_dossiers
+            "nested_dossiers_extracted": plan.nested_dossiers,
+            "selected": selected_json
         }),
         warnings: plan.warnings,
+        payload: None,
+        exit: 0,
+    })
+}
+
+/// Decode exactly one document and hand its raw bytes to stdout.
+///
+/// Nothing is written to the filesystem and nothing but the payload reaches
+/// stdout, so a caller can redirect the stream straight into a file. Anything
+/// that would make "the payload" ambiguous — no document, several documents,
+/// or an embedded dossier that recursion would have turned into a directory —
+/// is refused rather than guessed at.
+fn extract_to_stdout(
+    dossier: &Dossier,
+    selection: Option<&[Selected]>,
+    options: &ParseOptions,
+    request: &ExtractRequest<'_>,
+    input: InputInfo,
+    decrypt: DecryptOptions<'_>,
+) -> CliResult {
+    let refuse = |message: &str| {
+        failure(
+            input.clone(),
+            CliError::invalid("stdout_requires_single_document", message.to_owned()),
+        )
+    };
+    let index = match selection {
+        Some([only]) => only.index,
+        Some(_) => {
+            return Err(refuse(
+                "--stdout needs exactly one document; the selectors resolved to a different number",
+            ));
+        }
+        None => match dossier.documents.as_slice() {
+            [only] => only.index,
+            _ => {
+                return Err(refuse(
+                    "--stdout needs exactly one document; select one with --document",
+                ));
+            }
+        },
+    };
+    let document = dossier
+        .documents
+        .iter()
+        .find(|item| item.index == index)
+        .expect("the selection names a document of this dossier");
+
+    let decoded = match decode_document_with(dossier, index, &options.limits, &decrypt)
+        .map_err(|error| failure(input.clone(), CliError::extraction(error)))?
+    {
+        DecodeOutcome::Decoded(decoded) => decoded,
+        DecodeOutcome::Unsupported(reason) => {
+            let notice = skip_notice(&index.to_string(), reason);
+            return Err(failure(
+                input,
+                CliError {
+                    code: "document_not_extractable",
+                    message: notice.message,
+                    exit: 5,
+                },
+            ));
+        }
+    };
+
+    // An embedded dossier would normally become a payload file *and* a
+    // `<file>.d` directory. One byte stream cannot carry both, so the caller
+    // must say which they meant by passing --no-recursive.
+    if request.recursive
+        && (document.nested_dossier
+            || openszigno_core::sniff(&decoded.bytes) == DetectedType::Dossier)
+    {
+        return Err(refuse(
+            "the selected document embeds a dossier; pass --no-recursive to write its raw payload, or extract to a directory",
+        ));
+    }
+
+    let selected_json = json!([{ "index": index, "object_ref": document.object_ref }]);
+    let detected = openszigno_core::sniff(&decoded.bytes);
+    Ok(Success {
+        input,
+        data: json!({
+            "extracted": [],
+            "extracted_count": 0,
+            "skipped_count": 0,
+            "nested_dossiers_extracted": 0,
+            "selected": selected_json,
+            "stdout_bytes": decoded.bytes.len(),
+            "detected_type": detected.as_str(),
+            "decrypted": decoded.decrypted
+        }),
+        warnings: dossier_warnings_with(dossier, decrypt.key.is_some()),
+        payload: Some(decoded.bytes),
         exit: 0,
     })
 }
@@ -803,12 +1214,25 @@ impl Plan<'_> {
         let mut entries = Vec::new();
         let mut names = HashSet::new();
         for document in &dossier.documents {
-            let dossier_path = format!("{prefix}{}", document.index);
-            let decoded = match dossier
-                .decode_document(document.index, &self.options.limits)
-                .map_err(CliError::extraction)?
+            // The selection applies to the top level only. A document left out
+            // by it was never asked for, so it is not a skip: `skipped_count`
+            // stays a count of documents this tool could not decode.
+            if depth == 0
+                && let Some(selected) = &self.selection
+                && !selected.contains(&document.index)
             {
-                DecodeOutcome::Decoded(decoded) => decoded.bytes,
+                continue;
+            }
+            let dossier_path = format!("{prefix}{}", document.index);
+            let decoded = match decode_document_with(
+                dossier,
+                document.index,
+                &self.options.limits,
+                &self.decrypt,
+            )
+            .map_err(CliError::extraction)?
+            {
+                DecodeOutcome::Decoded(decoded) => decoded,
                 DecodeOutcome::Unsupported(reason) => {
                     self.skipped += 1;
                     self.warnings.push(skip_notice(&dossier_path, reason));
@@ -818,7 +1242,7 @@ impl Plan<'_> {
 
             self.total = self
                 .total
-                .checked_add(decoded.len() as u64)
+                .checked_add(decoded.bytes.len() as u64)
                 .ok_or_else(|| {
                     CliError::unsafe_output("total_size_limit", "aggregate decoded size overflowed")
                 })?;
@@ -829,14 +1253,14 @@ impl Plan<'_> {
                 ));
             }
 
-            let detected = openszigno_core::sniff(&decoded);
+            let detected = openszigno_core::sniff(&decoded.bytes);
             let name = safe_output_name(document, fallback_extension(document, detected))?;
             let name = self.claim(&mut names, name, document.index, &dossier_path)?;
             let path = join_path(directory_path, &name);
             let subdirectory = self.plan_nested(
                 &Nested {
                     document,
-                    decoded: &decoded,
+                    decoded: &decoded.bytes,
                     dossier_path: &dossier_path,
                     name: &name,
                     directory_path,
@@ -850,7 +1274,8 @@ impl Plan<'_> {
                     dossier_path,
                     name,
                     path,
-                    bytes: decoded,
+                    decrypted: decoded.decrypted,
+                    bytes: decoded.bytes,
                     detected_type: detected.as_str(),
                     declared_type: document.mime_type.essence(),
                 },
@@ -1029,16 +1454,129 @@ fn fallback_extension(
     detected.preferred_extension()
 }
 
+/// The environment variable an encrypted key's passphrase may come from.
+///
+/// A passphrase must never be a command-line argument: `argv` is readable by
+/// every process on most systems and lands in shell history. A file is the
+/// documented way; this variable exists for callers that have no place to put
+/// one, and `--decrypt-passphrase-file` wins when both are present.
+const PASSPHRASE_ENV: &str = "OPENSZIGNO_DECRYPT_PASSPHRASE";
+
+/// The largest decryption-material file this tool reads. A key, a certificate,
+/// and a passphrase are all small; the bound keeps a mistyped path from
+/// reading something huge into memory.
+const MAX_DECRYPT_FILE_BYTES: u64 = 1024 * 1024;
+
+/// Load the recipient key `extract` was given, or `None` when it was given
+/// none.
+///
+/// Nothing read here — key bytes, passphrase, or certificate — is ever placed
+/// in a message, a warning, or the JSON envelope. The paths may appear,
+/// because the caller typed them and they are how a failure is acted on; the
+/// contents never do.
+fn load_recipient_key(args: &ExtractArgs) -> Result<Option<RecipientKey>, CliError> {
+    let Some(key_path) = args.decrypt_key.as_deref() else {
+        return Ok(None);
+    };
+    let key = read_decrypt_file(key_path, "decryption key")?;
+    let certificate = args
+        .decrypt_cert
+        .as_deref()
+        .map(|path| read_decrypt_file(path, "decryption certificate"))
+        .transpose()?;
+    let passphrase = passphrase(args)?;
+    RecipientKey::load(
+        &key,
+        passphrase.as_deref().map(|bytes| &bytes[..]),
+        certificate.as_deref().map(|bytes| &bytes[..]),
+    )
+    .map(Some)
+    .map_err(CliError::decrypt_material)
+}
+
+/// The passphrase for an encrypted key: the file if one was named, otherwise
+/// the environment variable, otherwise none.
+///
+/// A file's single trailing newline is stripped, because that is what an
+/// editor or `echo` leaves behind and no user means it to be part of the
+/// secret. Nothing else is trimmed: a passphrase may legitimately begin or end
+/// with a space.
+fn passphrase(args: &ExtractArgs) -> Result<Option<Zeroizing<Vec<u8>>>, CliError> {
+    if let Some(path) = args.decrypt_passphrase_file.as_deref() {
+        let mut bytes = read_decrypt_file(path, "decryption passphrase")?;
+        if bytes.last() == Some(&b'\n') {
+            bytes.pop();
+            if bytes.last() == Some(&b'\r') {
+                bytes.pop();
+            }
+        }
+        return Ok(Some(bytes));
+    }
+    Ok(std::env::var_os(PASSPHRASE_ENV).map(|value| {
+        #[cfg(unix)]
+        let bytes = {
+            use std::os::unix::ffi::OsStrExt as _;
+            value.as_os_str().as_bytes().to_vec()
+        };
+        #[cfg(not(unix))]
+        let bytes = value.to_string_lossy().into_owned().into_bytes();
+        Zeroizing::new(bytes)
+    }))
+}
+
+/// Read one small decryption-material file.
+///
+/// `what` names the kind of file in the error, never the path's contents. The
+/// buffer zeroes itself when it is dropped, so key and passphrase bytes do not
+/// linger in freed memory.
+fn read_decrypt_file(path: &Path, what: &str) -> Result<Zeroizing<Vec<u8>>, CliError> {
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|_| CliError::io(format!("the {what} file could not be inspected")))?;
+    if !metadata.is_file() {
+        return Err(CliError::io(format!(
+            "the {what} path is not a regular file"
+        )));
+    }
+    if metadata.len() > MAX_DECRYPT_FILE_BYTES {
+        return Err(CliError::io(format!("the {what} file is too large")));
+    }
+    fs::read(path)
+        .map(Zeroizing::new)
+        .map_err(|_| CliError::io(format!("the {what} file could not be read")))
+}
+
 fn skip_notice(dossier_path: &str, reason: UnsupportedReason) -> Notice {
     match reason {
         UnsupportedReason::Encrypted => Notice {
             code: "document_skipped_encrypted".to_owned(),
-            message: format!("document {dossier_path} was not extracted because it is encrypted"),
+            message: format!(
+                "document {dossier_path} was not extracted because it is encrypted and no --decrypt-key was given"
+            ),
         },
         UnsupportedReason::TransformChain => Notice {
             code: "document_skipped_unsupported_transform".to_owned(),
             message: format!(
                 "document {dossier_path} was not extracted because its transform chain is unsupported"
+            ),
+        },
+        UnsupportedReason::NoMatchingRecipient => Notice {
+            code: "document_skipped_no_matching_recipient".to_owned(),
+            message: format!(
+                "document {dossier_path} was not extracted because none of its CMS recipients names the certificate given for the decryption key"
+            ),
+        },
+        // The OID is the sender's algorithm choice, not payload content, so
+        // naming it is safe and is the only way a caller can act on this.
+        UnsupportedReason::UnsupportedCipher { oid } => Notice {
+            code: "document_skipped_unsupported_cipher".to_owned(),
+            message: format!(
+                "document {dossier_path} was not extracted because it uses the unsupported algorithm {oid}"
+            ),
+        },
+        UnsupportedReason::LegacyCipher { oid } => Notice {
+            code: "document_skipped_legacy_cipher".to_owned(),
+            message: format!(
+                "document {dossier_path} was not extracted because it uses the legacy cipher {oid}; pass --allow-legacy-ciphers to decrypt it anyway"
             ),
         },
     }
@@ -1084,7 +1622,8 @@ impl Writer {
                 "path": entry.file.path,
                 "bytes": entry.file.bytes.len(),
                 "detected_type": entry.file.detected_type,
-                "declared_type": entry.file.declared_type
+                "declared_type": entry.file.declared_type,
+                "decrypted": entry.file.decrypted
             }));
 
             if let Some(nested) = &entry.subdirectory {
@@ -1121,60 +1660,87 @@ impl Writer {
     }
 }
 
-fn load(path: &Path, options: &ParseOptions) -> Result<(Vec<u8>, Dossier), Failure> {
-    let limits = &options.limits;
-    let metadata = fs::metadata(path).map_err(|_| {
-        failure(
-            InputInfo {
-                format: None,
-                bytes: None,
-            },
-            CliError::io("could not inspect the input file"),
-        )
-    })?;
-    if !metadata.is_file() {
-        return Err(failure(
-            InputInfo {
-                format: None,
-                bytes: Some(metadata.len()),
-            },
-            CliError::io("input is not a regular file"),
-        ));
-    }
-    if metadata.len() > limits.max_input_bytes {
-        return Err(failure(
-            InputInfo {
-                format: None,
-                bytes: Some(metadata.len()),
-            },
-            CliError::invalid(
-                "input_too_large",
-                format!("input exceeds {} bytes", limits.max_input_bytes),
-            ),
-        ));
-    }
-
-    let file = fs::File::open(path).map_err(|_| {
-        failure(
-            InputInfo {
-                format: None,
-                bytes: Some(metadata.len()),
-            },
-            CliError::io("could not open the input file"),
-        )
-    })?;
-    let mut bytes = Vec::with_capacity(metadata.len().min(usize::MAX as u64) as usize);
-    file.take(limits.max_input_bytes.saturating_add(1))
-        .read_to_end(&mut bytes)
-        .map_err(|_| {
+/// The one bounded reader every command takes its input through.
+///
+/// `path` is either a regular file or `-`, which means standard input. Both
+/// paths read at most `max_input_bytes + 1` bytes and reject the input when
+/// that many arrive, so the cap holds without trusting filesystem metadata —
+/// which a pipe has none of, and which a file can change under us anyway. The
+/// whole dossier is buffered in memory either way; that is inherent to the
+/// format, whose XML must be parsed as one tree.
+fn read_input(path: &Path, limits: &Limits) -> Result<Vec<u8>, Failure> {
+    let unknown = || InputInfo {
+        format: None,
+        bytes: None,
+    };
+    let cap = limits.max_input_bytes.saturating_add(1);
+    let (mut source, declared): (Box<dyn Read>, Option<u64>) = if path == Path::new("-") {
+        (Box::new(io::stdin().lock()), None)
+    } else {
+        let metadata = fs::metadata(path)
+            .map_err(|_| failure(unknown(), CliError::io("could not inspect the input file")))?;
+        if !metadata.is_file() {
+            return Err(failure(
+                InputInfo {
+                    format: None,
+                    bytes: Some(metadata.len()),
+                },
+                CliError::io("input is not a regular file"),
+            ));
+        }
+        if metadata.len() > limits.max_input_bytes {
+            return Err(failure(
+                InputInfo {
+                    format: None,
+                    bytes: Some(metadata.len()),
+                },
+                too_large(limits),
+            ));
+        }
+        let file = fs::File::open(path).map_err(|_| {
             failure(
                 InputInfo {
                     format: None,
                     bytes: Some(metadata.len()),
                 },
-                CliError::io("could not read the input file"),
+                CliError::io("could not open the input file"),
             )
         })?;
+        (Box::new(file), Some(metadata.len()))
+    };
+
+    let mut bytes = Vec::with_capacity(declared.unwrap_or(0).min(1024 * 1024) as usize);
+    source
+        .by_ref()
+        .take(cap)
+        .read_to_end(&mut bytes)
+        .map_err(|_| {
+            failure(
+                InputInfo {
+                    format: None,
+                    bytes: declared,
+                },
+                CliError::io("could not read the input"),
+            )
+        })?;
+    if bytes.len() as u64 > limits.max_input_bytes {
+        // The true size is unknown: reading stopped one byte past the cap. The
+        // envelope says so rather than reporting the truncated length as if it
+        // were the input size.
+        return Err(failure(unknown(), too_large(limits)));
+    }
+    Ok(bytes)
+}
+
+fn too_large(limits: &Limits) -> CliError {
+    CliError::invalid(
+        "input_too_large",
+        format!("input exceeds {} bytes", limits.max_input_bytes),
+    )
+}
+
+fn load(path: &Path, options: &ParseOptions) -> Result<(Vec<u8>, Dossier), Failure> {
+    let bytes = read_input(path, &options.limits)?;
     let dossier = openszigno_core::parse_with_options(&bytes, options).map_err(|error| {
         failure(
             InputInfo {
@@ -1197,6 +1763,11 @@ fn dossier_overview(dossier: &Dossier) -> Value {
         "documents": dossier.documents.len(),
         "signatures_present": dossier.signatures_present,
         "timestamps_present": dossier.timestamps_present,
+        "signature_inventory": {
+            "verified": false,
+            "signatures": dossier.signatures,
+            "timestamps": dossier.timestamps,
+        },
         "nested_dossiers": dossier
             .documents
             .iter()
@@ -1209,7 +1780,16 @@ fn dossier_overview(dossier: &Dossier) -> Value {
 /// Every warning a reading command reports for a dossier: what the tool
 /// cannot do with it, and how it deviates from the default profile.
 fn dossier_warnings(dossier: &Dossier) -> Vec<Notice> {
-    let mut warnings = capability_warnings(dossier);
+    dossier_warnings_with(dossier, false)
+}
+
+/// The same warnings for a run that may hold a decryption key.
+///
+/// With a key, `encrypted_document_unsupported` would be untrue: the document
+/// is encrypted, and this run can try to decrypt it. What actually happened to
+/// it is reported per document by `skip_notice` instead.
+fn dossier_warnings_with(dossier: &Dossier, decryption_available: bool) -> Vec<Notice> {
+    let mut warnings = capability_warnings(dossier, decryption_available);
     warnings.extend(structural_warnings(dossier));
     warnings
 }
@@ -1226,7 +1806,7 @@ fn structural_warnings(dossier: &Dossier) -> Vec<Notice> {
         .collect()
 }
 
-fn capability_warnings(dossier: &Dossier) -> Vec<Notice> {
+fn capability_warnings(dossier: &Dossier, decryption_available: bool) -> Vec<Notice> {
     let mut warnings = Vec::new();
     if dossier.signatures_present > 0 || dossier.timestamps_present > 0 {
         warnings.push(Notice {
@@ -1236,13 +1816,15 @@ fn capability_warnings(dossier: &Dossier) -> Vec<Notice> {
     }
     for document in &dossier.documents {
         if document.transforms.iter().any(|item| item == "encrypt") {
-            warnings.push(Notice {
-                code: "encrypted_document_unsupported".to_owned(),
-                message: format!(
-                    "document {} is encrypted and cannot be extracted",
-                    document.index
-                ),
-            });
+            if !decryption_available {
+                warnings.push(Notice {
+                    code: "encrypted_document_unsupported".to_owned(),
+                    message: format!(
+                        "document {} is encrypted; only `extract --decrypt-key` can read it",
+                        document.index
+                    ),
+                });
+            }
         } else if !matches!(
             document.transforms.as_slice(),
             [base64] if base64 == "base64"
@@ -1432,9 +2014,106 @@ fn write_json(response: &Response) -> io::Result<()> {
     stdout.flush()
 }
 
+/// Write raw payload bytes to stdout, byte for byte and with nothing added.
+/// A closed or failing stdout is an I/O failure the caller turns into exit
+/// status 3, never a panic.
+fn write_payload(bytes: &[u8]) -> io::Result<()> {
+    let stdout = io::stdout();
+    let mut stdout = stdout.lock();
+    stdout.write_all(bytes)?;
+    stdout.flush()
+}
+
 /// Best-effort diagnostic on stderr; a failing stderr must not abort the run.
 fn write_diagnostic(line: &str) {
     let _ = writeln!(io::stderr(), "{line}");
+}
+
+/// Print the claimed signature inventory, one line per signature and one per
+/// container timestamp.
+///
+/// Every line starts with `(unverified)`, because nothing on it was checked:
+/// these are the dossier's own claims about its signature material, read out
+/// of the XML at parse time.
+fn write_signature_inventory(out: &mut impl Write, inventory: &Value) -> io::Result<()> {
+    let signatures = inventory["signatures"]
+        .as_array()
+        .map_or(&[][..], |items| items);
+    let timestamps = inventory["timestamps"]
+        .as_array()
+        .map_or(&[][..], |items| items);
+    if signatures.is_empty() && timestamps.is_empty() {
+        return Ok(());
+    }
+    writeln!(
+        out,
+        "Signature inventory (claimed by the dossier; nothing below was verified):"
+    )?;
+    for (index, signature) in signatures.iter().enumerate() {
+        let mut line = format!(
+            "(unverified) signature {index}: placement={}",
+            display_json_string(&signature["placement"])
+        );
+        if let Some(document) = signature["document_index"].as_u64() {
+            line.push_str(&format!(", document={document}"));
+        }
+        if let Some(id) = signature["id"].as_str() {
+            line.push_str(&format!(", id={id}"));
+        }
+        if let Some(parent) = signature["parent_signature_id"].as_str() {
+            line.push_str(&format!(", inside={parent}"));
+        }
+        line.push_str(&format!(", references={}", signature["reference_count"]));
+        let properties = join_json_strings(&signature["xades_properties"]);
+        if !properties.is_empty() {
+            line.push_str(&format!(", xades={properties}"));
+        }
+        let evidence = &signature["evidence"];
+        line.push_str(&format!(
+            ", certificates={}, crls={}, ocsp={}, signature-timestamps={}, archive-timestamps={}",
+            evidence["certificates"],
+            evidence["crls"],
+            evidence["ocsp_responses"],
+            evidence["signature_timestamps"],
+            evidence["archive_timestamps"]
+        ));
+        if let Some(claimed) = signature["claimed_signing_time"].as_str() {
+            line.push_str(&format!(", claimed signing time={claimed}"));
+        }
+        writeln!(out, "{line}")?;
+    }
+    for (index, timestamp) in timestamps.iter().enumerate() {
+        let mut line = format!(
+            "(unverified) timestamp {index}: placement={}",
+            display_json_string(&timestamp["placement"])
+        );
+        if let Some(document) = timestamp["document_index"].as_u64() {
+            line.push_str(&format!(", document={document}"));
+        }
+        line.push_str(&format!(", includes={}", timestamp["include_count"]));
+        line.push_str(if timestamp["has_token"] == Value::Bool(true) {
+            ", token=present"
+        } else {
+            ", token=absent"
+        });
+        writeln!(out, "{line}")?;
+    }
+    Ok(())
+}
+
+/// Join an array of JSON strings for a human line. The values come from the
+/// core inventory, which only ever emits plain element names.
+fn join_json_strings(value: &Value) -> String {
+    value
+        .as_array()
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>()
+                .join("+")
+        })
+        .unwrap_or_default()
 }
 
 fn write_human_success(command: &str, response: &Response) -> io::Result<()> {
@@ -1456,6 +2135,7 @@ fn write_human_success(command: &str, response: &Response) -> io::Result<()> {
                 "Timestamps present: {} (not verified)",
                 dossier["timestamps_present"]
             )?;
+            write_signature_inventory(&mut out, &dossier["signature_inventory"])?;
         }
         "list" => {
             let dossier = &response.data["dossier"];
@@ -1528,12 +2208,73 @@ fn write_human_success(command: &str, response: &Response) -> io::Result<()> {
                     display_json_string(&check["status"])
                 )?;
             }
-            for signature in data["signatures"].as_array().into_iter().flatten() {
+            // Document coverage: which documents the signatures actually
+            // cover. Kept apart from the verdict lines above, because "this
+            // content is signed" and "that signature verifies" are different
+            // questions. Titles never appear here.
+            for document in data["documents"].as_array().into_iter().flatten() {
+                let name = document["index"].as_u64().map_or_else(
+                    || "document (not modelled)".to_owned(),
+                    |index| format!("document {index}"),
+                );
+                let by: Vec<String> = document["covered_by"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(|entry| {
+                        format!(
+                            "signature {} {}",
+                            entry["signature_index"],
+                            display_json_string(&entry["via"])
+                        )
+                    })
+                    .collect();
+                let by = if by.is_empty() {
+                    String::new()
+                } else {
+                    format!(" by {}", by.join(", "))
+                };
                 writeln!(
                     out,
-                    "[{}] {} signature: {}",
+                    "{name}: {}{by}{}",
+                    display_json_string(&document["coverage"]),
+                    if document["nested_dossier"] == Value::Bool(true) {
+                        " (an embedded dossier; its own inner signatures are not verified by this run)"
+                    } else {
+                        ""
+                    }
+                )?;
+            }
+            for signature in data["signatures"].as_array().into_iter().flatten() {
+                // A countersignature attests another signature, not the
+                // payload, so the line says which one rather than leaving a
+                // reader to infer it from the placement alone.
+                let countersigned: Vec<String> = signature["parent_signature_index"]
+                    .as_u64()
+                    .map(|index| vec![index.to_string()])
+                    .unwrap_or_else(|| {
+                        signature["countersigns"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .map(std::string::ToString::to_string)
+                            .collect()
+                    });
+                let role = if signature["role"] == Value::String("countersignature".to_owned())
+                    && !countersigned.is_empty()
+                {
+                    format!(
+                        " (countersignature of signature {})",
+                        countersigned.join(", ")
+                    )
+                } else {
+                    String::new()
+                };
+                writeln!(
+                    out,
+                    "[{}] {} signature: {}{role}",
                     signature["index"],
-                    display_json_string(&signature["scope"]),
+                    display_json_string(&signature["placement"]),
                     display_json_string(&signature["verdict"])
                 )?;
                 writeln!(
@@ -1807,7 +2548,7 @@ mod tests {
             &Limits::default(),
         )
         .expect("the fixture parses");
-        let warnings = capability_warnings(&dossier);
+        let warnings = capability_warnings(&dossier, false);
         let codes: Vec<&str> = warnings
             .iter()
             .map(|warning| warning.code.as_str())
@@ -1912,6 +2653,63 @@ mod tests {
         let error = claim_name(&mut names, "report.TXT").expect_err("names collide");
         assert_eq!(error.code, "output_name_collision");
         assert_eq!(error.exit, 5);
+    }
+
+    /// A dossier cannot reach this state through the parser, which refuses a
+    /// repeated XML ID, so the guard is exercised on a mutated model. It stays
+    /// because "pick one" would be the wrong answer if it ever could.
+    #[test]
+    fn two_documents_sharing_an_object_ref_are_ambiguous() {
+        let mut dossier = openszigno_core::parse(
+            std::fs::read(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../tests/fixtures/two-documents.es3"),
+            )
+            .expect("the fixture is readable")
+            .as_slice(),
+            &Limits::default(),
+        )
+        .expect("the fixture parses");
+        let shared = dossier.documents[0].object_ref.clone();
+        dossier.documents[1].object_ref = shared.clone();
+
+        let error = resolve_selector(&dossier, &shared).expect_err("the selector is ambiguous");
+        assert_eq!(error.code, "document_ambiguous");
+        assert_eq!(error.exit, 4);
+        // An index selector stays usable: it names exactly one document.
+        assert_eq!(resolve_selector(&dossier, "#1").expect("index resolves"), 1);
+    }
+
+    /// A selector is matched in full: a prefix of an `object_ref` names
+    /// nothing, so a selector cannot change meaning as a dossier grows.
+    #[test]
+    fn an_object_ref_selector_is_never_a_prefix_match() {
+        let dossier = openszigno_core::parse(
+            std::fs::read(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../tests/fixtures/two-documents.es3"),
+            )
+            .expect("the fixture is readable")
+            .as_slice(),
+            &Limits::default(),
+        )
+        .expect("the fixture parses");
+
+        assert_eq!(
+            resolve_selector(&dossier, "DocumentObject")
+                .expect_err("a prefix matches nothing")
+                .code,
+            "document_not_found"
+        );
+        assert_eq!(
+            resolve_selection(&dossier, &["#1".to_owned(), "DocumentObjectA".to_owned()])
+                .expect("both resolve")
+                .iter()
+                .map(|item| item.index)
+                .collect::<Vec<_>>(),
+            [0, 1],
+            "the selection is returned in source order"
+        );
     }
 
     #[test]

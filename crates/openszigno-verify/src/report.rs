@@ -18,8 +18,35 @@ pub enum SignatureScope {
     Document,
     /// `//es:Dossier/ds:Signature`, the frame signature.
     Dossier,
+    /// A `ds:Signature` that is the only child of an `xades:CounterSignature`
+    /// inside another signature's `xades:UnsignedSignatureProperties`, as
+    /// ETSI EN 319 132-1 clause 5.2.7.2 and TS 101903 clause 7.2.4.2 define
+    /// it. It attests the enclosing signature's `ds:SignatureValue`, never
+    /// the payload.
+    Countersignature,
     /// Anywhere else, which the e-dossier placement rules do not describe.
+    /// This is the *unsupported placement* state: the signature is reported
+    /// with `sig_placement_invalid` and a message naming the reason, and its
+    /// verdict is deliberately kept out of the dossier verdict, because
+    /// incomplete support is not evidence of forgery.
     Unknown,
+}
+
+/// Whether a signature stands on its own or attests another signature.
+///
+/// The role is orthogonal to the placement: a countersignature reaches the
+/// container in two shapes. The XAdES one nests inside the countersigned
+/// signature (`placement: countersignature`), and the e-dossier one is an
+/// ordinary document- or dossier-level signature whose signed
+/// `es:SignatureProfile/es:Type` says `countersignature` and whose references
+/// include another signature's `ds:SignatureValue`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SignatureRole {
+    /// An ordinary signature over container content.
+    Signature,
+    /// A signature whose subject is another signature's `ds:SignatureValue`.
+    Countersignature,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -30,13 +57,100 @@ pub struct VerificationTime {
     pub source: TimeSource,
 }
 
+/// What is known about one modelled document's signature coverage.
+///
+/// Coverage is a statement about *what a signature's resolved references
+/// include*, never about where the signature sits. It is deliberately kept
+/// apart from the cryptographic outcome: a document can be covered by a
+/// signature that does not verify, and the two facts are reported separately.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CoverageState {
+    /// At least one covering signature's own verdict is `valid`.
+    Covered,
+    /// Covered, but only by signatures whose verdict is `invalid` or
+    /// `indeterminate`. The `reason` names the best verdict among them.
+    CoveredUnverified,
+    /// No signature covers this document under the e-dossier scope rules.
+    Uncovered,
+    /// A signature that might cover this document could not be evaluated:
+    /// an unsupported transform, an unresolved reference, a placement the
+    /// format does not describe, or a structural failure.
+    Undetermined,
+    /// The core parser skipped this `es:Document` because it carries no
+    /// `es:DocumentProfile`, so it is not one of the modelled documents and
+    /// the mandated reference set for it is undefined. The `reason` is the
+    /// parser's own warning.
+    NotModelled,
+}
+
+/// How a signature reaches a document.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CoverageVia {
+    /// A document-level signature placed in this `es:Document`, whose
+    /// reference scope is complete and whose references resolve to this
+    /// document's `es:DocumentProfile` and payload `ds:Object`.
+    Direct,
+    /// A dossier-level signature with a complete reference scope whose
+    /// references resolve to `es:Documents`, or to an ancestor of it.
+    Frame,
+}
+
+/// One signature that covers a document, with its own verdict.
+#[derive(Clone, Debug, Serialize)]
+pub struct CoveringSignature {
+    /// The index into `data.signatures`.
+    pub signature_index: usize,
+    pub via: CoverageVia,
+    /// That signature's own verdict. Coverage does not change it, and it does
+    /// not change coverage.
+    pub verdict: Verdict,
+}
+
+/// The signature coverage of one `es:Document`, in source order.
+#[derive(Clone, Debug, Serialize)]
+pub struct DocumentCoverage {
+    /// The index the structural model gives this document, or `null` for a
+    /// document the parser did not model.
+    pub index: Option<usize>,
+    /// The `OBJREF` of the document's payload object, or `null` when the
+    /// document was not modelled. Never a title.
+    pub object_ref: Option<String>,
+    /// The declared type marks this document as an embedded dossier. Its own
+    /// inner signatures are **not** verified by this run.
+    pub nested_dossier: bool,
+    pub coverage: CoverageState,
+    /// Every signature that covers this document, in signature order.
+    pub covered_by: Vec<CoveringSignature>,
+    /// Why the state is what it is, when there is something to say. Never a
+    /// title, a path, or payload content.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct Counts {
     pub signatures: usize,
     pub signatures_valid: usize,
     pub signatures_invalid: usize,
     pub signatures_indeterminate: usize,
+    /// Container timestamps present: every `es:TimeStamp` the dossier carries.
     pub timestamps: usize,
+    /// How many of those were fully verified — imprint, TSA signature,
+    /// `id-kp-timeStamping`, and a path to a configured anchor at `genTime`.
+    pub timestamps_verified: usize,
+    /// Modelled documents whose coverage state is `covered`.
+    pub documents_covered: usize,
+    /// Modelled documents whose coverage state is `uncovered`.
+    pub documents_uncovered: usize,
+    /// Modelled documents whose coverage state is `undetermined`.
+    ///
+    /// The three document counts name the states of the same name only. A
+    /// `covered_unverified` or `not_modelled` document is in `data.documents`
+    /// and in none of them, because neither is an answer to "is this content
+    /// signed" that any of the three states gives.
+    pub documents_undetermined: usize,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -101,7 +215,24 @@ pub struct XadesReport {
 #[derive(Clone, Debug, Serialize)]
 pub struct SignatureReport {
     pub index: usize,
+    /// The placement, under its original field name.
+    ///
+    /// Kept as an alias of [`SignatureReport::placement`] so no consumer of
+    /// the phase-3 report breaks; both fields always carry the same value.
     pub scope: SignatureScope,
+    /// Where this signature sits: `document`, `dossier`, `countersignature`,
+    /// or `unknown` for a nesting this build does not support.
+    pub placement: SignatureScope,
+    /// Whether this signature attests container content or another signature.
+    pub role: SignatureRole,
+    /// The index into `data.signatures` of the signature this one is embedded
+    /// in, for a `countersignature` placement. `null` otherwise, including for
+    /// an e-dossier-form countersignature, which is a sibling and not nested.
+    pub parent_signature_index: Option<usize>,
+    /// The indexes into `data.signatures` of every signature whose
+    /// `ds:SignatureValue` this signature's references resolve to. Empty for
+    /// an ordinary signature.
+    pub countersigns: Vec<usize>,
     pub document_index: Option<usize>,
     pub signature_id: Option<String>,
     pub verdict: Verdict,
@@ -155,5 +286,12 @@ pub struct VerifyReport {
     pub counts: Counts,
     /// Checks that belong to the dossier rather than to one signature.
     pub checks: Vec<Check>,
+    /// Every container-level `es:TimeStamp`, dossier and document alike, each
+    /// with its own checks. These decide nothing about any signature.
+    pub timestamps: Vec<TimestampReport>,
+    /// Every `es:Document` the container holds, in source order, with the
+    /// signatures that cover it. See the architecture document's "Document
+    /// coverage" section.
+    pub documents: Vec<DocumentCoverage>,
     pub signatures: Vec<SignatureReport>,
 }

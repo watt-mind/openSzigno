@@ -200,7 +200,10 @@ fn audit_corpus(root: &Path) -> CorpusAggregate {
                 Ok(DecodeOutcome::Unsupported(UnsupportedReason::Encrypted)) => {
                     aggregate.encrypted += 1;
                 }
-                Ok(DecodeOutcome::Unsupported(UnsupportedReason::TransformChain)) => {
+                // The corpus run supplies no decryption key, so the
+                // remaining reasons cannot arise; they are counted with the
+                // unsupported chains rather than silently dropped.
+                Ok(DecodeOutcome::Unsupported(_)) => {
                     aggregate.unsupported_transform += 1;
                 }
                 Err(error) => {

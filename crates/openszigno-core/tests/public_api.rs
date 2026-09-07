@@ -9,7 +9,7 @@ use openszigno_core::{
 };
 use serde_json::{Value, json};
 
-const ALL_CODES: [(ErrorCode, &str); 20] = [
+const ALL_CODES: [(ErrorCode, &str); 26] = [
     (ErrorCode::InputTooLarge, "input_too_large"),
     (ErrorCode::UnsupportedEncoding, "unsupported_encoding"),
     (ErrorCode::InvalidEncoding, "invalid_encoding"),
@@ -30,6 +30,18 @@ const ALL_CODES: [(ErrorCode, &str); 20] = [
     (ErrorCode::ZipRatioLimit, "zip_ratio_limit"),
     (ErrorCode::UnsafeZipMember, "unsafe_zip_member"),
     (ErrorCode::UnsupportedZipMember, "unsupported_zip_member"),
+    (ErrorCode::InvalidDecryptionKey, "invalid_decryption_key"),
+    (
+        ErrorCode::InvalidDecryptionCertificate,
+        "invalid_decryption_certificate",
+    ),
+    (
+        ErrorCode::DecryptionCertificateRequired,
+        "decryption_certificate_required",
+    ),
+    (ErrorCode::DecryptionKeyMismatch, "decryption_key_mismatch"),
+    (ErrorCode::InvalidCms, "invalid_cms"),
+    (ErrorCode::DecryptFailed, "decrypt_failed"),
 ];
 
 #[test]
@@ -78,6 +90,24 @@ fn unsupported_reasons_serialise_in_snake_case() {
     assert_eq!(
         serde_json::to_value(UnsupportedReason::TransformChain).expect("serialises"),
         json!("transform_chain")
+    );
+    assert_eq!(
+        serde_json::to_value(UnsupportedReason::NoMatchingRecipient).expect("serialises"),
+        json!("no_matching_recipient")
+    );
+    assert_eq!(
+        serde_json::to_value(UnsupportedReason::UnsupportedCipher {
+            oid: "1.2.3".to_owned()
+        })
+        .expect("serialises"),
+        json!({ "unsupported_cipher": { "oid": "1.2.3" } })
+    );
+    assert_eq!(
+        serde_json::to_value(UnsupportedReason::LegacyCipher {
+            oid: "1.2.840.113549.3.7".to_owned()
+        })
+        .expect("serialises"),
+        json!({ "legacy_cipher": { "oid": "1.2.840.113549.3.7" } })
     );
     assert_eq!(UnsupportedReason::Encrypted, UnsupportedReason::Encrypted);
     assert_ne!(

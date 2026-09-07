@@ -13,13 +13,33 @@ keywords = ["e-szigno", "es3", "dossier", "xml", "microsec"]
 categories = ["parser-implementations", "encoding"]
 
 [dependencies]
+aes.workspace = true
 base64.workspace = true
+cbc.workspace = true
+cipher.workspace = true
+cms.workspace = true
+const-oid.workspace = true
+der.workspace = true
+# Triple DES is reachable only through `DecryptOptions::allow_legacy_ciphers`.
+des.workspace = true
 encoding_rs.workspace = true
+pem-rfc7468.workspace = true
+pkcs8.workspace = true
 roxmltree.workspace = true
+rsa.workspace = true
 serde.workspace = true
+# SHA-1 exists only for RSAES-OAEP's default mask generation, which older
+# senders use; it is never used as a signature or integrity digest here.
+sha1.workspace = true
+sha2.workspace = true
 thiserror.workspace = true
+x509-cert = { workspace = true, features = ["pem"] }
+zeroize.workspace = true
 zip.workspace = true
 
 [dev-dependencies]
+rand_chacha.workspace = true
+rand_core.workspace = true
+rcgen = { workspace = true, features = ["x509-parser"] }
 serde_json.workspace = true
 tempfile.workspace = true

@@ -53,6 +53,14 @@ before anything else.
   derive public fixtures from private files.
 - **Extraction safety is load-bearing.** Never weaken size/depth/ratio limits,
   no-clobber behavior, or name sanitization to raise a parse count.
+- **Key material never leaves the process.** `extract --decrypt-key` takes the
+  key, its certificate, and its passphrase from files (or the passphrase from
+  `OPENSZIGNO_DECRYPT_PASSPHRASE`) and never from `argv`. Key bytes, the
+  passphrase, and anything derived from them must never appear in a log,
+  message, warning, JSON field, or fixture, and `decrypt_failed` must stay one
+  undifferentiated message. **Never commit a private key or a complete PEM
+  private-key armour line, synthetic or not** — tests generate keys at run
+  time — and never allowlist a secret-scanner rule. See `SECURITY.md`.
 - Never commit secrets or `.env` files. Prefer logical, Conventional Commits
   (`CONTRIBUTING.md`).
 
@@ -82,7 +90,7 @@ ES3_TEST_CORPUS_DIR=/private/corpus cargo test \
 
 | Path | What lives there |
 | :--- | :--- |
-| `crates/openszigno-core/src/` | `parse.rs`, `decode.rs`, `model.rs`, `scan.rs`, `error.rs` |
+| `crates/openszigno-core/src/` | `parse.rs`, `decode.rs`, `decrypt.rs`, `model.rs`, `scan.rs`, `error.rs` |
 | `crates/openszigno-verify/src/` | `c14n.rs`, `dsig.rs`, `certs.rs`, `policy.rs`, `codes.rs`, `trust.rs`, `report.rs` |
 | `crates/openszigno-verify/tests/` | Synthetic PKI and the in-tests XMLDSig signer (`common/`), which must never move into a shipped crate |
 | `crates/openszigno-cli/src/` | `main.rs` (commands, JSON protocol), `output_dir.rs` (safe extraction), `trust_store.rs` (`--trust-store` loader) |

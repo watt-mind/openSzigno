@@ -1,13 +1,18 @@
 # Trust and revocation material
 
-`openszigno verify` never fetches anything. Trust anchors, trusted lists, CRLs
-and OCSP responses are all files you supply, and this document describes how to
-obtain them, how to lay them out, and what each one does to a verdict.
+`openszigno verify` fetches nothing by default. Trust anchors, trusted lists,
+CRLs and OCSP responses are all files you supply, and this document describes
+how to obtain them, how to lay them out, and what each one does to a verdict.
 
 That is a deliberate trade. A verifier that downloads its own trust anchors has
 gained nothing: whoever can answer the download decides what is trusted. Pinning
 the material yourself is more work and is the only version of the job that means
 anything.
+
+The one exception is `--online`, which lets the CLI fetch **revocation data**
+— and only revocation data — from the URLs the certificates themselves publish.
+Trust anchors and trusted lists are never fetched, in any mode. See
+[Online fetching](#online-fetching).
 
 ## The short version
 
@@ -160,20 +165,42 @@ after the withdrawal from doing so. The statuses treated as granted are:
 - `.../Svcstatus/granted`
 - `.../Svcstatus/recognisedatnationallevel`
 
-Every other status — `withdrawn`, `supervisionceased`, the `deprecated*`
-family, and the pre-eIDAS `undersupervision` and `accredited` — is **not**
-treated as granted. This build refuses to guess which historical status was
-equivalent to which; the honest answer is that it does not know, and it reports
-`certificate_not_qualified` rather than quietly accepting.
+Two further statuses are honoured for a bounded window:
+
+- `.../Svcstatus/undersupervision`
+- `.../Svcstatus/accredited`
+
+These are the pre-eIDAS vocabulary, and they count as granted **only at a
+validation time before 2016-07-01**, when eIDAS began to apply. Before that
+line they were exactly what a member state published for a CA entitled to issue
+qualified certificates. After it, a service left at a pre-eIDAS status has not
+been granted under the new vocabulary, so the window closes. Whichever status
+was honoured is named in the `certificate_qualified` message, so you can always
+tell an eIDAS `granted` from a historical `accredited`.
+
+Every terminal status — `withdrawn`, `supervisionceased`, the `deprecated*`
+family — is never treated as granted.
+
+Service digital identities are read in all three forms a real list uses, but
+they are not equally strong:
+
+| Form | What it can do |
+| --- | --- |
+| `X509Certificate` | Becomes a **trust anchor**, and can establish that a chain certificate *was issued by* the listed service — a verified signature, not a name match. |
+| `X509SKI` | Recognises a certificate already in the validated chain by its `subjectKeyIdentifier`. Contributes **no anchor** and grants no trust; it can only decide `qualified`. |
+| `X509SubjectName` | The same, matched attribute by attribute against the certificate's subject, exactly as written — no case folding, no normalisation. The weakest form. |
+
+If a national list names its CAs only by SKI or subject name, you still need
+the certificates themselves in `--trust-store` for a path to be built; the list
+then supplies the qualified determination on top.
 
 Deliberately not read:
 
-- A `DigitalId` carrying only an `X509SubjectName` or an `X509SKI`. It
-  identifies a certificate without supplying one, and this build will not go
-  looking.
 - Scheme-level `Qualifications` extensions, which refine qualified status per
   certificate subset. They are never used to *widen* a determination.
-- Anything at all over the network. There is no `openszigno trust update`.
+- Trusted lists themselves, over the network. There is no
+  `openszigno trust update`, and `--online` does not fetch lists — only
+  revocation data.
 
 ### How `qualified` is decided
 
@@ -293,11 +320,52 @@ There is no grace period, on purpose. A grace period is a decision to accept
 data that has expired, which is exactly the decision a verifier must not make
 silently.
 
+### Which OCSP responders are believed
+
+RFC 6960 gives three ways for a responder to be authorised, and openSzigno
+accepts all three, in this order:
+
+1. **The issuing CA answered for itself.** Nothing else is needed.
+2. **A responder that CA delegated to** — a certificate the CA issued, carrying
+   `id-kp-OCSPSigning`. The CA's signature over that certificate is the
+   delegation.
+3. **A responder you trust directly.** Its certificate carries
+   `id-kp-OCSPSigning` and its own path validates to an anchor in your
+   `--trust-store` or `--trust-list`, at the response's `producedAt`.
+
+The third one is what makes a real Hungarian dossier verify. Microsec, like
+most national CA operators, runs **one** OCSP responder for every CA it
+operates, and that responder's certificate is issued by a sibling CA rather
+than by whichever CA issued the certificate being asked about. Until M3 this
+tool implemented only the first two models and refused every one of those
+responses as unauthorised; supplying the operator's root as an anchor now
+covers the responder as well as the CAs.
+
+The report says which model applied, in
+`chain[].revocation.responder_model` (`issuer`, `delegated`, `trusted`), and
+emits `ocsp_responder_trusted` (`info`) when the third one was used. Nothing
+about the third model is looser than the other two: a responder that reaches no
+anchor **you** configured authorises nothing, so it can only accept a signer you
+had already chosen to trust.
+
+### One unusable answer is not the end
+
+Sources are consulted in the priority order above, and a source that is found
+but refused does not stop the search: the next tier is tried, and only when
+they are all exhausted is the certificate reported as uncovered. An OCSP
+response this build cannot authorise, followed by the CA's own CRL, ends as
+`good` from the CRL.
+
+The refusal stays in the report either way. `chain[].revocation.detail` says
+what was refused and why, and which source answered instead, and the path
+summary repeats it — so a `revocation_ok` that was rescued by a CRL still tells
+you your responder was not usable, which is the thing worth fixing.
+
 ### What makes data unusable
 
 | Situation | Code | Status |
 | --- | --- | --- |
-| A CRL or response signed by someone the CA did not authorise | `revocation_data_invalid` | `unknown` |
+| A CRL signed by someone the CA did not authorise, or an OCSP response no responder model above accepts | `revocation_data_invalid` | `unknown` |
 | A delta CRL, an indirect CRL, a scope restricted to reasons or attribute certificates | `revocation_data_invalid` | `unknown` |
 | A partitioned CRL naming a distribution point the certificate does not | `revocation_data_invalid` | `unknown` |
 | A critical CRL extension this build does not implement | `revocation_data_invalid` | `unknown` |
@@ -307,6 +375,8 @@ silently.
 
 All of them are `unknown`, never `failed`: unusable data means the tool could
 not answer, which is a different statement from "this certificate was revoked".
+Each is reported only after every source has been tried, and the message names
+the cause rather than saying only that something was wrong.
 
 ### A revocation dated after the signature
 
@@ -330,8 +400,108 @@ the certificate's own `status` in the chain entry reads
 
 ## Online fetching
 
-Not implemented. `--online` fetching of CRL distribution points and OCSP from
-AIA is an M3 residual, tracked in `roadmap.md`. Until it ships, the workflow
-above — fetch by hand, pin, record — is the whole story, and the verify crate
-structurally cannot open a socket: revocation data reaches it only through the
-injected `RevocationSource`.
+`--online` lets the CLI fetch revocation data the material you supplied does
+not cover. It is the only thing that makes openszigno touch the network, and
+`openszigno-verify` still cannot: the crate opens no socket in any mode, and
+everything fetched reaches it through the same `RevocationSource` a
+`--revocation-store` file arrives through.
+
+```bash
+openszigno verify dossier.es3 --json \
+  --trust-store ./trust \
+  --revocation-store ./revocation \
+  --online \
+  --online-cache ./revocation-cache
+```
+
+### What it will and will not do
+
+- **Only URLs the certificates publish.** The `cRLDistributionPoints` URIs and
+  the `authorityInfoAccess` OCSP responders, read out of the certificates
+  themselves. Nothing is taken from the dossier's XML, and no reference in the
+  dossier is ever dereferenced.
+- **Only gaps.** A certificate your own material already answers for is never
+  fetched for, and the question is put to the verifier's own offline code, not
+  to an approximation of it. Opening a dossier you already have data for
+  generates no traffic at all.
+- **Only revocation data.** Never trust anchors, never trusted lists.
+- **The scheme the CA published.** `http` and `https` are both fetched and
+  neither is rewritten. TLS is not what makes the answer trustworthy — the
+  artefact's own signature is, and it is checked either way.
+- **Bounded.** 5 s to connect, 20 s per fetch, 16 MiB for a CRL, 64 KiB for an
+  OCSP response, at most 3 redirects and **never to another host**, at most 32
+  certificates per run.
+- **Judged offline.** Every fetched artefact goes through exactly the rules in
+  [What makes data unusable](#what-makes-data-unusable). A CRL from the wrong
+  CA, a stale one, or an HTML error page changes nothing.
+
+Online material is consulted **last**, after the signature's own
+`RevocationValues` and the revocation store, so it can only fill a gap and can
+never displace an answer you already had. `chain[].revocation.source` reads
+`online_crl` or `online_ocsp` when an answer came from the network, and
+`policy.revocation` reads `online` for the whole run.
+
+### When a fetch fails
+
+Each failure adds one `online_fetch_failed` naming the URL and the failure
+class — `timeout`, `http status <code>`, `too large`, `redirect`, `invalid`, or
+`transport`. Nothing hangs and nothing panics.
+
+That check is `info`, and it is not the thing that decides anything. A fetch
+that did not happen leaves the certificate exactly as uncovered as it was, and
+*that* is reported on the chain which needed the data, as
+`revocation_status_unknown`, which blocks. So `--online` still cannot turn an
+unanswered question into a passed one — the answer is the verifier's to give,
+not the fetcher's. The split matters in practice: a fetch attempted for a
+certificate no verdict depended on, such as the timestamp authority of a
+container `es:TimeStamp`, no longer drags a dossier whose every signature is
+`valid` down to `indeterminate`.
+
+The class tells you what to do next. A `timeout` or a `5xx` is the CA's outage;
+retry later. A `404` is a stale URL in an old certificate — fetch the CRL from
+the CA's current publication point and drop it into `--revocation-store` by
+hand. `invalid` means the server answered with something that is not a CRL or
+an OCSP response, which is what a captive portal or an intercepting proxy looks
+like from here.
+
+### The cache workflow
+
+`--online-cache DIR` writes everything fetched into `DIR/crls/` and
+`DIR/ocsp/`, named by the SHA-256 of its own bytes. That is the
+`--revocation-store` layout, so:
+
+```bash
+# Once, with the network:
+openszigno verify dossier.es3 --json \
+  --trust-store ./trust --online --online-cache ./revocation-cache
+
+# Afterwards, anywhere, with no network at all:
+openszigno verify dossier.es3 --json \
+  --trust-store ./trust --revocation-store ./revocation-cache
+```
+
+The second run reaches the same answer, with `chain[].revocation.source`
+reading `store_crl` or `store_ocsp` instead of the `online_*` form. This is the
+recommended way to use `--online`: fetch once, pin what you got, and make every
+later verification reproducible and offline. Remember that revocation data
+expires — a cache that was fresh at the validation time you used stays valid
+for *that* validation time, which is the whole point of pinning it. Nothing is
+ever deleted from the cache; pruning is your retention policy, not the tool's.
+
+### Proxies
+
+No proxy is used unless you name one:
+
+```bash
+openszigno verify dossier.es3 --online --online-proxy http://proxy.internal:3128
+```
+
+`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY` and their lower-case spellings are
+**deliberately ignored**. A verifier that silently routed its revocation
+traffic through whatever the environment happened to set would hand anyone who
+can write that variable a way to feed it chosen bytes. Those bytes would still
+have to verify — that is the point of checking everything offline — but the
+ambiguity is not worth accepting, and a proxy is the sort of thing an operator
+should have to say out loud.
+
+`--online` and `--no-revocation` cannot be combined.

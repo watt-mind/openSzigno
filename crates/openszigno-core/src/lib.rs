@@ -4,17 +4,23 @@
 //! parsed dossier is not necessarily authentic.
 
 mod decode;
+mod decrypt;
 mod error;
+mod inventory;
 mod model;
 mod parse;
 mod scan;
 mod sniff;
 mod xml;
 
-pub use decode::{DecodeOutcome, DecodedDocument, UnsupportedReason};
+pub use decode::{DecodeOutcome, DecodedDocument, UnsupportedReason, decode_document_with};
+pub use decrypt::{DecryptOptions, RecipientKey};
 pub use error::{Error, ErrorCode};
 pub use model::{
-    Document, Dossier, Limits, MimeType, ParseOptions, StructuralWarning, StructuralWarningCode,
+    Document, Dossier, Limits, MAX_INVENTORIED_DIGEST_METHODS, MAX_INVENTORIED_REFERENCE_URIS,
+    MAX_INVENTORIED_SIGNATURES, MAX_INVENTORIED_TIMESTAMPS, MAX_INVENTORIED_XADES_PROPERTIES,
+    MimeType, ParseOptions, SignatureEvidence, SignaturePlacement, SignatureSummary,
+    StructuralWarning, StructuralWarningCode, TimestampPlacement, TimestampSummary,
 };
 pub use sniff::{DetectedType, sniff};
 pub use xml::{XmlSource, id_map};
@@ -25,6 +31,16 @@ pub use roxmltree;
 
 pub const ESZIGNO_NAMESPACE: &str = "https://www.microsec.hu/ds/e-szigno30#";
 pub const XMLDSIG_NAMESPACE: &str = "http://www.w3.org/2000/09/xmldsig#";
+
+/// The XAdES namespaces the signature inventory recognises: 1.1.1, 1.2.2,
+/// 1.3.2, and 1.4.1. A qualifying-properties element in any other namespace is
+/// not described, because its element names would not mean what they say.
+pub const XADES_NAMESPACES: &[&str] = &[
+    "http://uri.etsi.org/01903/v1.1.1#",
+    "http://uri.etsi.org/01903/v1.2.2#",
+    "http://uri.etsi.org/01903/v1.3.2#",
+    "http://uri.etsi.org/01903/v1.4.1#",
+];
 
 /// Namespaces whose `Dossier` root element this crate accepts by default.
 ///

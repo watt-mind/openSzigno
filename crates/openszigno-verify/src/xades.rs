@@ -105,6 +105,10 @@ const PROCESSED_PROPERTIES: &[&str] = &[
     "CertificateValues",
     "RevocationValues",
     "TimeStampValidationData",
+    // An enveloped countersignature is verified as a signature in its own
+    // right and reported at `data.signatures[]`, so it is not an unvalidated
+    // property.
+    "CounterSignature",
 ];
 
 /// The largest number of encapsulated CRLs or OCSP responses read from one

@@ -3,21 +3,33 @@ members = ["crates/openszigno-core", "crates/openszigno-verify", "crates/openszi
 resolver = "2"
 
 [workspace.package]
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/Watt-Mind/openSzigno"
 rust-version = "1.88"
 
 [workspace.dependencies]
+aes = "0.8.4"
 base64 = "0.23.1"
+cbc = "0.1.2"
+cipher = { version = "0.4.4", features = ["alloc", "block-padding"] }
 clap = { version = "4.5.48", features = ["derive"] }
+cms = "0.2.3"
 const-oid = "0.9.6"
-der = "0.7.10"
+der = { version = "0.7.10", features = ["alloc", "derive", "oid"] }
+# Triple DES exists only so a legacy `des-ede3-cbc` payload can be decrypted
+# under `--allow-legacy-ciphers`; it is never accepted by default.
+des = "0.8.1"
 encoding_rs = "0.8.40"
 p256 = { version = "0.13.2", default-features = false, features = ["ecdsa", "std", "pkcs8"] }
 p384 = { version = "0.13.1", default-features = false, features = ["ecdsa", "std", "pkcs8"] }
 pem-rfc7468 = { version = "0.7.0", features = ["std"] }
+pkcs8 = { version = "0.10.2", features = ["encryption", "pem", "std"] }
+# Test-only randomness for the synthetic CMS encryptor; the shipped code
+# never generates keys or nonces.
+rand_chacha = "0.3.1"
+rand_core = { version = "0.6.4", features = ["getrandom"] }
 rcgen = "0.14.10"
 roxmltree = "0.21.1"
 rsa = "0.9.8"
@@ -29,8 +41,37 @@ sha2 = { version = "0.10.9", features = ["oid"] }
 tempfile = "3.23.0"
 thiserror = "2.0.17"
 unicode-normalization = "0.1"
+# HTTP client for `--online` revocation fetching, in the CLI only. MIT OR
+# Apache-2.0. Default features minus `gzip` and `win-system-proxy`: a CRL or an
+# OCSP response is DER, so content negotiation buys nothing and a transfer
+# encoding only widens the parser surface; the platform proxy is off because
+# `--online` must never pick a proxy up implicitly.
+ureq = { version = "3.4.1", default-features = false, features = ["rustls"] }
 x509-cert = "0.2.5"
+zeroize = "1.8.1"
 zip = { version = "8.1.0", default-features = false, features = ["deflate"] }
+
+# Test-only RSA key generation is bignum arithmetic, which is roughly fifty
+# times slower unoptimized. Optimizing just these two dependencies keeps the
+# suite fast without optimizing the code under test, which must stay
+# debuggable. Nothing about a release build changes.
+[profile.dev.package.num-bigint-dig]
+opt-level = 3
+
+[profile.dev.package.rsa]
+opt-level = 3
+
+# Likewise for the PKCS#8 password-based key derivations a test encrypts and
+# the shipped code decrypts. scrypt is memory-hard on purpose; unoptimized it
+# costs seconds per call.
+[profile.dev.package.salsa20]
+opt-level = 3
+
+[profile.dev.package.scrypt]
+opt-level = 3
+
+[profile.dev.package.sha2]
+opt-level = 3
 
 # The profile that 'dist' will build with
 [profile.dist]

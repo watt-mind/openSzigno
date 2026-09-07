@@ -7,12 +7,15 @@ yanked = "deny"
 ignore = [
   # RUSTSEC-2023-0071 (Marvin attack): `rsa` 0.9's *private-key* operation is
   # not constant time, leaking key material to an attacker who can observe
-  # timing. No fixed release exists. openSzigno never holds an RSA private key:
-  # creating or signing a dossier is a permanent non-goal, and the shipped code
-  # calls only the public-key verification path, which the advisory does not
-  # cover. The `rsa` signing API is used solely by the synthetic test helper
-  # under `crates/openszigno-verify/tests/`. Revisit when `rsa` 0.10 is stable.
-  { id = "RUSTSEC-2023-0071", reason = "public-key verification only; the tool never signs" },
+  # timing. No fixed release exists. Creating or signing a dossier stays a
+  # permanent non-goal, and `verify` calls only the public-key path, which the
+  # advisory does not cover. Since M4, `extract --decrypt-key` does perform a
+  # private-key operation, with a key the operator supplied, for the length of
+  # one local run. Exploiting it needs an attacker who can time that run on the
+  # operator's own machine, which is outside the threat model in `SECURITY.md`;
+  # nothing about the input under analysis affects it. Revisit when `rsa` 0.10
+  # is stable, which is the fix.
+  { id = "RUSTSEC-2023-0071", reason = "no signing; the only private-key use is local decryption with an operator-supplied key" },
 ]
 
 [licenses]
@@ -27,6 +30,16 @@ allow = [
   "Unicode-3.0",
   "Zlib",
   "MPL-2.0",
+  # `webpki-roots`, which `ureq`'s rustls stack uses for the TLS trust anchors
+  # an `https://` CRL distribution point needs under `--online`. The crate is
+  # Mozilla's CA root *data*, redistributed under the Community Data License
+  # Agreement — Permissive, Version 2.0: no reciprocity, no source-disclosure
+  # obligation, and no restriction on use or redistribution beyond keeping the
+  # attribution. It is a data licence rather than an OSI-approved software
+  # licence because what it covers is a dataset, and it is the licence the
+  # major distributions already ship this bundle under. Nothing in the shipped
+  # code is derived from it; it is loaded at runtime as a root store.
+  "CDLA-Permissive-2.0",
 ]
 
 [bans]

@@ -478,15 +478,15 @@ fn a_dossier_level_timestamp_is_reported_as_unvalidated() {
     // whether the signatures inside it are valid.
     assert_check(
         &report,
-        CheckCode::DossierTimestampNotValidated,
+        CheckCode::DocumentTimestampNotChecked,
         CheckStatus::Info,
     );
     assert!(
         report
             .checks
             .iter()
-            .any(|check| check.code == CheckCode::DossierTimestampNotValidated),
-        "the dossier-level timestamp is reported at the dossier level"
+            .any(|check| check.code == CheckCode::DocumentTimestampNotChecked),
+        "the container timestamp is reported at the dossier level"
     );
 }
 

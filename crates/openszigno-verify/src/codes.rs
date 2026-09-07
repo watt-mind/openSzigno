@@ -97,6 +97,12 @@ check_codes! {
     NoSignatures => "no_signatures",
     SignatureCountWithinLimits => "signature_count_within_limits",
     SignatureLimitExceeded => "signature_limit_exceeded",
+    SignaturesUnsupported => "signatures_unsupported",
+
+    // Document coverage: which modelled documents a signature actually covers.
+    DocumentsAllCovered => "documents_all_covered",
+    DocumentsUncovered => "documents_uncovered",
+    DocumentsCoverageUndetermined => "documents_coverage_undetermined",
 
     // Stage A: structure and policy.
     SigStructure => "sig_structure",
@@ -118,6 +124,14 @@ check_codes! {
     ReferenceScopeComplete => "reference_scope_complete",
     ReferenceScopeIncomplete => "reference_scope_incomplete",
     ReferenceScopeUnknown => "reference_scope_unknown",
+
+    // Countersignatures: ETSI EN 319 132-1 clause 5.2.7 (TS 101903 clause
+    // 7.2.4) for the nested form, and the e-dossier specification's own
+    // `es:SignatureProfile/es:Type` form.
+    CountersignatureBindingOk => "countersignature_binding_ok",
+    CountersignatureBindingMissing => "countersignature_binding_missing",
+    CountersignatureBindingMismatch => "countersignature_binding_mismatch",
+    NestedSignaturesUnsupported => "nested_signatures_unsupported",
 
     // Stage B: the XMLDSig cryptographic core.
     ReferenceDigestOk => "reference_digest_ok",
@@ -166,6 +180,8 @@ check_codes! {
     RevocationStatusUnknown => "revocation_status_unknown",
     RevocationDataStale => "revocation_data_stale",
     RevocationDataInvalid => "revocation_data_invalid",
+    OcspResponderTrusted => "ocsp_responder_trusted",
+    OnlineFetchFailed => "online_fetch_failed",
 
     // Trusted lists (ETSI TS 119 612).
     TrustListLoaded => "trust_list_loaded",
@@ -195,8 +211,13 @@ check_codes! {
     TimestampVerified => "timestamp_verified",
     ArchiveTimestampPresent => "archive_timestamp_present",
 
-    // Dossier-level `es:TimeStamp`, which M3 completes.
-    DossierTimestampNotValidated => "dossier_timestamp_not_validated",
+    // Dossier-level and document-level `es:TimeStamp` (M3).
+    DossierTimestampVerified => "dossier_timestamp_verified",
+    DossierTimestampInvalid => "dossier_timestamp_invalid",
+    DossierTimestampNotChecked => "dossier_timestamp_not_checked",
+    DocumentTimestampVerified => "document_timestamp_verified",
+    DocumentTimestampInvalid => "document_timestamp_invalid",
+    DocumentTimestampNotChecked => "document_timestamp_not_checked",
 }
 
 impl From<CheckCode> for &'static str {
@@ -264,6 +285,8 @@ impl CheckCode {
                 | Self::RevocationStatusUnknown
                 | Self::RevocationDataStale
                 | Self::RevocationDataInvalid
+                | Self::OcspResponderTrusted
+                | Self::OnlineFetchFailed
         )
     }
 }

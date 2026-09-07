@@ -48,13 +48,13 @@ brew install watt-mind/tap/openszigno
 ### Shell installer (macOS and Linux)
 
 ```sh
-curl --proto '=https' --tlsv1.2 -LsSf https://github.com/watt-mind/openSzigno/releases/download/v0.3.0/openszigno-cli-installer.sh | sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/watt-mind/openSzigno/releases/download/v0.4.0/openszigno-cli-installer.sh | sh
 ```
 
 ### PowerShell installer (Windows)
 
 ```powershell
-powershell -ExecutionPolicy Bypass -c "irm https://github.com/watt-mind/openSzigno/releases/download/v0.3.0/openszigno-cli-installer.ps1 | iex"
+powershell -ExecutionPolicy Bypass -c "irm https://github.com/watt-mind/openSzigno/releases/download/v0.4.0/openszigno-cli-installer.ps1 | iex"
 ```
 
 Both installers place the binary in the Cargo home directory
@@ -83,7 +83,7 @@ nothing else, and it runs as the numeric user `65532`. Mount the directory
 holding the dossier and refer to the file by its path inside the container.
 
 ```sh
-docker run --rm -v "$PWD:/work" ghcr.io/watt-mind/openszigno:0.3.0 inspect /work/file.es3 --json
+docker run --rm -v "$PWD:/work" ghcr.io/watt-mind/openszigno:0.4.0 inspect /work/file.es3 --json
 ```
 
 Tags are the release tag (`v0.2.0`), the bare version (`0.2.0`), and
@@ -99,8 +99,8 @@ and unpack to a directory of the same name containing the binary, the
 `README.md`, the `CHANGELOG.md`, and the `LICENSE`.
 
 ```sh
-curl -LO https://github.com/watt-mind/openSzigno/releases/download/v0.3.0/openszigno-cli-x86_64-unknown-linux-musl.tar.gz
-curl -LO https://github.com/watt-mind/openSzigno/releases/download/v0.3.0/openszigno-cli-x86_64-unknown-linux-musl.tar.gz.sha256
+curl -LO https://github.com/watt-mind/openSzigno/releases/download/v0.4.0/openszigno-cli-x86_64-unknown-linux-musl.tar.gz
+curl -LO https://github.com/watt-mind/openSzigno/releases/download/v0.4.0/openszigno-cli-x86_64-unknown-linux-musl.tar.gz.sha256
 tar -xzf openszigno-cli-x86_64-unknown-linux-musl.tar.gz
 ```
 
@@ -145,6 +145,13 @@ trusting the input.
   contaminate stdout.
 - **For people.** Without `--json` the same commands print short, readable
   terminal output that always states the verification boundary.
+- **For triage without cryptography.** `inspect` and `list` describe every
+  `ds:Signature` and container timestamp the dossier carries: placement,
+  algorithms, reference count, XAdES properties, evidence counts, and the
+  claimed signing time. It is the dossier's own account of itself, read at
+  parse time. Nothing in it is verified, every human line says so, and the
+  JSON carries `"verified": false` beside it. Use `verify` for a
+  cryptographic answer.
 - **For safety.** Untrusted input is bounded at every stage: file size, XML
   depth and node count, Base64 length, decoded payload size, ZIP member count
   and compression ratio, and aggregate extraction size. Extraction never
@@ -183,8 +190,42 @@ openszigno extract tests/fixtures/plain-base64.es3 --output ./out
 
 ```text
 Extracted 1 document(s).
-[0] hello.txt (41 B)
+[0] hello.txt (41 B, text)
 Extraction is not proof of signature validity.
+```
+
+An encrypted document, with the recipient's key. The key and its passphrase
+come from files, never from the command line, and never appear in any output:
+
+```sh
+openszigno extract encrypted.es3 --output ./out \
+  --decrypt-key recipient.key.pem \
+  --decrypt-cert recipient.cert.pem
+```
+
+```text
+Extracted 1 document(s).
+[0] secret.txt (38 B, text)
+Extraction is not proof of signature validity.
+```
+
+Decrypting a document is not verifying it. It shows that the key could unwrap
+the payload; it says nothing about who produced it. See
+[docs/architecture.md](docs/architecture.md#decryption) for the supported CMS
+subset, the flags, and how a `.p12` keystore is converted first.
+
+One document straight to a file, without a scratch directory. `#0` is the
+first document in source XML order; `openszigno list` shows the indices and
+the `OBJREF` values a selector can use instead:
+
+```sh
+openszigno extract file.es3 --document '#0' --stdout > payload.pdf
+```
+
+The dossier itself can come from a pipe, on any command:
+
+```sh
+cat file.es3 | openszigno list - --json
 ```
 
 Agent mode. The tool writes one compact object; the example below is
@@ -204,7 +245,7 @@ openszigno inspect tests/fixtures/plain-base64.es3 --json
     "capabilities": {
       "base64_extraction": true,
       "cryptographic_verification": false,
-      "encrypted_extraction": false,
+      "encrypted_extraction": "with_key",
       "structural_validation": true,
       "zip_base64_extraction": true
     },
@@ -214,6 +255,11 @@ openszigno inspect tests/fixtures/plain-base64.es3 --json
       "documents": 1,
       "namespace": "https://www.microsec.hu/ds/e-szigno30#",
       "nested_dossiers": 0,
+      "signature_inventory": {
+        "signatures": [],
+        "timestamps": [],
+        "verified": false
+      },
       "signatures_present": 0,
       "signatures_verified": false,
       "timestamps_present": 0,
@@ -255,6 +301,7 @@ openszigno extract tests/fixtures/plain-base64.es3 --output ./out --json
         "declared_type": "text/plain",
         "detected_type": "text",
         "document_index": 0,
+        "decrypted": false,
         "dossier_path": "0",
         "filename": "hello.txt",
         "path": "hello.txt"
@@ -297,10 +344,11 @@ openszigno inspect tests/fixtures/doctype.es3 --json
 
 | Command | What it does | Writes files? |
 | --- | --- | --- |
-| `openszigno inspect FILE` | Identifies the dossier and reports title, category, namespace, XML encoding, document count, embedded-dossier count, signature/timestamp presence, the active limits, and capability flags. | No |
+| `openszigno inspect FILE` | Identifies the dossier and reports title, category, namespace, XML encoding, document count, embedded-dossier count, signature/timestamp presence, the unverified signature inventory, the active limits, and capability flags. | No |
 | `openszigno list FILE` | Lists document records in source XML order with title, creation date, MIME type, declared source size (`null`/`?` when the dossier omits it), `OBJREF`, transform chain, and whether the document embeds a dossier. | No |
 | `openszigno validate-structure FILE` | Applies the strict structural rules and reports `valid_structure`, `conformance_warnings`, plus `cryptographic_verification_performed: false`. | No |
-| `openszigno extract FILE --output DIR` | Decodes supported payloads into `DIR`, expanding embedded dossiers into `<file>.d` subdirectories, deduplicating repeated titles, never overwriting an existing file. | Yes |
+| `openszigno extract FILE --output DIR` | Decodes supported payloads into `DIR`, expanding embedded dossiers into `<file>.d` subdirectories, deduplicating repeated titles, never overwriting an existing file. Restrict it to named documents with `--document`. | Yes |
+| `openszigno extract FILE --document SEL --stdout` | Decodes exactly one document and writes its raw payload bytes to stdout, with diagnostics on stderr. | No |
 | `openszigno verify FILE` | Verifies every `ds:Signature`: canonicalization, reference digests, the signature value, the mandated e-dossier reference scope, the XAdES signed `SigningCertificate` binding, RFC 3161 signature timestamps, the certificate path against your trust store and any ETSI TS 119 612 trusted lists, and revocation from the signature's own `RevocationValues` and your revocation store. Reports a per-signature verdict of `valid`, `invalid`, or `indeterminate`. | No |
 
 Flags:
@@ -308,25 +356,36 @@ Flags:
 | Flag | Applies to | Meaning |
 | --- | --- | --- |
 | `--json` | all commands | Emit exactly one JSON object on stdout. |
+| `FILE` as `-` | all commands | Read the dossier from standard input instead of from a path. The stream is capped at `max_input_bytes` and buffered in memory. |
 | `--allow-namespace URI` | all commands | Also accept a dossier rooted in this namespace, in addition to the known-compatible ones. Repeatable. |
 | `-o`, `--output DIR` | `extract` | Destination directory; created if missing. |
 | `--no-recursive` | `extract` | Write an embedded dossier as a payload file instead of expanding it. |
 | `--max-depth N` | `extract` | Nesting levels of embedded dossiers to expand (default 3); values above the hard cap of 8 are clamped. |
+| `--document SELECTOR` | `extract` | Extract only this document, named by its `object_ref` (exact match) or as `#<index>` in source order. Repeatable. Selectors never reach into an embedded dossier; a selected embedded dossier still expands into `<file>.d`. An unmatched selector is `document_not_found` (exit 4). |
+| `--stdout` | `extract` | Write the selected document's raw payload bytes to stdout and nothing else; diagnostics go to stderr and no files are written. Needs exactly one resolved, decodable document. Cannot be combined with `--json` or `--output`. |
+| `--decrypt-key FILE` | `extract` | RSA private key that decrypts documents whose transform chain contains `encrypt`: PKCS#8, DER or PEM, plain or passphrase-protected. Without it an encrypted document stays skipped. Decryption is never verification. |
+| `--decrypt-cert FILE` | `extract` | The certificate belonging to `--decrypt-key`, PEM or DER; it is what makes a CMS recipient recognisable. Optional when a PEM key file carries the certificate alongside the key. |
+| `--decrypt-passphrase-file FILE` | `extract` | Read an encrypted key's passphrase from this file (one trailing newline stripped). The environment variable `OPENSZIGNO_DECRYPT_PASSPHRASE` is the alternative; the file wins. No flag ever takes a passphrase as an argument value. |
+| `--allow-legacy-ciphers` | `extract` | Also decrypt DES-EDE3-CBC content, which is weak but is what the Microsec reference tool encrypted with by default. Refused without this flag. |
 | `--trust-store DIR` | `verify` | Directory of trust anchors (`anchors/*`, PEM or DER) and optional extra CA certificates (`intermediates/*`). A directory of certificates with no `anchors` subdirectory is read as anchors. Without it, every chain check is `unknown`. |
 | `--trust-list FILE` | `verify` | ETSI TS 119 612 trusted list (XML) to take trust anchors from. Repeatable. Its anchors join the `--trust-store` ones, each reported with its origin, and only these can make a chain `qualified`. Nothing is fetched; see [docs/trust.md](docs/trust.md). |
 | `--lotl FILE` | `verify` | EU list of trusted lists (XML). Its `PointersToOtherTSL` entries name the national lists' signing certificates, so one out-of-band certificate bootstraps every `--trust-list`. The LOTL is verified against `--trust-list-signer` first and contributes no trust anchors of its own. |
 | `--trust-list-signer CERT` | `verify` | Certificate, PEM or DER, that must have signed the `--lotl` and, absent one, every `--trust-list`. Obtain it out of band — for the EU list of trusted lists, from the Official Journal. Without any signer the lists are read but reported `trust_list_unverified`, which caps the verdict at `indeterminate`. |
 | `--revocation-store DIR` | `verify` | Directory of CRLs (`crls/`) and OCSP responses (`ocsp/`), DER or PEM, checked in addition to the signature's own `xades:RevocationValues`. A flat directory works too; each file is classified by what it contains. Nothing is ever fetched. |
-| `--no-revocation` | `verify` | Do not check revocation at all. Emits `revocation_not_checked`, which is blocking, so this produces **at most** `indeterminate`. |
+| `--no-revocation` | `verify` | Do not check revocation at all. Emits `revocation_not_checked`, which is blocking, so this produces **at most** `indeterminate`. Cannot be combined with `--online`. |
+| `--online` | `verify` | Fetch revocation data the offline material does not cover, from the CRL distribution points and AIA OCSP responders **the certificates themselves publish**. The only thing that makes openszigno touch the network. Bounded: 5 s to connect, 20 s per fetch, 16 MiB per CRL, 64 KiB per OCSP response, at most 3 redirects and never to another host, no proxy from the environment. Everything fetched is checked by exactly the offline rules, so `--online` can only add data, never relax one; a failed fetch is `revocation_status_unknown`, which blocks. |
+| `--online-cache DIR` | `verify` | Write everything `--online` fetched into `DIR` in the `--revocation-store` layout, so a later run with `--revocation-store DIR` and no `--online` reproduces the result with no network at all. Requires `--online`. |
+| `--online-proxy URL` | `verify` | Route `--online` fetches through this proxy. Without it no proxy is used: `HTTP_PROXY` and its relatives are deliberately ignored. Requires `--online`. |
 | `--at TIME` | `verify` | Validation time as an RFC 3339 timestamp. It overrides everything: without it, a signature whose timestamp verified completely is validated at that token's `genTime`, and otherwise at the current time. Use it to ask "was this chain valid on that day" and to get reproducible results. |
 | `--allow-legacy-algorithms` | `verify` | Admit SHA-1 digests and RSA-SHA1 signature methods **for diagnosis only**: they emit `algorithm_legacy_allowed` instead of a passed check, the verdict stays capped at `indeterminate`, and no failed check can become a passed one. MD5, HMAC, DSA, and RSA keys below 2048 bits stay refused. |
 | `-h`, `--help` | all commands | Print help as plain text. |
 | `-V`, `--version` | top level | Print the version as plain text. |
 
-`verify` performs no network access of its own, in any mode, and the
-`openszigno-verify` crate structurally cannot: reference resolution is strictly
-same-document, and the trust store, the trusted lists, and the revocation store
-are the only external material a run consults. Its algorithm policy is pinned —
+`verify` performs no network access unless you pass `--online`, and even then
+only the CLI does: the `openszigno-verify` crate structurally cannot open a
+socket in any mode, reference resolution is strictly same-document with or
+without the flag, and trust anchors and trusted lists are never fetched at all.
+Its algorithm policy is pinned —
 SHA-256/384/512 digests, RSA (PKCS#1 v1.5 and PSS) at 2048 bits or more, ECDSA
 P-256/P-384, Canonical XML 1.0 and Exclusive C14N 1.0 — and weak algorithms are
 refused rather than warned about.
@@ -408,13 +467,14 @@ the tool reports presence only and claims nothing about validity. See
 | XAdES qualifying properties: `SigningCertificate` binding, signing time, signature policy, and level detection. | M2 phase 2 |
 | Revocation checking (CRL and OCSP) and EU trusted-list import for qualified status. | M2 phase 3 |
 | Timestamp verification. | M3 |
-| Decryption of encrypted payloads. A document that declares the `encrypt` transform is reported and skipped. | M4 |
+| CMS recipient forms other than `KeyTransRecipientInfo`, and content encryption outside AES-CBC and (behind a flag) DES-EDE3-CBC. Such a document is named and skipped. | after M4 |
 
 Outside the current plan altogether:
 
 - e-dossier namespaces outside the documented allow-list, unless added with
   `--allow-namespace`;
-- transform chains other than `base64` and `zip -> base64`;
+- transform chains other than `base64`, `zip -> base64`, `encrypt -> base64`,
+  and `zip -> encrypt -> base64`;
 - XML encodings other than UTF-8 and ISO-8859-2;
 - DTDs, DOCTYPE declarations, and entity declarations, which are rejected by
   design;
