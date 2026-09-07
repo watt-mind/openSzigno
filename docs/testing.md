@@ -12,7 +12,12 @@ Initial fixtures:
 | --- | --- |
 | `plain-base64.es3` | One unsigned UTF-8 text payload; baseline parsing, metadata, list, and extraction. |
 | `zip-base64.es3` | One unsigned ZIP-compressed payload; transform reversal and ZIP limits. |
-| malformed variants | Duplicate ID, unresolved `OBJREF`, invalid Base64, traversal title, unsupported encryption, and ZIP-bomb-limit cases. |
+| malformed variants | Duplicate ID, unresolved `OBJREF`, invalid Base64, traversal title, unsupported encryption, and DOCTYPE cases. |
+
+Limit cases that need large or binary-patched inputs (deep nesting, node
+counts, ZIP size and ratio bombs, encrypted ZIP members, unsafe ZIP paths,
+unsafe output names) are generated inside the test code rather than committed
+as fixtures.
 
 Synthetic dossiers must be labeled **unsigned test data**. They must never be
 presented as authentic, qualified, or interoperable signature evidence.
@@ -71,7 +76,10 @@ ES3_TEST_CORPUS_DIR=/private/path/corpus cargo test \
 ```
 
 Neither private test logs paths, filenames, payloads, hashes, metadata,
-certificate subjects, signer data, or signature values. A corpus failure
+certificate subjects, signer data, or signature values. The fixture smoke test
+extracts into a temporary directory that is removed when the test finishes;
+if the test process is killed, the extracted files remain under the system
+temporary directory and must be removed by hand. A corpus failure
 reports aggregate bucket counts only. Unsupported namespaces and malformed
 non-dossiers remain visible as parse-error buckets but do not fail the harness;
 infrastructure failures, panics, supported-payload decode failures, an empty

@@ -33,7 +33,9 @@ openszigno validate-structure FILE.es3 --json
 Omit `--json` for human-readable output. JSON mode emits exactly one object on
 stdout and uses stable error codes. Extraction supports `base64` and
 `zip -> base64`; encrypted or otherwise unsupported documents are reported and
-skipped. Existing output files are never overwritten.
+skipped. Existing output files are never overwritten, output names are
+sanitized from document titles, and hostile input is bounded by fixed size,
+depth, and compression-ratio limits.
 
 Cryptographic `verify` is reserved for a later milestone and is intentionally
 not exposed by this release.

@@ -1,6 +1,6 @@
 # `.es3` e-dossier research
 
-Last reviewed: 2026-09-09
+Last reviewed: 2026-09-07
 
 ## What an `.es3` file is
 
@@ -88,6 +88,7 @@ commands may report *signature material present*, but must not report
 ## Language decision
 
 Rust is the preferred implementation language: it supports one native binary,
-portable release artifacts, bounded streaming parsers, and an agent-friendly
-CLI without requiring a VM/runtime. Go remains a viable fallback, but Rust is
+portable release artifacts, a bounded whole-document XML parser (input-size,
+depth, and node-count limited; see `docs/architecture.md`), and an
+agent-friendly CLI without requiring a VM/runtime. Go remains a viable fallback, but Rust is
 the default unless a later validation-library evaluation reverses the choice.
