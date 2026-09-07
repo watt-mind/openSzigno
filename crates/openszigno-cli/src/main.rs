@@ -838,10 +838,206 @@ fn display_json_string(value: &Value) -> String {
 mod tests {
     use super::*;
 
+    /// A temporary directory under a fully resolved base path.
+    ///
+    /// `OutputDir` refuses a path containing a symlink, and the platform
+    /// temporary directory is itself a symlink on some systems (macOS resolves
+    /// `/var` to `/private/var`), so the base is canonicalized first.
+    fn scratch() -> tempfile::TempDir {
+        let base = std::env::temp_dir()
+            .canonicalize()
+            .expect("the temporary directory must resolve");
+        tempfile::tempdir_in(base).expect("a temporary directory must be available")
+    }
+
+    /// Parse a synthetic, unsigned dossier and return its only document, so
+    /// that the private naming rules can be exercised directly.
+    fn document(title: &str, extension: Option<&str>) -> openszigno_core::Document {
+        let escaped = title
+            .replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;");
+        let extension =
+            extension.map_or_else(String::new, |value| format!(" extension=\"{value}\""));
+        let xml = format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<es:Dossier xmlns:es="https://www.microsec.hu/ds/e-szigno30#" xmlns:ds="http://www.w3.org/2000/09/xmldsig#">
+<es:DossierProfile Id="p0" OBJREF="Object0"><es:Title>Unsigned synthetic fixture</es:Title><es:CreationDate>2026-01-01T00:00:00Z</es:CreationDate></es:DossierProfile>
+<es:Documents Id="Object0"><es:Document><es:DocumentProfile Id="p1" OBJREF="o1"><es:Title>{escaped}</es:Title><es:CreationDate>2026-01-01T00:00:00Z</es:CreationDate><es:Format><es:MIME-Type type="text" subtype="plain"{extension}/></es:Format><es:SourceSize sizeValue="1" sizeUnit="B"/><es:BaseTransform><es:Transform Algorithm="base64"/></es:BaseTransform></es:DocumentProfile><ds:Object Id="o1">eA==</ds:Object></es:Document></es:Documents>
+</es:Dossier>"#
+        );
+        openszigno_core::parse(xml.as_bytes(), &Limits::default())
+            .expect("the synthetic dossier must parse")
+            .documents
+            .swap_remove(0)
+    }
+
+    fn rejected_name(title: &str, extension: Option<&str>) -> CliError {
+        safe_output_name(&document(title, extension))
+            .expect_err("this title must not become a filename")
+    }
+
+    fn accepted_name(title: &str, extension: Option<&str>) -> String {
+        safe_output_name(&document(title, extension)).expect("this title must be usable")
+    }
+
+    #[test]
+    fn an_ordinary_title_is_used_as_written() {
+        assert_eq!(accepted_name("hello.txt", Some("txt")), "hello.txt");
+        assert_eq!(
+            accepted_name("Report 2026.txt", Some("txt")),
+            "Report 2026.txt"
+        );
+        assert_eq!(accepted_name("no-extension", None), "no-extension");
+    }
+
+    #[test]
+    fn a_title_is_stored_in_one_canonical_composition() {
+        // "e" + U+0301 is written as the single code point U+00E9.
+        assert_eq!(
+            accepted_name("e\u{301}rte\u{301}s.txt", Some("txt")),
+            "\u{e9}rt\u{e9}s.txt"
+        );
+    }
+
+    #[test]
+    fn a_declared_extension_is_appended_only_when_it_is_missing() {
+        assert_eq!(accepted_name("invoice", Some("pdf")), "invoice.pdf");
+        assert_eq!(accepted_name("invoice.pdf", Some("pdf")), "invoice.pdf");
+        assert_eq!(accepted_name("invoice.PDF", Some("pdf")), "invoice.PDF");
+        assert_eq!(accepted_name("invoice.txt", Some("pdf")), "invoice.txt.pdf");
+    }
+
+    #[test]
+    fn a_title_that_hides_reorders_or_escapes_is_rejected() {
+        // A title that is empty or only whitespace cannot reach this point: the
+        // parser rejects it as a missing element first.
+        for title in [
+            ".",
+            "..",
+            ".hidden",
+            "-rf",
+            "../escape.txt",
+            "dir/file.txt",
+            "dir\\file.txt",
+            "a<b",
+            "a>b",
+            "a:b",
+            "a\"b",
+            "a|b",
+            "a?b",
+            "a*b",
+            // (a C0 control other than tab or newline is not even valid XML)
+            "tab\there.txt",
+            "line\nbreak.txt",
+            "nbsp\u{a0}.txt",
+            "soft\u{ad}hyphen.txt",
+            "bidi\u{202e}txt.exe",
+            "zero\u{200b}width.txt",
+            "annotation\u{fff9}.txt",
+            "tag\u{e0001}.txt",
+            "private\u{e000}.txt",
+            "trailing.",
+        ] {
+            let error = rejected_name(title, None);
+            assert_eq!(
+                error.code, "unsafe_output_name",
+                "{title:?} must be rejected"
+            );
+            assert_eq!(error.exit, 5);
+            assert!(
+                !error.message.contains(title),
+                "the message must not echo the title"
+            );
+        }
+    }
+
+    #[test]
+    fn a_reserved_windows_device_name_is_rejected_on_every_platform() {
+        for title in [
+            "CON", "con", "PRN", "AUX", "NUL", "nul.txt", "COM1", "com9.log", "LPT1", "lpt9.dat",
+        ] {
+            assert_eq!(
+                rejected_name(title, None).code,
+                "unsafe_output_name",
+                "{title} is a reserved device name"
+            );
+        }
+        // Only the stem is reserved: a longer name is fine.
+        assert_eq!(accepted_name("console.txt", None), "console.txt");
+    }
+
+    #[test]
+    fn an_over_long_name_is_rejected_before_and_after_the_extension() {
+        assert_eq!(
+            rejected_name(&"a".repeat(241), None).code,
+            "unsafe_output_name"
+        );
+        assert_eq!(
+            rejected_name(&"a".repeat(240), Some("abcdefghijklmnop")).code,
+            "unsafe_output_name"
+        );
+        assert_eq!(accepted_name(&"a".repeat(240), None).len(), 240);
+    }
+
+    #[test]
+    fn a_declared_extension_that_is_not_a_short_alphanumeric_suffix_is_rejected() {
+        for extension in ["tar.gz", "t x", "abcdefghijklmnopq", "-", "txt/", "\u{e9}"] {
+            assert_eq!(
+                rejected_name("payload", Some(extension)).code,
+                "unsafe_output_name",
+                "{extension} is not a usable extension"
+            );
+        }
+        assert_eq!(accepted_name("payload", Some("abcdefghijklmnop")).len(), 24);
+    }
+
+    #[test]
+    fn a_missing_json_string_is_rendered_as_a_placeholder() {
+        assert_eq!(display_json_string(&json!("title")), "title");
+        assert_eq!(display_json_string(&Value::Null), "<missing>");
+        assert_eq!(display_json_string(&json!(7)), "<missing>");
+    }
+
+    #[test]
+    fn cli_errors_carry_the_documented_exit_status() {
+        assert_eq!(CliError::io("x").exit, 3);
+        assert_eq!(CliError::invalid("input_too_large", "x").exit, 4);
+        assert_eq!(CliError::unsafe_output("output_exists", "x").exit, 5);
+        assert_eq!(CliError::io("x").code, "io_error");
+
+        let unsafe_directory = CliError::from(OpenError::Unsafe("not a directory"));
+        assert_eq!(unsafe_directory.code, "unsafe_output_directory");
+        assert_eq!(unsafe_directory.exit, 5);
+        let io = CliError::from(OpenError::Io("cannot inspect"));
+        assert_eq!(io.code, "io_error");
+        assert_eq!(io.exit, 3);
+    }
+
+    #[test]
+    fn capability_warnings_name_every_unsupported_document() {
+        let dossier = openszigno_core::parse(
+            std::fs::read(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../tests/fixtures/encrypted.es3"),
+            )
+            .expect("the fixture is readable")
+            .as_slice(),
+            &Limits::default(),
+        )
+        .expect("the fixture parses");
+        let warnings = capability_warnings(&dossier);
+        let codes: Vec<&str> = warnings
+            .iter()
+            .map(|warning| warning.code.as_str())
+            .collect();
+        assert_eq!(codes, ["encrypted_document_unsupported"]);
+    }
+
     /// A mid-run failure must not leave a half-extracted directory behind.
     #[test]
     fn roll_back_removes_the_files_this_run_created() {
-        let temporary = tempfile::tempdir().expect("temporary directory is available");
+        let temporary = scratch();
         let directory = OutputDir::open(temporary.path()).expect("output directory opens");
         for name in ["first.txt", "second.txt"] {
             let mut file = directory.create_new_file(name).expect("file is created");
@@ -869,7 +1065,7 @@ mod tests {
     /// the destination is clean.
     #[test]
     fn roll_back_reports_that_files_may_remain() {
-        let temporary = tempfile::tempdir().expect("temporary directory is available");
+        let temporary = scratch();
         let directory = OutputDir::open(temporary.path()).expect("output directory opens");
         let created = vec!["never-created.txt".to_owned()];
 

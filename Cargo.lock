@@ -313,6 +313,7 @@ dependencies = [
  "encoding_rs",
  "roxmltree",
  "serde",
+ "serde_json",
  "tempfile",
  "thiserror",
  "zip",
