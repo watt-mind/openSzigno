@@ -37,15 +37,17 @@ before anything else.
   patches, or chat: private paths/filenames, titles, metadata, payload contents
   or hashes, certificate subjects, signer data, or signature values. Report
   private-corpus results as aggregate counts and stable error-code buckets only.
-- **Verification boundary.** `verify` (M2 phase 1) checks XMLDSig
-  canonicalization, reference digests, signature values, the e-dossier
-  reference-scope rules, and certificate paths against a user-supplied trust
-  store. It does **not** check revocation, timestamps, or XAdES qualifying
-  properties, so it can report `invalid` but **never `valid`** — the ceiling is
-  `indeterminate`. The other four commands verify nothing at all. Never claim a
-  signature, certificate, timestamp, or dossier is valid, and never let a code
-  change lift that ceiling without the phase-2 and phase-3 work behind it (see
-  `docs/architecture.md#verification-boundary`).
+- **Verification boundary.** Only `verify` performs cryptographic checks:
+  XMLDSig canonicalization, reference digests and signature values, the
+  e-dossier reference-scope rules, the XAdES signed `SigningCertificate`
+  binding, RFC 3161 signature timestamps, certificate paths, revocation
+  (embedded and store-supplied CRL/OCSP), and trusted lists with qualified
+  status. It reports `valid` only when every required check passed against
+  the trust material the caller supplied, and any unperformed required check
+  caps the verdict at `indeterminate`. The other four commands verify nothing
+  at all. Never claim validity outside that path, never let a change relax a
+  check without tests, and never present a `valid` verdict as a statement of
+  legal effect (see `docs/architecture.md#verification-boundary`).
 - **Synthetic fixtures only.** Public fixtures under `tests/fixtures/` are
   unsigned, redistributable, and covered by `tests/fixtures/LICENSE`. Never
   derive public fixtures from private files.

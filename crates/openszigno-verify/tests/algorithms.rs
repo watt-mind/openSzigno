@@ -13,8 +13,8 @@ use openszigno_verify::certs::{CertificateSource, ParsedCertificate, certificate
 use openszigno_verify::codes::{CheckCode, CheckStatus, Verdict};
 use openszigno_verify::policy::{Digest, PolicyReport, SignatureScheme, Transform, VerifyLimits};
 use openszigno_verify::{
-    FixedClock, MemoryTrustStore, NoRevocation, RoxmltreeC14n as Backend, VerifyOptions,
-    VerifyReport, parse_rfc3339, verify,
+    FixedClock, MemoryTrustStore, NoRevocation, RevocationPolicy, RoxmltreeC14n as Backend,
+    VerifyOptions, VerifyReport, parse_rfc3339, verify,
 };
 use rcgen::{BasicConstraints, CustomExtension};
 
@@ -293,16 +293,19 @@ fn the_policy_tables_are_stable() {
     ));
     assert!(Transform::from_uri("http://www.w3.org/TR/1999/REC-xslt-19991116").is_none());
 
-    let policy = PolicyReport::new(true, false);
+    let policy = PolicyReport::new(true, false, RevocationPolicy::Offline);
     assert_eq!(policy.trust_store, "configured");
     assert_eq!(policy.revocation, "offline");
     assert!(!policy.legacy_algorithms_allowed);
     assert!(policy.trust_snapshot.is_none());
     assert!(!policy.digest_algorithms.contains(&"sha1"));
-    assert_eq!(PolicyReport::new(false, false).trust_store, "absent");
+    assert_eq!(
+        PolicyReport::new(false, false, RevocationPolicy::Offline).trust_store,
+        "absent"
+    );
 
     // With the flag, the report shows the policy that was actually applied.
-    let legacy = PolicyReport::new(true, true);
+    let legacy = PolicyReport::new(true, true, RevocationPolicy::Offline);
     assert!(legacy.legacy_algorithms_allowed);
     assert!(legacy.digest_algorithms.contains(&"sha1"));
     assert!(legacy.signature_algorithms.contains(&"rsa-pkcs1-sha1"));

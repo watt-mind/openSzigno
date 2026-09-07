@@ -202,6 +202,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9"
 
 [[package]]
+name = "cms"
+version = "0.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7b77c319abfd5219629c45c34c89ba945ed3c5e49fcde9d16b6c3885f118a730"
+dependencies = [
+ "const-oid",
+ "der",
+ "spki",
+ "x509-cert",
+]
+
+[[package]]
 name = "colorchoice"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -687,21 +699,33 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
 name = "openszigno-cli"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
+ "base64",
  "clap",
+ "cms",
+ "const-oid",
+ "der",
  "openszigno-core",
  "openszigno-verify",
+ "p256",
+ "p384",
+ "rcgen",
+ "rsa",
  "rustix",
  "serde",
  "serde_json",
+ "sha1",
+ "sha2",
  "tempfile",
  "unicode-normalization",
+ "x509-cert",
+ "x509-ocsp",
 ]
 
 [[package]]
 name = "openszigno-core"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "base64",
  "encoding_rs",
@@ -715,9 +739,10 @@ dependencies = [
 
 [[package]]
 name = "openszigno-verify"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "base64",
+ "cms",
  "const-oid",
  "der",
  "openszigno-core",
@@ -731,6 +756,7 @@ dependencies = [
  "sha1",
  "sha2",
  "x509-cert",
+ "x509-ocsp",
 ]
 
 [[package]]
@@ -1412,6 +1438,18 @@ dependencies = [
  "der",
  "spki",
  "tls_codec",
+]
+
+[[package]]
+name = "x509-ocsp"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5e54e695a31f0fecb826cf59ae2093c941d7ef932a1f8508185dd23b29ce2e2e"
+dependencies = [
+ "const-oid",
+ "der",
+ "spki",
+ "x509-cert",
 ]
 
 [[package]]

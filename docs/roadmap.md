@@ -60,10 +60,10 @@ Residuals deliberately left out of M1:
   Every level is decoded in memory before anything is written, so peak memory
   grows with the size of the whole tree, not of the largest single dossier.
 
-### M2: `verify` for XMLDSig/XAdES signatures — phase 1 done
+### M2: `verify` for XMLDSig/XAdES signatures — complete
 
 The design is [verify-design.md](verify-design.md), which splits M2 into three
-phases. **Phase 1 has shipped**; phases 2 and 3 remain.
+phases. **All three have shipped.**
 
 #### Phase 1 (shipped): the XMLDSig core and certificate paths
 
@@ -93,28 +93,67 @@ phases. **Phase 1 has shipped**; phases 2 and 3 remain.
 - `--trust-store DIR` with a documented `anchors/` and `intermediates/`
   layout, `--at <RFC3339>`, the `verify` JSON shape, and exit statuses 6 and 7.
 
-Deliberately left to later phases, and the reason the verdict can never be
-`valid`: revocation is reported as `revocation_not_checked` and timestamps as
-`timestamp_not_checked`, both blocking `skipped` checks.
+Deliberately left to later phases, and the reason the verdict could not be
+`valid` at the time: revocation was reported as `revocation_not_checked` and
+timestamps as `timestamp_not_checked`, both blocking `skipped` checks.
 
-#### Phase 2 (remaining): XAdES qualifying properties and timestamps
+#### Phase 2 (shipped): XAdES signed properties and timestamps
 
-Stage C in full — `SigningCertificate`/`SigningCertificateV2` digest binding,
-so the signing certificate is determined by *signed* data rather than by
-whatever `ds:KeyInfo` happens to hold; `SigningTime`; signature policy; level
-detection (B-B, B-T, B-LT, B-LTA) — plus RFC 3161 token parsing, imprint
-binding over the canonicalized `ds:SignatureValue`, TSA EKU and chain checks,
-and moving the effective validation time to `genTime`. `ArchiveTimeStamp`
-stays out of scope and is reported as `skipped`.
+- the XAdES `SigningCertificate` and `SigningCertificateV2` digest binding, in
+  every recognised namespace (1.1.1, 1.2.2, 1.3.2, 1.4.1), so the signing
+  certificate is determined by *signed* data rather than by whatever
+  `ds:KeyInfo` happens to hold. A key that verifies a certificate the signed
+  property does not name is a failure, not a preference: this is the
+  certificate-substitution check;
+- `SignaturePolicyIdentifier` reported as implied or explicit, informational
+  only, with no policy processing;
+- RFC 3161 token verification on `cms` plus a hand-declared `TSTInfo`: imprint
+  binding over the canonicalized `ds:SignatureValue`, the TSA `SignerInfo`
+  signature over its signed attributes, the critical `id-kp-timeStamping`
+  requirement of RFC 3161 section 2.3, and the TSA path validated to an anchor
+  at the token's `genTime`;
+- the validation time moved to the earliest fully verified `genTime`, which is
+  what lets a historical dossier chain under a signing certificate that has
+  since expired. `--at` still overrides it, and an unverified token moves
+  nothing;
+- `ArchiveTimeStamp`, dossier-level `es:TimeStamp`, and every unprocessed
+  qualifying property named and reported as `skipped` rather than ignored.
 
-#### Phase 3 (remaining): revocation and the EU trusted lists
+Level detection (B-B, B-T, B-LT, B-LTA) was deliberately left out: reporting a
+level implies a determination this build does not make, and `xades_level`
+stays the `"detected"` placeholder until it does.
 
-Stage E in full — CRL and OCSP verification, embedded `RevocationValues`,
-freshness rules, and `--online` fetching under a strict transport policy — plus
-importing a pinned LOTL and Hungarian trusted-list snapshot into the trust
-store so that `certificate_qualified_status` can be determined and cited.
+#### Phase 3 (shipped): revocation and the EU trusted lists
 
-#### Residual risks carried by phase 1
+- Stage E offline: CRL verification per RFC 5280 section 6.3 and OCSP per RFC
+  6960, consuming the signature's own `xades:RevocationValues` first and a
+  `--revocation-store DIR` second, with every item signature-checked against
+  the issuing CA or a properly authorised delegate before it is believed.
+  Delta CRLs, indirect CRLs, unimplemented `issuingDistributionPoint` forms and
+  unknown critical CRL extensions all fail closed;
+- freshness with **no grace period**: data whose `nextUpdate` has passed at the
+  validation time is `revocation_data_stale`, and a revocation dated after the
+  validation time is the distinct, non-fatal
+  `cert_revoked_after_validation_time`;
+- every certificate in the signer's chain and in each TSA's chain except the
+  anchors is checked, with the answer and its source reported per chain entry;
+- ETSI TS 119 612 trusted lists via `--trust-list FILE`, with service status
+  history evaluated at the validation time, the list's own XMLDSig signature
+  verified against a `--trust-list-signer` certificate obtained out of band,
+  and the qualified determination (`qualified`,
+  `qualified_signature_device`) carried into the report;
+- a new `info` check status for purely informational checks, so that `unknown`
+  now blocks without exception — and `valid` became reachable, with exit
+  status `0`.
+
+Deliberately deferred to M3: `--online` fetching from CRL distribution points
+and AIA. Everything needed for it exists — the `RevocationSource` injection
+point, the store loader, the classifier — but the transport policy (timeouts,
+size caps, no cross-host redirects) is network code that belongs in the CLI and
+has not been written. `--online`, `online_crl`, and `online_ocsp` do not exist
+in this release.
+
+#### Residual risks carried by M2
 
 - **The path validator is hand-written.** There is no general RFC 5280 path
   validator in Rust that fits eIDAS certificates, so this is net-new
@@ -123,29 +162,72 @@ store so that `certificate_qualified_status` can be determined and cited.
   the project after canonicalization. A differential CI check against
   `openssl verify` on generated chains is not yet in place.
 - **Canonicalization is also in-tree.** It matches the W3C examples and the
-  hand-computed cases in `crates/openszigno-verify/tests/c14n.rs`, but the
-  differential backend the design calls for (`xml_c14n` or `bergshamra` as a
-  CI oracle) has not been added, so there is no independent check.
+  hand-computed cases in `crates/openszigno-verify/tests/c14n.rs`, and
+  `tests/vectors.rs` now checks it against specification-transcribed canonical
+  forms and against a document whose digests and signature OpenSSL produced
+  over hand-written canonical octets. The differential backend the design
+  calls for (`xml_c14n` or `bergshamra` as a CI oracle) has still not been
+  added, so there is no second implementation running over arbitrary input.
 - **Distinguished names are compared by DER**, with no RFC 4518 string
   preparation. That is conservative: it can only reject a chain a lenient
   comparison would have accepted, never the other way round.
-- **`ds:KeyInfo` is trusted to name the signer** until phase 2 adds the signed
-  `SigningCertificate` binding. The reference-scope check is what limits the
-  damage: a signature that does not cover what the container mandates fails
-  regardless of which certificate it names.
+- **A signature with no `SigningCertificate` property still leans on
+  `ds:KeyInfo`.** The binding can only decide when the signature carries the
+  signed property; without one, `xades_signing_certificate_absent` is
+  `unknown` and the key-based selection stands. The reference-scope check is
+  what limits the damage there: a signature that does not cover what the
+  container mandates fails regardless of which certificate it names.
+- **The `TSTInfo` decoder is hand-declared** on `der`, rather than taken from
+  a timestamping crate, so the ASN.1 this build accepts is visible in one
+  place. It is net-new parsing of attacker-supplied DER, mitigated by a size
+  cap, `forbid(unsafe_code)`, and negative tests over malformed tokens.
+- **`IssuerSerial` issuer names are not compared**, only serial numbers: the
+  XAdES 1.3.2 form carries an RFC 4514 string, and comparing it to a DER name
+  needs name preparation this project does not implement. The `CertDigest` is
+  the binding, and `IssuerSerialV2` is compared by DER.
 - **No real-dossier interoperability evidence.** Everything is tested against
   synthetic material generated in `tests/`; whether real Microsec dossiers
   verify is only knowable through the private opt-in smoke tests.
+- **The trusted-list reader is narrow on purpose.** Only `X509Certificate`
+  digital identities become anchors; `X509SubjectName` and `X509SKI` ones are
+  skipped, and scheme-level `Qualifications` extensions are not processed. A
+  real national list therefore contributes fewer anchors than a full
+  implementation would, which can only cost coverage, never grant trust.
+- **Pre-eIDAS service statuses are not translated.** `undersupervision` and
+  `accredited` are not treated as granted, so a signature made before 2016
+  under a supervised CA reports `certificate_not_qualified` rather than a
+  qualified status this build is not equipped to determine.
+- **Revocation depends entirely on what the caller supplies.** With no
+  `RevocationValues` in the dossier and no `--revocation-store`, the answer is
+  `revocation_status_unknown` and the verdict `indeterminate`. Until `--online`
+  ships, obtaining historically correct CRLs is manual work described in
+  [trust.md](trust.md).
 
-Until phases 2 and 3 land, `verify` reports `invalid` or `indeterminate` and
-nothing else.
+### M3: dossier-level timestamps and online revocation fetching
 
-### M3: timestamp verification
+M2 phase 2 built the RFC 3161 machinery — token parsing, imprint comparison,
+TSA certificate and path validation — and `xades:SignatureTimeStamp` uses it
+today. What remains for M3 is the dossier-level `es:TimeStamp`, whose imprint
+is taken over the elements it *references* rather than over a
+`ds:SignatureValue`, so it needs the reference-resolution and canonicalization
+step a signature already has. Until then such an element is counted and
+reported as `dossier_timestamp_not_validated` (`info`, at the dossier level),
+and `timestamps_present` stays presence-only in `inspect` and `list`.
 
-Validate `es:TimeStamp` material once M2 phase 2 provides the RFC 3161
-machinery. Scope: timestamp token parsing, imprint comparison against the
-signed data, timestamp authority certificate validation, and a reported
-verification time. `timestamps_present` remains presence-only until then.
+`xades:ArchiveTimeStamp` belongs to the same milestone. It is reported as
+`archive_timestamp_present` (`info`) and not verified, so this release makes no
+claim about long-term (B-LTA) re-validation: a `valid` verdict says the
+signature's own evidence checks out at the stated validation time, not that its
+archival chain does.
+
+The other M3 item is the revocation residual M2 phase 3 left: `--online`
+fetching of CRLs from a certificate's distribution points and of OCSP from its
+AIA. The verify crate must stay network-free, so the fetching belongs in the
+CLI behind the explicit flag, with a fixed timeout, a size cap, HTTP and HTTPS
+only as published, no redirects across hosts, and every fetched URL recorded in
+the output. Offline stays the default; `--online` can only add data, never
+relax a rule. The reported `revocation_source` values `online_crl` and
+`online_ocsp` are reserved for it and are not emitted today.
 
 ### M4: encrypted payload decryption
 
@@ -204,7 +286,31 @@ Aggregate results of `verify` phase 1 over the maintainers' private corpus
   40 fail only on expiry, which is expected for historical dossiers until
   phase 2 binds the validation time to a trusted timestamp. 9 chain to CAs
   outside the two-root store (NetLock, KGYHSZ, and the pre-2009 Microsec
-  root), which the trusted-list work in phase 3 will cover.
+  root), which a trusted list covering those CAs would cover.
+
+With phase 2 (XAdES signed properties and RFC 3161 signature timestamps),
+the same corpus with the two Microsec roots as anchors and the legacy
+algorithm flag gives, in aggregate: `SigningCertificate` bound for all 62
+signatures; 59 signatures carry a signature timestamp and 56 of those verify
+fully, so the validation time comes from a trusted timestamp for 56
+signatures; 52 signer chains validate at that time; and 49 of the 62
+signatures pass every implemented check and are blocked only by revocation.
+The remaining ones chain to CAs outside the two-root store, use 1024-bit RSA,
+or carry advisory extended key usages. With phase 3 those 49 become reachable
+`valid` results, but only for a caller who supplies revocation data that covers
+the validation time; the private corpus has not been re-measured with one.
+
+With phase 3 (revocation and trusted lists), the same corpus verified with the
+Hungarian trusted list (its signature checked against the NMHH signer taken
+from the EU list of trusted lists), the two Microsec roots, and a revocation
+store holding the public Microsec CA CRLs gives, in aggregate: 54 of 62
+signatures `valid` with exit status 0, 43 of them qualified with the matching
+CA/QC service named; 7 `invalid` (1024-bit RSA signers, signatures without a
+timestamp whose certificates have expired, one genuinely revoked certificate,
+one chain to a CA outside the trust set); 1 `indeterminate` capped by the
+legacy-algorithm flag. Real Microsec dossiers embed OCSP responses for the
+end-entity certificate only, so the CA CRLs must be supplied through the
+revocation store until online fetching lands in M3.
 
 ## Engineering items
 

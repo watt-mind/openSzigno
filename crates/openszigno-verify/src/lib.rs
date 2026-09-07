@@ -2,14 +2,18 @@
 //!
 //! # What this phase can and cannot say
 //!
-//! This is phase 1 of the `verify` milestone. It validates the XMLDSig core
+//! This is phase 3 of the `verify` milestone. It validates the XMLDSig core
 //! (canonicalization, reference digests, the signature value), enforces the
-//! e-dossier reference-scope rules, and validates the certification path
-//! against a caller-supplied trust store. Revocation and timestamps are
-//! reported as `skipped`, which caps every verdict at `indeterminate`:
-//! **this crate cannot return `valid`**, by construction, and a caller that
-//! sees `indeterminate` has learned that nothing failed, not that anything is
-//! trustworthy.
+//! e-dossier reference-scope rules, binds the signing certificate through the
+//! signed XAdES `SigningCertificate` property, verifies RFC 3161 signature
+//! timestamps, validates the certification path against a caller-supplied
+//! trust store and ETSI TS 119 612 trusted lists at a validation time a
+//! verified timestamp may move, and checks revocation offline from the
+//! signature's own `xades:RevocationValues` and a caller-supplied store.
+//!
+//! With revocation implemented, `valid` is reachable — and only reachable when
+//! every emitted check passed. A caller that sees `indeterminate` has learned
+//! that nothing failed, not that anything is trustworthy.
 //!
 //! # Structure
 //!
@@ -30,22 +34,34 @@ pub mod codes;
 pub mod dsig;
 pub mod policy;
 pub mod report;
+pub mod revocation;
 pub mod trust;
+pub mod trustlist;
+pub mod tsa;
+pub mod xades;
 
 use openszigno_core::{Error as CoreError, Limits, ParseOptions, XmlSource, id_map};
 
 pub use c14n::{C14nAlgorithm, C14nBackend, C14nError, NodeSet, RoxmltreeC14n};
 pub use codes::{Check, CheckCode, CheckStatus, Verdict};
-pub use policy::{PolicyReport, VerifyLimits};
-pub use report::{SignatureReport, SignatureScope, VerifyReport};
-pub use trust::{
-    Clock, FixedClock, MemoryTrustStore, NoRevocation, NoTrust, RevocationSource, SystemClock,
-    TrustSource, format_rfc3339, parse_rfc3339,
+pub use policy::{PolicyReport, TrustListSnapshot, VerifyLimits};
+pub use report::{
+    SignatureReport, SignatureScope, SigningCertificateBinding, ValidationTimeSource, VerifyReport,
+    XadesReport,
 };
+pub use revocation::{CertificateRevocation, RevocationOrigin, RevocationStatus};
+pub use trust::{
+    Clock, FixedClock, MemoryRevocationStore, MemoryTrustStore, NoRevocation, NoTrust,
+    RevocationPolicy, RevocationSource, SystemClock, TrustAnchor, TrustAnchorOrigin, TrustSource,
+    format_rfc3339, parse_rfc3339,
+};
+pub use trustlist::{ServiceRecord, ServiceType, TrustList};
+pub use tsa::{TimestampKind, TimestampReport};
 
-use crate::certs::{CertificateSource, ParsedCertificate, dedup, validate_path};
+use crate::certs::{CertificateSource, ParsedCertificate, PathPurpose, dedup, validate_path};
 use crate::report::{Counts, VerificationTime};
 use crate::trust::TimeSource;
+use crate::tsa::{TokenInput, verify_token};
 
 /// How one dossier is verified.
 pub struct VerifyOptions<'a> {
@@ -137,18 +153,50 @@ pub fn verify(bytes: &[u8], options: &VerifyOptions<'_>) -> Result<VerifyReport,
     // The trust store supplies both roles: a self-signed entry is an anchor, a
     // non-self-signed one is an extra untrusted intermediate. Nothing found in
     // the dossier is ever an anchor.
-    let store: Vec<ParsedCertificate> = dedup(
-        options
-            .trust
-            .anchors()
-            .iter()
-            .chain(options.trust.intermediates())
-            .filter_map(|der| ParsedCertificate::from_der(der, CertificateSource::TrustStore))
-            .collect(),
-    );
-    let (anchors, store_intermediates): (Vec<_>, Vec<_>) = store
-        .into_iter()
-        .partition(ParsedCertificate::is_self_signed);
+    //
+    // A trusted list's anchors join the same set, keeping their provenance, so
+    // that a path can later be asked *which* anchor ended it and whether that
+    // anchor's service was granted at the validation time.
+    let mut anchors: Vec<ParsedCertificate> = Vec::new();
+    let mut anchor_provenance: Vec<(Vec<u8>, &trust::TrustAnchor)> = Vec::new();
+    let mut store_certificates: Vec<ParsedCertificate> = Vec::new();
+    // Every trusted-list service identity, whether or not it is also an anchor.
+    // The identities that decide qualified status are usually the *issuing*
+    // CAs, which are intermediates: a list that names them says nothing about
+    // the root, and asking only the anchor would report `null` for exactly the
+    // chains a trusted list exists to describe.
+    let mut services: Vec<(ParsedCertificate, &trust::TrustAnchor)> = Vec::new();
+    for anchor in options.trust.anchors() {
+        let source = match anchor.origin {
+            trust::TrustAnchorOrigin::TrustList => CertificateSource::TrustList,
+            trust::TrustAnchorOrigin::TrustStore => CertificateSource::TrustStore,
+        };
+        let Some(parsed) = ParsedCertificate::from_der(&anchor.der, source) else {
+            continue;
+        };
+        if anchor.service.is_some() {
+            services.push((parsed.clone(), anchor));
+        }
+        if parsed.is_self_signed() {
+            anchor_provenance.push((anchor.der.clone(), anchor));
+            anchors.push(parsed);
+        } else {
+            // A non-self-signed entry is an extra path candidate, never an
+            // anchor, whichever source offered it.
+            store_certificates.push(parsed);
+        }
+    }
+    let anchors = dedup(anchors);
+    for der in options.trust.intermediates() {
+        if let Some(parsed) = ParsedCertificate::from_der(der, CertificateSource::TrustStore) {
+            store_certificates.push(parsed);
+        }
+    }
+    let store_intermediates = dedup(store_certificates);
+    dossier_checks.extend(options.trust.checks().iter().cloned());
+
+    let revocation_policy = options.revocation.policy();
+    dossier_checks.push(revocation::policy_check(revocation_policy));
 
     let context = dsig::Context {
         source: source.text(),
@@ -170,6 +218,100 @@ pub fn verify(bytes: &[u8], options: &VerifyOptions<'_>) -> Result<VerifyReport,
         let outcome = dsig::verify_signature(&context, *node, index);
         let mut report = outcome.report;
 
+        // The signature's own revocation material. Untrusted like every other
+        // thing a signer supplies: each item is signature-checked against the
+        // path before it is believed.
+        let (embedded_crls, embedded_ocsp) = xades::revocation_values(*node);
+        let revocation_data = revocation::RevocationData {
+            embedded_crls: &embedded_crls,
+            embedded_ocsp: &embedded_ocsp,
+            store_crls: options.revocation.crls(),
+            store_ocsp: options.revocation.ocsp_responses(),
+        };
+
+        // --- Stage F: signature timestamps ----------------------------------
+        // Timestamps are verified before the signer's own path, because a
+        // verified token is what may move the validation time that path uses.
+        //
+        // A TSA's issuing CA is often carried in the enclosing signature's
+        // `xades:CertificateValues` rather than inside the token, so the
+        // token's own certificate set, the signature's candidates, and the
+        // trust store's intermediates are offered together. All three are
+        // untrusted path candidates; only the trust store supplies anchors.
+        let mut timestamp_candidates = outcome.extra_certificates.clone();
+        timestamp_candidates.extend(store_intermediates.iter().cloned());
+        let timestamp_candidates = dedup(timestamp_candidates);
+        let mut verified_gen_times: Vec<crate::trust::UnixTime> = Vec::new();
+        for source in &outcome.timestamps {
+            if let Some(reason) = &source.unsupported {
+                let check = Check::skipped(CheckCode::TimestampNotChecked, reason.clone());
+                report.checks.push(check.clone());
+                report.timestamps.push(tsa::TimestampReport {
+                    kind: source.kind,
+                    gen_time: None,
+                    accuracy_seconds: None,
+                    serial_hex: None,
+                    imprint_algorithm: None,
+                    tsa_certificate: None,
+                    chain: Vec::new(),
+                    verified: false,
+                    checks: vec![check],
+                });
+                continue;
+            }
+            let token = verify_token(&TokenInput {
+                kind: source.kind,
+                token: source.token.clone(),
+                imprint_input: source.imprint_input.clone(),
+                anchors: &anchors,
+                extra_certificates: &timestamp_candidates,
+                limits: &options.limits,
+                allow_legacy_algorithms: options.allow_legacy_algorithms,
+                revocation: revocation_data,
+                revocation_policy,
+                claimed_signing_time: outcome.claimed_signing_time,
+            });
+            report.checks.push(tsa::summary_check(&token.report.checks));
+            // The TSA chain's own revocation answer belongs to this signature's
+            // verdict too: a timestamp signed under a revoked TSA certificate
+            // must not leave a signature looking clean.
+            if let Some(check) = tsa::revocation_check(&token.report.checks) {
+                report.checks.push(check.clone());
+            }
+            if token.report.verified
+                && let Some(gen_time) = token.gen_time
+            {
+                verified_gen_times.push(gen_time);
+            }
+            report.timestamps.push(token.report);
+        }
+        if report.timestamps.is_empty() {
+            report.checks.push(Check::unknown(
+                CheckCode::SignatureTimestampAbsent,
+                "the signature carries no xades:SignatureTimeStamp, so nothing proves when it existed",
+            ));
+        } else {
+            // Informational: what a present timestamp is worth is decided by
+            // its own checks, which are folded in above. Saying "present" is a
+            // statement about the document, not an unresolved question.
+            report.checks.push(Check::info(
+                CheckCode::SignatureTimestampPresent,
+                "the signature carries at least one xades:SignatureTimeStamp; a timestamp proves existence, not validity",
+            ));
+        }
+
+        // --- The validation time for this signature -------------------------
+        // Precedence: an explicit `--at` always wins, then the earliest fully
+        // verified timestamp's genTime, then the clock.
+        let (signature_time, source) =
+            match (&options.requested_time, verified_gen_times.iter().min()) {
+                (Some(_), _) => (time, ValidationTimeSource::AtFlag),
+                (None, Some(gen_time)) => (*gen_time, ValidationTimeSource::Timestamp),
+                (None, None) => (time, ValidationTimeSource::CurrentTime),
+            };
+        report.validation_time = format_rfc3339(signature_time);
+        report.validation_time_source = source;
+
         // --- Stage D: certificate path -------------------------------------
         if let Some(signer) = &outcome.signer {
             // Candidates: the signature's own certificates (ds:KeyInfo and the
@@ -177,30 +319,123 @@ pub fn verify(bytes: &[u8], options: &VerifyOptions<'_>) -> Result<VerifyReport,
             let mut candidates = outcome.extra_certificates.clone();
             candidates.extend(store_intermediates.iter().cloned());
             let candidates = dedup(candidates);
-            let path = validate_path(signer, &candidates, &anchors, time, &options.limits);
-            report.chain = path.chain;
+            let path = validate_path(
+                signer,
+                &candidates,
+                &anchors,
+                signature_time,
+                &options.limits,
+                PathPurpose::Signing,
+            );
+            let mut chain = path.chain;
+            report.checks.extend(path.advisories);
             let status = match path.code {
                 CheckCode::CertPathOk => CheckStatus::Passed,
-                CheckCode::CertPathUnknown => CheckStatus::Unknown,
+                // Giving up is not a finding: an exhausted search means the
+                // tool stopped looking, not that no path exists.
+                CheckCode::CertPathUnknown | CheckCode::CertPathSearchExhausted => {
+                    CheckStatus::Unknown
+                }
                 _ => CheckStatus::Failed,
             };
             report
                 .checks
                 .push(Check::new(path.code, status, path.message));
-        }
 
-        // --- Stages E and F: reported, never silently omitted ---------------
-        report.checks.push(Check::skipped(
-            CheckCode::RevocationNotChecked,
-            "revocation status is not checked in this phase",
-        ));
-        report.checks.push(Check::skipped(
-            CheckCode::TimestampNotChecked,
-            "timestamps are not verified in this phase",
-        ));
+            // --- The anchor's provenance, and what the chain makes it -------
+            if let Some(anchor) = path.path.last() {
+                // When the same certificate is both a store anchor and a
+                // trusted-list identity, the list is the stronger provenance
+                // and the one worth reporting: it says *who* vouches for the
+                // CA, where a directory only says that somebody copied it in.
+                let listed = services.iter().any(|(certificate, _)| {
+                    certificate.der == anchor.der
+                        && certificate.source == CertificateSource::TrustList
+                });
+                let provenance = anchor_provenance
+                    .iter()
+                    .find(|(der, _)| *der == anchor.der)
+                    .map(|(_, anchor)| *anchor);
+                if let Some(entry) = chain.last_mut() {
+                    entry.trust_anchor_origin = if listed {
+                        Some(trust::TrustAnchorOrigin::TrustList)
+                    } else {
+                        provenance.map(|anchor| anchor.origin)
+                    };
+                }
+                let outcome = qualification(&services, &path.path, signature_time);
+                report.qualified = outcome.qualified;
+                report.qualified_signature_device = outcome.device;
+                report.qualified_service = outcome.service.clone();
+                if let Some(certificate) = report.signing_certificate.as_mut() {
+                    certificate.qualified = outcome.qualified;
+                }
+                report.checks.push(outcome.check);
+            }
+
+            // --- Stage E: revocation ----------------------------------------
+            if path.path.is_empty() {
+                // No validated path means no issuer to check anything against.
+                report.checks.push(match revocation_policy {
+                    trust::RevocationPolicy::NotChecked => Check::skipped(
+                        CheckCode::RevocationNotChecked,
+                        "revocation checking was switched off by the caller",
+                    ),
+                    trust::RevocationPolicy::Offline => Check::unknown(
+                        CheckCode::RevocationStatusUnknown,
+                        "no validated certification path was available, so revocation could not be checked",
+                    ),
+                });
+            } else {
+                let outcome = revocation::check_path(&revocation::PathRevocationInput {
+                    path: &path.path,
+                    candidates: &candidates,
+                    data: &revocation_data,
+                    time: signature_time,
+                    // Only a fully verified signature timestamp *proves* the
+                    // validation time; `--at` and the clock merely assert it.
+                    // That difference decides whether a revocation dated after
+                    // it may be dismissed.
+                    time_is_proven: source == ValidationTimeSource::Timestamp,
+                    policy: revocation_policy,
+                    role: revocation::ChainRole::Signer,
+                    limits: &options.limits,
+                });
+                for (entry, status) in chain.iter_mut().zip(outcome.per_certificate) {
+                    entry.revocation = Some(status);
+                }
+                report.checks.push(outcome.check);
+            }
+            report.chain = chain;
+        } else {
+            report.checks.push(Check::unknown(
+                CheckCode::RevocationStatusUnknown,
+                "no signing certificate was identified, so revocation could not be checked",
+            ));
+        }
 
         report.verdict = dsig::signature_verdict(&report.checks);
         signatures.push(report);
+    }
+
+    if dossier.timestamps_present > 0 {
+        // A dossier-level `es:TimeStamp` protects the elements it references,
+        // so verifying one needs the reference machinery M3 adds. Reporting it
+        // as unchecked is the honest answer; guessing at what it covers and
+        // then reporting a match would not be.
+        //
+        // Informational, and at the dossier level only: an `es:TimeStamp` is a
+        // statement about the container, not about any one signature, so it
+        // must not decide whether the signatures inside it are valid. A
+        // consumer that needs the container's own time attested reads this
+        // check; a consumer asking whether a signature verified does not.
+        dossier_checks.push(Check::info(
+            CheckCode::DossierTimestampNotValidated,
+            format!(
+                "{} dossier-level es:TimeStamp element(s) are present and are not validated in this release",
+                dossier.timestamps_present
+            ),
+        ));
     }
 
     if signatures.is_empty() {
@@ -234,12 +469,154 @@ pub fn verify(bytes: &[u8], options: &VerifyOptions<'_>) -> Result<VerifyReport,
                 TimeSource::SystemClock
             },
         },
-        policy: PolicyReport::new(options.trust.configured(), options.allow_legacy_algorithms),
+        policy: PolicyReport::new(
+            options.trust.configured(),
+            options.allow_legacy_algorithms,
+            revocation_policy,
+        ),
         limits: options.limits.clone(),
         counts,
         checks: dossier_checks,
         signatures,
     })
+}
+
+/// When eIDAS (Regulation (EU) 910/2014) began to apply, which is the line
+/// after which a qualified certificate must carry `QcCompliance` itself.
+/// Before it, the trusted list's own record is the whole story, because the
+/// statement had not been mandated yet.
+const EIDAS_APPLICATION_DATE: trust::UnixTime = 1_467_324_000; // 2016-07-01T00:00:00Z
+
+/// What was concluded about one chain's qualified status.
+struct Qualification {
+    qualified: Option<bool>,
+    device: Option<bool>,
+    service: Option<String>,
+    check: Check,
+}
+
+/// Decide the qualified status of one validated chain.
+///
+/// The determination is made over the **whole chain**, not over its anchor. In
+/// a real trusted list the CA/QC service identities are the issuing CAs, which
+/// are intermediates; the root above them is often present only in a
+/// `--trust-store` directory, and sometimes is not listed at all. Asking only
+/// the anchor therefore reports "not determined" for precisely the chains a
+/// trusted list exists to describe.
+///
+/// So: a chain is qualified when some certificate in it **is**, or was
+/// **issued by**, the service digital identity of a CA/QC service the list
+/// records as granted at the validation time. "Issued by" is a verified
+/// signature, not a name match, so nothing is gained by minting a certificate
+/// that merely claims the right issuer.
+///
+/// The signer's own `QCStatements` may then contradict the list, and do when a
+/// certificate issued after eIDAS applied carries the extension without
+/// `QcCompliance`, or carries one that will not parse. A post-eIDAS
+/// certificate with **no** `QCStatements` extension at all does not contradict
+/// anything, and the determination rests on the trusted list alone, exactly as
+/// it does for a pre-eIDAS certificate. That is the looser of the two readings
+/// and it is deliberate: the trusted list is the authority on which CA may
+/// issue qualified certificates, and an issuer that omitted an assertion has
+/// not denied it.
+///
+/// The answer is `None`, never `false`, when no trusted list covers the chain:
+/// "not determined" and "determined not to be qualified" are different
+/// statements and the report keeps them apart.
+fn qualification(
+    services: &[(ParsedCertificate, &trust::TrustAnchor)],
+    path: &[ParsedCertificate],
+    time: trust::UnixTime,
+) -> Qualification {
+    let mut listed = false;
+    let mut matched: Option<(&ParsedCertificate, &trustlist::ServiceRecord)> = None;
+    for (identity, anchor) in services {
+        let Some(record) = anchor.service.as_ref() else {
+            continue;
+        };
+        listed = true;
+        if !record.granted_at(time, trustlist::ServiceType::CaQc) {
+            continue;
+        }
+        let covers = path.iter().any(|certificate| {
+            certificate.der == identity.der
+                || (certificate.issuer_der() == identity.subject_der()
+                    && crate::certs::verify_issued_by(certificate, identity))
+        });
+        if covers {
+            matched = Some((identity, record));
+            break;
+        }
+    }
+
+    let Some((identity, record)) = matched else {
+        if !listed {
+            return Qualification {
+                qualified: None,
+                device: None,
+                service: None,
+                check: Check::info(
+                    CheckCode::CertificateQualifiedUnknown,
+                    "no trusted list was consulted, so this chain's qualified status is not determined",
+                ),
+            };
+        }
+        return Qualification {
+            qualified: Some(false),
+            device: None,
+            service: None,
+            check: Check::info(
+                CheckCode::CertificateNotQualified,
+                "no certificate in the validated chain is, or was issued by, a trusted-list CA/QC service granted at the validation time",
+            ),
+        };
+    };
+    let service_name = record
+        .service_name
+        .clone()
+        .or_else(|| crate::certs::common_name(&identity.certificate.tbs_certificate.subject));
+    let named = service_name
+        .as_deref()
+        .map(|name| format!(" ({name})"))
+        .unwrap_or_default();
+
+    let leaf = &path[0];
+    let post_eidas = crate::certs::unix_time(leaf.certificate.tbs_certificate.validity.not_before)
+        >= EIDAS_APPLICATION_DATE;
+    let (contradicts, device) = match leaf.qc_statement_oids() {
+        Ok(Some(oids)) => (
+            !oids.contains(&crate::certs::OID_QC_COMPLIANCE),
+            Some(oids.contains(&crate::certs::OID_QC_SSCD)),
+        ),
+        // No statement is not a denial; the list is the authority.
+        Ok(None) => (false, None),
+        // A malformed extension is not read past.
+        Err(()) => (true, None),
+    };
+    if post_eidas && contradicts {
+        return Qualification {
+            qualified: Some(false),
+            device,
+            service: service_name,
+            check: Check::info(
+                CheckCode::CertificateNotQualified,
+                format!(
+                    "a trusted-list CA/QC service{named} covers this chain, but the signing certificate was issued after eIDAS applied and its QCStatements do not assert QcCompliance"
+                ),
+            ),
+        };
+    }
+    Qualification {
+        qualified: Some(true),
+        device,
+        service: service_name,
+        check: Check::info(
+            CheckCode::CertificateQualified,
+            format!(
+                "the validated chain is covered by a trusted-list CA/QC service{named} granted at the validation time"
+            ),
+        ),
+    }
 }
 
 fn count(signatures: &[SignatureReport], verdict: Verdict) -> usize {

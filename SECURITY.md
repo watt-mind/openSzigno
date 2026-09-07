@@ -2,17 +2,30 @@
 
 ## The one thing to know first
 
-**openSzigno can tell you a signature is broken. It cannot tell you one is
-good.**
+**`valid` means every check openSzigno makes passed. It does not mean the
+dossier is authentic, and it never means it is legally valid.**
 
 `openszigno verify` checks XMLDSig canonicalization, reference digests,
-signature values, the e-dossier reference-scope rules, and certificate paths
-against a trust store you supply. A verdict of `invalid` is a real
-cryptographic finding and should be taken seriously. But revocation,
-timestamps, and the XAdES signing-certificate binding are not implemented, so
-the best verdict this release can reach is `indeterminate`, which means
-"nothing that was checked failed" — not "this is authentic". No openSzigno
-output ever says `valid`.
+signature values, the e-dossier reference-scope rules, the XAdES signed
+`SigningCertificate` binding, RFC 3161 signature timestamps, certificate paths
+against trust material you supply, and revocation from revocation data you
+supply. A verdict of `invalid` is a real cryptographic finding and should be
+taken seriously.
+
+A verdict of `valid` is a narrower statement than it sounds. It says: at the
+validation time reported alongside it, this signature verified, its certificate
+chained to an anchor **you chose to trust**, and revocation data **you
+supplied** said no certificate in the chain was revoked. It does not say the
+signer is who the certificate claims, that the trust material you supplied was
+the right material, or that anything about the dossier satisfies a legal
+requirement. Declaring a dossier legally valid is a legal judgement and a
+permanent non-goal of this tool.
+
+`valid` is also easy to fail to reach for benign reasons. No trust store, a
+trusted list whose own signature was not checked, no revocation data, a CRL
+that expired before the validation time, or `--no-revocation` all yield
+`indeterminate`, which means "nothing that was checked failed" — not "this is
+authentic", and not "this is forged".
 
 **Extraction is not verification.** `inspect`, `list`, `extract`, and
 `validate-structure` check nothing cryptographic at all; `signatures_verified`
@@ -56,8 +69,18 @@ openSzigno aims to guarantee that a hostile input cannot:
   resolve a reference to a node other than the one the container semantics
   require (signature wrapping), to reach the network or the filesystem while
   resolving a reference, to have a weak or unlisted algorithm accepted, to have
-  a certificate path accepted without a configured anchor, or to reach a
-  `valid` verdict at all in this release.
+  a certificate path accepted without a configured anchor, to have revocation
+  data believed that the issuing CA did not authorise (including a CRL or OCSP
+  response the *signer* embedded in the dossier's own `RevocationValues`), to
+  have expired or out-of-scope revocation data treated as covering the
+  validation time, to have a trusted-list anchor accepted for a service that
+  was not granted at the validation time, or to reach a `valid` verdict while
+  any check is `failed`, `unknown`, or `skipped`.
+
+The last of those is the load-bearing one now that `valid` is reachable: the
+only non-blocking check status is `info`, which is reserved for checks that
+report rather than decide. A path from an `unknown` to a `valid` verdict would
+be a vulnerability in this tool.
 
 `verify --json` output can contain personal data of signers: the signing
 certificate's subject and issuer common names, its serial, and its
@@ -90,9 +113,12 @@ The safety mechanisms behind these are documented in
 
 ## Out of scope
 
-- The absence of signature, certificate, timestamp, or decryption support.
-  That is documented behaviour and tracked as roadmap milestones, not a
-  vulnerability.
+- The absence of decryption support, dossier-level `es:TimeStamp` validation,
+  or `--online` revocation fetching. That is documented behaviour and tracked
+  as roadmap milestones, not a vulnerability.
+- An `indeterminate` verdict on a dossier you believe is good, when the cause
+  is trust or revocation material you did not supply. Supplying it is the
+  operator's job, and [docs/trust.md](docs/trust.md) describes how.
 - A dossier that openSzigno refuses to parse because it uses an unsupported
   namespace, encoding, or transform chain. Report that as a compatibility
   issue; see
