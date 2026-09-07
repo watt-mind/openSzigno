@@ -132,7 +132,8 @@ classified from a bounded prefix of its bytes by `openszigno_core::sniff`.
 optional BOM and leading whitespace) starts with markup, the category comes
 from the ASCII markup alone, so an ISO-8859-2 document is still `xml`, `html`,
 or `dossier` even though its later bytes are not valid UTF-8. Only non-markup
-content falls through to the UTF-8 text/binary test. The categories are `pdf`, `html`, `xml`, `dossier`,
+content falls through to the UTF-8 text/binary test. The categories are
+`pdf`, `html`, `xml`, `dossier`,
 `zip`, `text`, and `binary`; each has a preferred extension except `binary`.
 Sniffing reads at most the first 4096 bytes (1024 for a leading HTML tag),
 never allocates a copy of the payload, and reports nothing about the content
@@ -215,7 +216,8 @@ All commands accept `--json` and `--allow-namespace <URI>` (repeatable).
 `extract` additionally accepts `--no-recursive`, which writes an embedded
 dossier as a plain payload file instead of expanding it, and
 `--max-depth <N>` (default 3), which bounds the nesting levels expanded;
-values above the hard cap of 8 are clamped to 8. In JSON mode, stdout contains exactly one JSON
+values above the hard cap of 8 are clamped to 8. In JSON mode, stdout contains
+exactly one JSON
 object and diagnostics go to stderr. Document ordering is the source XML
 order. No command writes XML payload bytes to stdout.
 
@@ -313,7 +315,8 @@ Each `extracted` entry describes one written file:
 every document skipped across the tree, and `nested_dossiers_extracted` the
 embedded dossiers that were expanded.
 
-The `dossier` object carries `title`, `category` (or `null`), `creation_date` (or `null`),
+The `dossier` object carries `title`, `category` (or `null`), `creation_date`
+(or `null`),
 `namespace`, `xml_encoding`, `documents` (a count), `nested_dossiers` (a count
 of documents that embed a dossier), `signatures_present`, `timestamps_present`,
 and `signatures_verified`, which is always `false`.
