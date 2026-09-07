@@ -391,6 +391,15 @@ end-entity certificate only, so the CA CRLs must be supplied through the
 revocation store, or fetched with `--online`, which M3 added. The corpus has
 not been re-measured with `--online`.
 
+With M3 (`--online`), the same corpus verified with the Hungarian trusted list,
+the two Microsec roots, and online CRL and OCSP fetching, and no hand-built
+revocation store, gives in aggregate: 54 of 62 dossiers `valid` with exit
+status 0, 7 `invalid`, 1 `indeterminate`, the same outcome as the store-based
+run. Microsec answers OCSP from a central responder that is not issued by the
+queried certificate's CA, which the RFC 6960 trusted-responder model accepts
+when the responder chains to a configured anchor; 12 container timestamps
+verified and 2 did not. Container-timestamp findings never changed a verdict.
+
 ## Engineering items
 
 These are not format milestones; they can land in any order.
