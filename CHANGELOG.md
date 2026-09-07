@@ -19,6 +19,10 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
   is confirmed.
 - Added Rust-appropriate local hooks (`lefthook.yml`, pre-commit fmt+clippy,
   commit-msg Conventional Commits check) and documented the one-time install.
+- Added GitHub issue templates (`bug_report`, `feature_request`) modeled on
+  the factory set, with matching `type:*` / `source:human` repo labels, plus
+  public-intake rules in `CONTRIBUTING.md` and `AGENTS.md` (maintainers mirror
+  accepted public issues into Linear; the GitHub issue stays the public face).
 - Added `AGENTS.md` (team LAB, project openSzigno) with thin `CLAUDE.md` /
   `GEMINI.md` pointers and a documented no-worktree concurrency position.
 - Fixed the test harness passing unresolved temporary paths on macOS
