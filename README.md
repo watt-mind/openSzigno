@@ -122,6 +122,7 @@ openszigno inspect tests/fixtures/plain-base64.es3 --json
       "creation_date": "2026-01-01T00:00:00Z",
       "documents": 1,
       "namespace": "https://www.microsec.hu/ds/e-szigno30#",
+      "nested_dossiers": 0,
       "signatures_present": 0,
       "signatures_verified": false,
       "timestamps_present": 0,
@@ -158,9 +159,18 @@ openszigno extract tests/fixtures/plain-base64.es3 --output ./out --json
   "input": { "format": "microsec-es3", "bytes": 1109 },
   "data": {
     "extracted": [
-      { "bytes": 41, "document_index": 0, "filename": "hello.txt" }
+      {
+        "bytes": 41,
+        "declared_type": "text/plain",
+        "detected_type": "text",
+        "document_index": 0,
+        "dossier_path": "0",
+        "filename": "hello.txt",
+        "path": "hello.txt"
+      }
     ],
     "extracted_count": 1,
+    "nested_dossiers_extracted": 0,
     "skipped_count": 0
   },
   "warnings": [],
@@ -196,17 +206,20 @@ openszigno inspect tests/fixtures/doctype.es3 --json
 
 | Command | What it does | Writes files? |
 | --- | --- | --- |
-| `openszigno inspect FILE` | Identifies the dossier and reports title, category, namespace, XML encoding, document count, signature/timestamp presence, the active limits, and capability flags. | No |
-| `openszigno list FILE` | Lists document records in source XML order with title, creation date, MIME type, declared source size, `OBJREF`, and transform chain. | No |
-| `openszigno validate-structure FILE` | Applies the strict structural rules and reports `valid_structure` plus `cryptographic_verification_performed: false`. | No |
-| `openszigno extract FILE --output DIR` | Decodes supported payloads into `DIR`, never overwriting an existing file. | Yes |
+| `openszigno inspect FILE` | Identifies the dossier and reports title, category, namespace, XML encoding, document count, embedded-dossier count, signature/timestamp presence, the active limits, and capability flags. | No |
+| `openszigno list FILE` | Lists document records in source XML order with title, creation date, MIME type, declared source size (`null`/`?` when the dossier omits it), `OBJREF`, transform chain, and whether the document embeds a dossier. | No |
+| `openszigno validate-structure FILE` | Applies the strict structural rules and reports `valid_structure`, `conformance_warnings`, plus `cryptographic_verification_performed: false`. | No |
+| `openszigno extract FILE --output DIR` | Decodes supported payloads into `DIR`, expanding embedded dossiers into `<file>.d` subdirectories, deduplicating repeated titles, never overwriting an existing file. | Yes |
 
 Flags:
 
 | Flag | Applies to | Meaning |
 | --- | --- | --- |
 | `--json` | all commands | Emit exactly one JSON object on stdout. |
+| `--allow-namespace URI` | all commands | Also accept a dossier rooted in this namespace, in addition to the known-compatible ones. Repeatable. |
 | `-o`, `--output DIR` | `extract` | Destination directory; created if missing. |
+| `--no-recursive` | `extract` | Write an embedded dossier as a payload file instead of expanding it. |
+| `--max-depth N` | `extract` | Nesting levels of embedded dossiers to expand (default 3); values above the hard cap of 8 are clamped. |
 | `-h`, `--help` | all commands | Print help as plain text. |
 | `-V`, `--version` | top level | Print the version as plain text. |
 
@@ -269,13 +282,14 @@ the tool reports presence only and claims nothing about validity. See
 
 | Not yet supported | Planned as |
 | --- | --- |
-| Custom compatible e-dossier namespaces, for example the company-court (e-cégeljárás) dossiers. Only the default `https://www.microsec.hu/ds/e-szigno30#` namespace is accepted today. | M1 |
 | XMLDSig/XAdES signature verification, including certificate-path validation and revocation checking. | M2 |
 | Timestamp verification. | M3 |
 | Decryption of encrypted payloads. A document that declares the `encrypt` transform is reported and skipped. | M4 |
 
 Outside the current plan altogether:
 
+- e-dossier namespaces outside the documented allow-list, unless added with
+  `--allow-namespace`;
 - transform chains other than `base64` and `zip -> base64`;
 - XML encodings other than UTF-8 and ISO-8859-2;
 - DTDs, DOCTYPE declarations, and entity declarations, which are rejected by

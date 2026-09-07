@@ -29,7 +29,91 @@ Initial MVP: a bounded, agent-friendly CLI for inspecting, listing,
 structurally validating, and extracting Microsec e-Szignó `.es3` dossiers.
 This release performs no cryptographic verification of any kind.
 
-### Added
+### Added (M1: compatible namespaces and nested dossiers)
+
+- `openszigno-core`: `KNOWN_COMPATIBLE_NAMESPACES` and `ParseOptions`, so a
+  dossier rooted at `Dossier` in the default Microsec namespace or in any of
+  the four Hungarian company-court (e-cégeljárás) generations parses. Every
+  structural lookup uses the dossier's own namespace, `Dossier.namespace`
+  reports it verbatim, and an unlisted namespace is still `wrong_root` with a
+  message that never echoes the URI. `parse(bytes, &limits)` is kept as a
+  compatibility wrapper meaning "known namespaces only".
+- `openszigno-core`: `StructuralWarning` / `StructuralWarningCode` and
+  `Dossier.warnings`, reporting the two deviations real company-court dossiers
+  show instead of rejecting them: `dangling_objref` for an `OBJREF` outside
+  the dossier and document profiles that resolves to nothing, and
+  `document_without_profile` for a `Document` with no `DocumentProfile`, which
+  is skipped and not counted. Profile `OBJREF`s and duplicate IDs remain hard
+  errors.
+- `openszigno-core`: `Document.nested_dossier` for a document declaring
+  `application/nldossier2` or the `dosszie` extension, and `sniff` /
+  `DetectedType` (`pdf`, `html`, `xml`, `dossier`, `zip`, `text`, `binary`)
+  with `as_str` and `preferred_extension`, classifying a payload from a
+  bounded prefix of its bytes.
+- `openszigno-cli`: `--allow-namespace <URI>` on every command, repeatable and
+  additive on top of the known-compatible namespaces.
+- `openszigno-cli`: structural warnings surfaced by every command with their
+  core codes, and `validate-structure` data gains `conformance_warnings`.
+  `valid_structure` stays `true` whenever parsing succeeded.
+- `openszigno-cli`: `list` and `inspect` documents gain `nested_dossier`, and
+  the `dossier` object gains `nested_dossiers`.
+- `openszigno-cli`: recursive extraction of embedded dossiers, on by default,
+  with `--no-recursive` and `--max-depth <N>` (default 3, hard cap 8). A
+  nested dossier is written as a payload file *and* expanded into a
+  `<file>.d` subdirectory created relative to the parent's directory
+  descriptor. The aggregate decode budget is shared across the whole tree, all
+  names, collisions, and destination checks cover the tree before anything is
+  written, and a rollback removes every file and subdirectory the run created,
+  deepest first. A nested parse failure is the warning `nested_dossier_invalid`
+  and keeps the raw file; exceeding the depth is `nested_dossier_depth_limit`.
+- `openszigno-cli`: `extract` entries gain `dossier_path`, `path`,
+  `detected_type`, and `declared_type`, and the data gains
+  `nested_dossiers_extracted`; `skipped_count` now counts skipped documents
+  across the whole tree.
+- `openszigno-cli`: a sniffed extension is appended when the sanitised title
+  carries none and the dossier declares none.
+- Fixtures `tests/fixtures/nested-dossier.es3` and
+  `tests/fixtures/compatible-namespace.es3`, both synthetic and unsigned.
+- `openszigno-core`: the structural warning `source_size_missing`, reported
+  when a `DocumentProfile` omits `SourceSize`, and `creation_date_missing`,
+  reported when the `DossierProfile` omits `CreationDate` (the dossier
+  `creation_date` is then `null`).
+- `openszigno-cli`: the warning `output_name_deduplicated`, reported for each
+  output renamed because its name was already taken in its directory.
+
+### Changed (M1)
+
+- `SourceSize` is now optional in a `DocumentProfile`, because company-court
+  dossiers occur without it. `Document.source_size` is `Option<u64>` and
+  serialises as `null` when absent; the `sizeValue`/`sizeUnit` and
+  declared-size-limit rules are unchanged when it is present, and the
+  `source_size_mismatch` check is simply skipped when it is not. Two
+  `SourceSize` elements in one profile are `invalid_xml`. Human `list` prints
+  `?` for an unknown size.
+- Repeated output names no longer fail extraction. Real dossiers reuse
+  document titles, so a name already taken in its directory is renamed
+  deterministically by inserting `-<document index>` before the extension
+  (`ruling.txt`, then `ruling-1.txt`), with `<file>.d` subdirectories
+  following their payload file. The comparison stays NFC-normalised and
+  case-insensitive, every rename is reported as `output_name_deduplicated`,
+  and `output_name_collision` remains as the residual error for a name that
+  still collides after renaming.
+- Content sniffing no longer depends on UTF-8 validity: after the `pdf` and
+  `zip` magic checks, a payload that starts with markup is classified from the
+  ASCII markup alone, so an ISO-8859-2 encoded XML or HTML document is no
+  longer reported as `binary`. Element names are compared byte-wise.
+- The two closed-stdout CLI tests now close the read end of the pipe before
+  spawning the process, so a response small enough to fit the pipe buffer can
+  no longer make them flake.
+- A `Document` without a `DocumentProfile` no longer fails the whole dossier
+  with `missing_element`; it is skipped with a `document_without_profile`
+  warning. Two `DocumentProfile` elements in one `Document` remain
+  `invalid_xml`.
+- Human `list` output marks a document that embeds a dossier, human `extract`
+  output prints the path relative to the output root and the detected type,
+  and human `validate-structure` output prints the conformance-warning count.
+
+### Added (MVP)
 
 - `openszigno-core`: namespace-aware structural parsing of dossiers rooted at
   `Dossier` in `https://www.microsec.hu/ds/e-szigno30#`, with UTF-8 and

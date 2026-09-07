@@ -318,17 +318,19 @@ fn rejects_titles_that_hide_or_spoof_their_name() {
 }
 
 #[test]
-fn rejects_titles_that_differ_only_by_unicode_composition() {
+fn titles_that_differ_only_by_unicode_composition_are_deduplicated() {
     // U+00E9 versus "e" + U+0301: the same filename on any normalising or
-    // case-folding filesystem.
+    // case-folding filesystem, so the second one is renamed rather than
+    // silently written over the first.
     let (output, _directory, output_dir) =
         extract_titles(&["\u{e9}rte\u{301}s.txt", "e\u{301}rte\u{301}s.txt"]);
-    assert_eq!(output.status.code(), Some(5));
-    assert_eq!(
-        parse_json(&output)["errors"][0]["code"],
-        "output_name_collision"
-    );
-    assert_eq!(count_entries(&output_dir), 0, "no file may be written");
+    assert!(output.status.success());
+    let response = parse_json(&output);
+    assert_eq!(response["data"]["extracted_count"], 2);
+    assert!(warning_codes(&response).contains(&"output_name_deduplicated".to_owned()));
+    assert!(output_dir.join("\u{e9}rt\u{e9}s.txt").is_file());
+    assert!(output_dir.join("\u{e9}rt\u{e9}s-1.txt").is_file());
+    assert_eq!(count_entries(&output_dir), 2);
 }
 
 #[cfg(unix)]
@@ -359,27 +361,36 @@ fn extracted_files_are_private_to_the_user() {
     );
 }
 
-#[test]
-fn a_closed_stdout_is_an_io_failure_not_a_panic() {
+/// Run the CLI with a stdout whose read end is already closed.
+///
+/// Closing the reader *before* the process starts is what makes this
+/// deterministic: with a piped stdout that is dropped afterwards, a small
+/// response can land in the pipe buffer and succeed before the reader goes
+/// away.
+fn run_with_closed_stdout(arguments: &[&str]) -> Output {
     use std::process::Stdio;
 
+    let (reader, writer) = std::io::pipe().expect("pipe is available");
+    drop(reader);
+    Command::new(env!("CARGO_BIN_EXE_openszigno"))
+        .args(arguments)
+        .stdout(Stdio::from(writer))
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("CLI must start")
+        .wait_with_output()
+        .expect("CLI must terminate")
+}
+
+#[test]
+fn a_closed_stdout_is_an_io_failure_not_a_panic() {
     let directory = scratch();
-    // The response must be larger than a pipe buffer, so the write cannot
-    // complete before the reader goes away.
     let titles: Vec<String> = (0..250)
         .map(|index| format!("document{index:04}-{}.txt", "x".repeat(120)))
         .collect();
     let input = write_dossier(directory.path(), &titles);
 
-    let (reader, writer) = std::io::pipe().expect("pipe is available");
-    drop(reader);
-    let child = Command::new(env!("CARGO_BIN_EXE_openszigno"))
-        .args(["list", input.to_str().unwrap(), "--json"])
-        .stdout(Stdio::from(writer))
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("CLI must start");
-    let output = child.wait_with_output().expect("CLI must terminate");
+    let output = run_with_closed_stdout(&["list", input.to_str().unwrap(), "--json"]);
 
     assert_eq!(
         output.status.code(),
@@ -707,8 +718,17 @@ fn extract_reports_what_it_wrote_and_what_it_skipped() {
     assert_eq!(response["data"]["skipped_count"], 1);
     assert_eq!(
         response["data"]["extracted"],
-        serde_json::json!([{ "document_index": 0, "filename": "kept.txt", "bytes": 10 }])
+        serde_json::json!([{
+            "document_index": 0,
+            "dossier_path": "0",
+            "filename": "kept.txt",
+            "path": "kept.txt",
+            "bytes": 10,
+            "detected_type": "text",
+            "declared_type": "text/plain"
+        }])
     );
+    assert_eq!(response["data"]["nested_dossiers_extracted"], 0);
     assert_eq!(
         std::fs::read(output_dir.join("kept.txt")).unwrap(),
         b"kept bytes"
@@ -765,7 +785,7 @@ fn human_extract_output_lists_each_written_file() {
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(stdout.contains("Extracted 1 document(s).\n"));
-    assert!(stdout.contains("[0] zipped.txt (37 B)\n"));
+    assert!(stdout.contains("[0] zipped.txt (37 B, text)\n"));
     assert!(stdout.contains("Extraction is not proof of signature validity.\n"));
 }
 
@@ -1022,19 +1042,31 @@ fn a_declared_extension_is_appended_only_when_it_is_missing() {
 }
 
 #[test]
-fn two_titles_differing_only_in_case_collide() {
+fn two_titles_differing_only_in_case_are_deduplicated() {
     let documents = format!(
         "{}{}",
         base64_document(0, "Report.txt", Some("txt"), "one"),
         base64_document(1, "report.TXT", Some("txt"), "two"),
     );
     let (output, _directory, output_dir) = extract_documents(&documents);
-    assert_eq!(output.status.code(), Some(5));
+    assert!(output.status.success());
+    let response = parse_json(&output);
+    let names: Vec<&str> = response["data"]["extracted"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["filename"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["Report.txt", "report-1.TXT"]);
     assert_eq!(
-        parse_json(&output)["errors"][0]["code"],
-        "output_name_collision"
+        std::fs::read(output_dir.join("Report.txt")).unwrap(),
+        b"one"
     );
-    assert_eq!(count_entries(&output_dir), 0, "no file may be written");
+    assert_eq!(
+        std::fs::read(output_dir.join("report-1.TXT")).unwrap(),
+        b"two"
+    );
+    assert_eq!(count_entries(&output_dir), 2);
 }
 
 #[test]
@@ -1348,8 +1380,6 @@ fn an_output_directory_that_cannot_be_written_is_an_io_error() {
 
 #[test]
 fn a_closed_stdout_is_an_io_failure_for_failures_and_usage_errors_too() {
-    use std::process::Stdio;
-
     for arguments in [
         vec![
             "list",
@@ -1358,17 +1388,7 @@ fn a_closed_stdout_is_an_io_failure_for_failures_and_usage_errors_too() {
         ],
         vec!["explode", "--json"],
     ] {
-        // Close the read end before the child starts, so even a tiny
-        // response cannot slip into the pipe buffer before the reader goes.
-        let (reader, writer) = std::io::pipe().expect("pipe is available");
-        drop(reader);
-        let child = Command::new(env!("CARGO_BIN_EXE_openszigno"))
-            .args(&arguments)
-            .stdout(Stdio::from(writer))
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("CLI must start");
-        let output = child.wait_with_output().expect("CLI must terminate");
+        let output = run_with_closed_stdout(&arguments);
 
         assert_eq!(
             output.status.code(),

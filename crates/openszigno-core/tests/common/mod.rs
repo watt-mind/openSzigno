@@ -62,6 +62,23 @@ pub fn document(
     )
 }
 
+/// Render one `<es:Document>` whose profile carries no `SourceSize`.
+pub fn document_without_source_size(index: usize, title: &str, payload: &[u8]) -> String {
+    let rendered = document(
+        index,
+        title,
+        Some("txt"),
+        payload.len() as u64,
+        &["base64"],
+        &STANDARD.encode(payload),
+    );
+    let start = rendered
+        .find("<es:SourceSize")
+        .expect("the block has a source size");
+    let end = rendered[start..].find("/>").expect("the element is empty") + start + 2;
+    format!("{}{}", &rendered[..start], &rendered[end..])
+}
+
 /// A one-document dossier whose payload is `contents` under `base64`.
 pub fn base64_dossier(contents: &[u8]) -> String {
     dossier_with(&document(
@@ -135,4 +152,53 @@ pub fn forge_zip_sizes(archive: &mut [u8], compressed: Option<u32>, uncompressed
             archive[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
         }
     }
+}
+
+/// The committed nesting fixture.
+pub const NESTED: &str = include_str!("../../../../tests/fixtures/nested-dossier.es3");
+
+/// The committed compatible-namespace fixture.
+pub const COMPATIBLE: &str = include_str!("../../../../tests/fixtures/compatible-namespace.es3");
+
+/// A company-court namespace generation, for allow-list tests.
+pub const CEGELJARAS_2014: &str = "http://www.e-cegjegyzek.hu/2014/e-cegeljaras#";
+
+/// Rewrite a default-namespace dossier into another namespace.
+///
+/// The `es:` prefix keeps its spelling; only the URI it is bound to changes,
+/// which is exactly what a compatible profile does.
+pub fn in_namespace(dossier: &str, namespace: &str) -> String {
+    dossier.replace(
+        "xmlns:es=\"https://www.microsec.hu/ds/e-szigno30#\"",
+        &format!("xmlns:es=\"{namespace}\""),
+    )
+}
+
+/// One `<es:Document>` whose payload is another complete dossier.
+///
+/// The subtype and extension are caller-chosen, so a test can exercise
+/// detection by media type, by extension, or by content sniffing alone.
+pub fn nesting_document(inner: &str, subtype: &str, extension: Option<&str>) -> String {
+    let inner = inner.as_bytes();
+    let extension = extension.map_or_else(String::new, |value| format!(" extension=\"{value}\""));
+    format!(
+        concat!(
+            "<es:Document><es:DocumentProfile Id=\"DocumentProfile1\" ",
+            "OBJREF=\"DocumentObject1\"><es:Title>court</es:Title>",
+            "<es:CreationDate>2026-01-01T00:00:00Z</es:CreationDate>",
+            "<es:Format><es:MIME-Type type=\"application\" subtype=\"{subtype}\"{extension}/></es:Format>",
+            "<es:SourceSize sizeValue=\"{size}\" sizeUnit=\"B\"/>",
+            "<es:BaseTransform><es:Transform Algorithm=\"base64\"/></es:BaseTransform>",
+            "</es:DocumentProfile><ds:Object Id=\"DocumentObject1\">{payload}</ds:Object></es:Document>"
+        ),
+        subtype = subtype,
+        extension = extension,
+        size = inner.len(),
+        payload = STANDARD.encode(inner),
+    )
+}
+
+/// A one-document dossier whose only document embeds `inner`.
+pub fn nesting_dossier(inner: &str, subtype: &str, extension: Option<&str>) -> String {
+    dossier_with(&nesting_document(inner, subtype, extension))
 }
