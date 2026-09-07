@@ -4,6 +4,16 @@ all-features = true
 [advisories]
 version = 2
 yanked = "deny"
+ignore = [
+  # RUSTSEC-2023-0071 (Marvin attack): `rsa` 0.9's *private-key* operation is
+  # not constant time, leaking key material to an attacker who can observe
+  # timing. No fixed release exists. openSzigno never holds an RSA private key:
+  # creating or signing a dossier is a permanent non-goal, and the shipped code
+  # calls only the public-key verification path, which the advisory does not
+  # cover. The `rsa` signing API is used solely by the synthetic test helper
+  # under `crates/openszigno-verify/tests/`. Revisit when `rsa` 0.10 is stable.
+  { id = "RUSTSEC-2023-0071", reason = "public-key verification only; the tool never signs" },
+]
 
 [licenses]
 version = 2
