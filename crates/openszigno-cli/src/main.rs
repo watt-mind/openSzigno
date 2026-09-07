@@ -2036,11 +2036,35 @@ fn write_human_success(command: &str, response: &Response) -> io::Result<()> {
                 )?;
             }
             for signature in data["signatures"].as_array().into_iter().flatten() {
+                // A countersignature attests another signature, not the
+                // payload, so the line says which one rather than leaving a
+                // reader to infer it from the placement alone.
+                let countersigned: Vec<String> = signature["parent_signature_index"]
+                    .as_u64()
+                    .map(|index| vec![index.to_string()])
+                    .unwrap_or_else(|| {
+                        signature["countersigns"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .map(std::string::ToString::to_string)
+                            .collect()
+                    });
+                let role = if signature["role"] == Value::String("countersignature".to_owned())
+                    && !countersigned.is_empty()
+                {
+                    format!(
+                        " (countersignature of signature {})",
+                        countersigned.join(", ")
+                    )
+                } else {
+                    String::new()
+                };
                 writeln!(
                     out,
-                    "[{}] {} signature: {}",
+                    "[{}] {} signature: {}{role}",
                     signature["index"],
-                    display_json_string(&signature["scope"]),
+                    display_json_string(&signature["placement"]),
                     display_json_string(&signature["verdict"])
                 )?;
                 writeln!(
