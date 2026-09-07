@@ -188,9 +188,10 @@ jobs:
       - name: List the packaged files
         run: |
           set -euo pipefail
-          for crate in openszigno-core openszigno-verify openszigno-cli; do
-            echo "== $crate"
-            tar -tzf "target/package/${crate}-"*.crate | sort
+          shopt -s nullglob
+          for archive in target/package/*.crate; do
+            echo "== $(basename "$archive")"
+            tar -tzf "$archive" | sort
           done
 
   container:
