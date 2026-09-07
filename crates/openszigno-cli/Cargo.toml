@@ -18,8 +18,8 @@ path = "src/main.rs"
 
 [dependencies]
 clap.workspace = true
-openszigno-core = { version = "0.2.0", path = "../openszigno-core" }
-openszigno-verify = { version = "0.2.0", path = "../openszigno-verify" }
+openszigno-core = { version = "0.3.0", path = "../openszigno-core" }
+openszigno-verify = { version = "0.3.0", path = "../openszigno-verify" }
 serde.workspace = true
 serde_json.workspace = true
 unicode-normalization.workspace = true
