@@ -7,28 +7,47 @@ on:
     branches: [develop, master]
   schedule:
     # Weekly scan from the default branch (scheduled workflows only run
-    # from the default branch, which is develop here).
+    # from the default branch, which is develop here). The advisories job
+    # below exists for exactly this trigger: a new RUSTSEC advisory has to
+    # turn the repository red without anyone pushing a commit.
     - cron: "17 4 * * 1"
+  workflow_dispatch:
 
 permissions:
   contents: read
+
+concurrency:
+  group: security-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   gitleaks:
     name: Gitleaks secret scan
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+          persist-credentials: false
       # The gitleaks CLI is MIT-licensed and free; only the marketplace
-      # action requires a licence key for organisation repositories.
+      # action requires a licence key for organisation repositories. The
+      # tarball is verified against the checksums file published beside it
+      # in the same release before anything is unpacked or run.
       - name: Install gitleaks
         env:
           GITLEAKS_VERSION: 8.30.1
         run: |
-          curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
-            | tar -xz -C /usr/local/bin gitleaks
+          set -euo pipefail
+          base="https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}"
+          tarball="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          workdir=$(mktemp -d)
+          curl -sSfL -o "${workdir}/${tarball}" "${base}/${tarball}"
+          curl -sSfL -o "${workdir}/checksums.txt" \
+            "${base}/gitleaks_${GITLEAKS_VERSION}_checksums.txt"
+          (cd "$workdir" && sha256sum --ignore-missing --check checksums.txt)
+          sudo tar -xzf "${workdir}/${tarball}" -C /usr/local/bin gitleaks
+          rm -rf "$workdir"
           gitleaks version
       - name: Scan the full history
         run: gitleaks git --redact --no-banner --exit-code 1 .
@@ -36,34 +55,74 @@ jobs:
   actionlint:
     name: Workflow lint
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # Downloaded and checksum-verified by hand rather than through the
+      # upstream download-actionlint.bash helper, which pipes an unverified
+      # script into bash.
       - name: Install actionlint
+        env:
+          ACTIONLINT_VERSION: 1.7.12
         run: |
-          bash <(curl -sSfL https://raw.githubusercontent.com/rhysd/actionlint/v1.7.12/scripts/download-actionlint.bash) 1.7.12
+          set -euo pipefail
+          base="https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}"
+          tarball="actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          workdir=$(mktemp -d)
+          curl -sSfL -o "${workdir}/${tarball}" "${base}/${tarball}"
+          curl -sSfL -o "${workdir}/checksums.txt" \
+            "${base}/actionlint_${ACTIONLINT_VERSION}_checksums.txt"
+          (cd "$workdir" && sha256sum --ignore-missing --check checksums.txt)
+          tar -xzf "${workdir}/${tarball}" -C "$workdir" actionlint
+          install -m 0755 "${workdir}/actionlint" ./actionlint
+          rm -rf "$workdir"
+          ./actionlint -version
       # The dist-generated release.yml carries shellcheck info/style
       # findings we cannot edit out; keep warnings and errors fatal.
       - run: ./actionlint -color
         env:
           SHELLCHECK_OPTS: "--severity=warning"
 
+  advisories:
+    name: Advisory scan (cargo-deny)
+    # ci.yml runs the full `cargo deny check` on every push and pull
+    # request. This job exists for the weekly cron and for manual runs, so
+    # a newly published advisory against an unchanged dependency tree is
+    # caught without a commit.
+    if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          command: check advisories
+          arguments: --all-features
+
   codeql:
     name: CodeQL
-    # CodeQL Rust coverage is unconfirmed for this repo; flip the
-    # CODEQL_ENABLED repo variable to 'true' once verified.
-    if: ${{ vars.CODEQL_ENABLED == 'true' }}
+    # CodeQL Rust analysis went generally available on 2025-10-14 (GitHub
+    # changelog: "CodeQL scanning Rust and C/C++ without builds is now
+    # generally available"), with build mode `none` supported, so no cargo
+    # build runs here and the database is built from source alone.
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       contents: read
       security-events: write
     steps:
-      - uses: actions/checkout@v7
-      - uses: github/codeql-action/init@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: github/codeql-action/init@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
         with:
           languages: rust
-      - uses: dtolnay/rust-toolchain@stable
-      - run: cargo check --workspace --all-targets --locked
+          build-mode: none
       - name: Perform CodeQL Analysis
-        uses: github/codeql-action/analyze@v4
+        uses: github/codeql-action/analyze@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
         with:
           ram: 8192

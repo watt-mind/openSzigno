@@ -10,7 +10,47 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
 
 ## [Unreleased]
 
-Nothing yet.
+### Changed
+
+- The GitHub release is now uploaded and undrafted in the `announce` job
+  rather than in `host` (`github-release = "announce"` in
+  `dist-workspace.toml`). The release page becomes public only after the
+  Homebrew, crates.io, and container jobs have all succeeded, so a failed
+  publish can no longer leave a public, partially distributed release.
+- `publish-crates.yml` is idempotent. Each crate is looked up in the
+  crates.io sparse index before publishing and skipped if that exact
+  version is already there, and each publish is followed by a wait for
+  index visibility. A rerun after a partial success now completes the
+  remaining crates instead of failing on the first one. A `concurrency`
+  group keyed on the release tag serialises runs for the same release, and
+  `container.yml` gained the same guard.
+- The release smoke test runs `inspect`, `list`, `validate-structure`,
+  `extract` (byte-checking the extracted payload) and `verify` (asserting
+  exit status 7) against the packaged musl binary, instead of `inspect`
+  alone.
+- CodeQL analysis is enabled unconditionally for Rust with build mode
+  `none`, replacing the `CODEQL_ENABLED` repository-variable gate. CodeQL
+  Rust support went generally available on 2025-10-14.
+- Every third-party action in the workflows is pinned to a full commit SHA
+  with a version comment, including the ones in the dist-generated
+  `release.yml` (through `[dist.github-action-commits]`). The `gitleaks`
+  and `actionlint` binaries are verified against the checksums files
+  published in their releases before they run.
+- Every workflow job has a `timeout-minutes`, and `security.yml` cancels
+  superseded runs.
+
+### Added
+
+- `ci.yml` job `package`: `cargo package --no-verify --locked` for all
+  three crates, so a manifest a registry would reject fails on the pull
+  request instead of halfway through a release.
+- `ci.yml` job `container`: builds the release `Dockerfile` for
+  `linux/amd64` and runs the CLI subcommands inside the scratch image
+  against the synthetic fixtures.
+- `security.yml` job `advisories`: a weekly and on-demand
+  `cargo deny check advisories` run, so a newly published advisory against
+  an unchanged dependency tree turns the repository red without a commit.
+  `security.yml` also accepts `workflow_dispatch`.
 
 ## [0.2.0] - 2026-09-07
 

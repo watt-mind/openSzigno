@@ -21,12 +21,18 @@ jobs:
   lint:
     name: Format and lint
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable branch @ 2026-09-03
+        with:
+          # A commit pin makes github.action_ref a SHA, so the toolchain
+          # the action would otherwise read from the ref has to be given.
+          toolchain: stable
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo doc --workspace --no-deps --locked
@@ -36,8 +42,11 @@ jobs:
   docs:
     name: Documentation
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Lint Markdown
         run: npx --yes markdownlint-cli2@0.18.1 "**/*.md" "#target" "#refs" "#tmp" "#samples" "#node_modules"
       - name: Check relative links and anchors
@@ -46,14 +55,19 @@ jobs:
   test:
     name: Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable branch @ 2026-09-03
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - run: cargo test --workspace --locked
       - name: Smoke-test the release binary on synthetic fixtures
         shell: bash
@@ -73,29 +87,43 @@ jobs:
   msrv:
     name: Minimum supported Rust (1.88)
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.88
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@688313b0823df1393bcebb1b4add0438a6d36884 # 1.88 branch @ 2026-09-03
+        with:
+          # Keep this equal to `rust-version` in the workspace Cargo.toml.
+          toolchain: "1.88"
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - run: cargo check --workspace --all-targets --locked
 
   coverage:
     name: Coverage
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable branch @ 2026-09-03
+        with:
+          toolchain: stable
           components: llvm-tools-preview
-      - uses: taiki-e/install-action@cargo-llvm-cov
-      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@84f5ac3124727fb3d284d4d22ee9ab3654fd09a6 # v2.87.7
+        with:
+          # A commit pin makes github.action_ref a SHA, so the tool the
+          # action would otherwise read from the ref has to be given.
+          tool: cargo-llvm-cov
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - name: Measure line coverage
         run: cargo llvm-cov --workspace --locked --lcov --output-path lcov.info
       - name: Report and enforce the coverage floor
         run: |
           cargo llvm-cov report --summary-only | tee coverage-summary.txt
           cargo llvm-cov report --fail-under-lines 85
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: coverage
           retention-days: 1
@@ -106,9 +134,115 @@ jobs:
   deny:
     name: Licenses and advisories
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v7
-      - uses: EmbarkStudios/cargo-deny-action@v2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
         with:
           command: check
           arguments: --all-features
+
+  package:
+    name: Package the crates
+    # `cargo publish` builds a .crate from each manifest and rejects a
+    # manifest that a registry cannot accept. Doing it here means a broken
+    # manifest fails on the pull request instead of halfway through a
+    # release, after `openszigno-core` has already been published.
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable branch @ 2026-09-03
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      # `--no-verify` skips the build of the packaged crate. It is required
+      # here, not a shortcut: `openszigno-verify` and `openszigno-cli`
+      # depend on workspace crates whose released version is not on
+      # crates.io until the release itself publishes it, so a verifying
+      # package run cannot resolve them. What is still checked is every
+      # manifest field a registry validates and the exact file list that
+      # would be uploaded.
+      - name: Package openszigno-core
+        run: cargo package -p openszigno-core --no-verify --locked
+      - name: Package openszigno-verify
+        run: cargo package -p openszigno-verify --no-verify --locked
+      - name: Package openszigno-cli
+        run: cargo package -p openszigno-cli --no-verify --locked
+      - name: List the packaged files
+        run: |
+          set -euo pipefail
+          for crate in openszigno-core openszigno-verify openszigno-cli; do
+            echo "== $crate"
+            tar -tzf "target/package/${crate}-"*.crate | sort
+          done
+
+  container:
+    name: Container image
+    # Builds the release Dockerfile the way container.yml does, for
+    # linux/amd64 only, and runs the shipped CLI inside the scratch image
+    # against the synthetic fixtures. A Dockerfile that no longer builds,
+    # or an image whose binary cannot read a dossier, fails on the pull
+    # request rather than during a release.
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+      - name: Build the image for linux/amd64
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          platforms: linux/amd64
+          push: false
+          load: true
+          provenance: false
+          tags: openszigno:ci
+          build-args: |
+            VERSION=ci
+            REVISION=${{ github.sha }}
+      - name: Run the CLI inside the image against the fixtures
+        run: |
+          set -euo pipefail
+          mkdir -p container-out
+          # The image is `scratch` with no shell, so every command is a
+          # separate `docker run` with the entrypoint's arguments. The
+          # fixtures are mounted read-only; only the output directory is
+          # writable, and it is owned by the image's numeric UID.
+          sudo chown 65532:65532 container-out
+          run() {
+            docker run --rm \
+              -v "$PWD/tests/fixtures:/work/fixtures:ro" \
+              -v "$PWD/container-out:/work/out" \
+              openszigno:ci "$@"
+          }
+
+          run --version
+          for f in plain-base64 zip-base64; do
+            run inspect "fixtures/${f}.es3" --json > "container-${f}-inspect.json"
+            test "$(jq -r .ok "container-${f}-inspect.json")" = "true"
+            test "$(jq -r .input.format "container-${f}-inspect.json")" = "microsec-es3"
+            run list "fixtures/${f}.es3" --json > /dev/null
+            run validate-structure "fixtures/${f}.es3" --json > /dev/null
+          done
+
+          run extract fixtures/plain-base64.es3 --output out/plain --json
+          run extract fixtures/zip-base64.es3 --output out/zip --json
+          # `extract` creates its output directory as 0700 owned by the
+          # container's UID, which is the point, so the bytes are read back
+          # as root rather than by relaxing the directory.
+          test "$(sudo cat container-out/plain/hello.txt)" = "Hello from openSzigno synthetic fixture."
+          test "$(sudo cat container-out/zip/zipped.txt)" = "Zipped openSzigno synthetic fixture."
+
+          # An unsigned dossier can never be reported valid, so `verify`
+          # exits 7 (indeterminate). Anything else, 0 included, is a bug.
+          status=0
+          run verify fixtures/plain-base64.es3 --json > container-verify.json || status=$?
+          test "$status" = "7"
+          test "$(jq -r .data.verdict container-verify.json)" = "indeterminate"
