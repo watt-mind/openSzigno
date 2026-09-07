@@ -1,9 +1,9 @@
 [workspace]
-members = ["crates/openszigno-core", "crates/openszigno-cli"]
+members = ["crates/openszigno-core", "crates/openszigno-verify", "crates/openszigno-cli"]
 resolver = "2"
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/Watt-Mind/openSzigno"
@@ -12,12 +12,27 @@ rust-version = "1.88"
 [workspace.dependencies]
 base64 = "0.23.1"
 clap = { version = "4.5.48", features = ["derive"] }
+const-oid = "0.9.6"
+der = "0.7.10"
 encoding_rs = "0.8.40"
+p256 = { version = "0.13.2", default-features = false, features = ["ecdsa", "std", "pkcs8"] }
+p384 = { version = "0.13.1", default-features = false, features = ["ecdsa", "std", "pkcs8"] }
+pem-rfc7468 = { version = "0.7.0", features = ["std"] }
+rcgen = "0.14.10"
 roxmltree = "0.21.1"
+rsa = "0.9.8"
 rustix = { version = "1.1", default-features = false, features = ["fs", "std"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
+sha1 = { version = "0.10.6", features = ["oid"] }
+sha2 = { version = "0.10.9", features = ["oid"] }
 tempfile = "3.23.0"
 thiserror = "2.0.17"
 unicode-normalization = "0.1"
+x509-cert = "0.2.5"
 zip = { version = "8.1.0", default-features = false, features = ["deflate"] }
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"

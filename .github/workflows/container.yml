@@ -1,0 +1,121 @@
+name: Container
+
+# Custom `dist` publish job, wired in as `./container` in the
+# `publish-jobs` list of dist-workspace.toml. It builds the scratch-based
+# CLI image from the same source tree the release was built from and pushes
+# it to the GitHub Container Registry, inside the release workflow.
+#
+# It deliberately does not trigger on `release: published`: dist undrafts
+# the release with GITHUB_TOKEN, and an event raised by GITHUB_TOKEN never
+# triggers another workflow, so a release-event workflow would never fire.
+#
+# `workflow_dispatch` stays for reruns by hand after a failed publish.
+#
+# The permissions below can only narrow the token the caller hands over.
+# The caller grants them in .github/workflows/release.yml, from the
+# `[dist.github-custom-job-permissions]` table of dist-workspace.toml.
+
+on:
+  workflow_call:
+    inputs:
+      plan:
+        description: The dist plan, as a JSON string. Passed by release.yml.
+        required: false
+        type: string
+        default: ""
+      tag:
+        description: Release tag to publish, e.g. v0.2.0. Overrides the plan.
+        required: false
+        type: string
+        default: ""
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to publish, e.g. v0.2.0.
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  IMAGE: ghcr.io/watt-mind/openszigno
+
+jobs:
+  publish:
+    name: Build and push the GHCR image
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    steps:
+      - name: Resolve the release tag
+        id: release
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+          PLAN: ${{ inputs.plan }}
+        run: |
+          tag="$INPUT_TAG"
+          prerelease=""
+          if [ -n "$PLAN" ]; then
+            if [ -z "$tag" ]; then
+              tag=$(printf '%s' "$PLAN" | jq -r '.announcement_tag // empty')
+            fi
+            prerelease=$(printf '%s' "$PLAN" \
+              | jq -r '.announcement_is_prerelease // false')
+          fi
+          if [ -z "$tag" ]; then
+            echo "::error::no release tag: pass a tag input, or a plan carrying announcement_tag"
+            exit 1
+          fi
+          version="${tag#v}"
+          # Fall back to the tag shape when no plan says otherwise.
+          if [ -z "$prerelease" ]; then
+            case "$version" in
+              *-*) prerelease=true ;;
+              *) prerelease=false ;;
+            esac
+          fi
+          tags="${IMAGE}:${tag},${IMAGE}:${version}"
+          if [ "$prerelease" != "true" ]; then
+            tags="${tags},${IMAGE}:latest"
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tags=$tags" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          ref: ${{ steps.release.outputs.tag }}
+
+      - uses: docker/setup-qemu-action@v4
+      - uses: docker/setup-buildx-action@v4
+
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          provenance: false
+          tags: ${{ steps.release.outputs.tags }}
+          build-args: |
+            VERSION=${{ steps.release.outputs.version }}
+            REVISION=${{ github.sha }}
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true

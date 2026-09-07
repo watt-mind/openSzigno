@@ -41,7 +41,11 @@ jobs:
       - name: Install actionlint
         run: |
           bash <(curl -sSfL https://raw.githubusercontent.com/rhysd/actionlint/v1.7.12/scripts/download-actionlint.bash) 1.7.12
+      # The dist-generated release.yml carries shellcheck info/style
+      # findings we cannot edit out; keep warnings and errors fatal.
       - run: ./actionlint -color
+        env:
+          SHELLCHECK_OPTS: "--severity=warning"
 
   codeql:
     name: CodeQL

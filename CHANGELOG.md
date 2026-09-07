@@ -12,9 +12,190 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
 
 Nothing yet.
 
-## [0.1.0] - 2026-09-07
+## [0.2.0] - 2026-09-07
+
+### Added (M2 phase 1: `verify` for XMLDSig signatures)
+
+- New crate `openszigno-verify`: canonicalization, the XMLDSig core, the pinned
+  algorithm policy, and RFC 5280 certificate-path validation. Pure Rust,
+  `forbid(unsafe_code)`, no network, and no I/O except through the injected
+  `Clock`, `TrustSource`, and `RevocationSource` traits.
+- `openszigno verify FILE [--json] [--trust-store DIR] [--at RFC3339]
+  [--allow-namespace URI]`. It verifies every `ds:Signature`: canonicalization,
+  reference digests, `ds:SignatureValue`, the mandated e-dossier reference
+  scope, and the certificate path to a configured anchor.
+- **This release can never report a signature as `valid`.** Revocation and
+  timestamps are emitted as blocking `skipped` checks
+  (`revocation_not_checked`, `timestamp_not_checked`), which caps every verdict
+  at `indeterminate`. `invalid` is reachable and meaningful; `indeterminate`
+  means "nothing that was checked failed", not "trustworthy". The human output
+  says so on every run, and a test asserts it.
+- Canonical XML 1.0 and Exclusive XML Canonicalization 1.0, each with and
+  without comments, implemented in-tree behind a `C14nBackend` trait over the
+  `roxmltree` tree `openszigno-core` already builds. Canonical XML 1.1 and any
+  other algorithm are refused with `c14n_unsupported` rather than approximated.
+- Pinned algorithm policy: SHA-256/384/512 digests; RSA PKCS#1 v1.5 and RSA-PSS
+  with those digests and a modulus of at least 2048 bits; ECDSA P-256 with
+  SHA-256 and P-384 with SHA-384. SHA-1, MD5, DSA, every HMAC method, short RSA
+  keys, and a curve that does not match the named digest are rejected rather
+  than warned about (`algorithm_rejected`).
+- Transform allowlist: enveloped-signature, the four canonicalization
+  algorithms, and base64. XSLT, XPath, and XPath Filter 2.0 are refused
+  unconditionally (`transform_not_allowed`).
+- Strictly same-document reference resolution through the ID space
+  `openszigno-core` validates, so a duplicate ID stays a parse error and no
+  reference can reach the network or the filesystem (`reference_external`,
+  `reference_unresolved`).
+- Reference-scope enforcement against the e-dossier placement rules
+  (`reference_scope_complete` / `reference_scope_incomplete` /
+  `reference_scope_unknown`), the container-aware defence against XML signature
+  wrapping. Each reference's resolved location is reported as a path of element
+  names in `resolved_to`.
+- Hand-written certificate-path validation on `x509-cert`: bounded path
+  building, link signatures under the algorithm allowlist, validity at the
+  validation time, `basicConstraints`, `pathLenConstraint`, `keyUsage`, name
+  constraints, and rejection of unrecognised critical extensions. With no trust
+  store the answer is `cert_path_unknown` (status `unknown`), never
+  `untrusted`.
+- `--trust-store DIR` reading `anchors/*` and optional `intermediates/*` as PEM
+  or DER; a directory of certificates with no `anchors` subdirectory is read as
+  anchors. A file that does not parse, or a store with no anchor, is
+  `trust_store_invalid` (exit 3) rather than a silently partial store.
+- `--at <RFC3339>` sets the validation time; both the requested and the
+  effective time are reported.
+- Exit statuses `6` (at least one signature is `invalid`) and `7` (nothing
+  invalid, overall verdict `indeterminate`). A structural failure during
+  `verify` still exits 4.
+- `--allow-legacy-algorithms` admits SHA-1 digests and RSA-SHA1 signature
+  methods for diagnosis only, because Hungarian dossiers span 2007 to today.
+  They emit `algorithm_legacy_allowed` with status `unknown` rather than a
+  passed check, so the verdict stays capped at `indeterminate` and the flag can
+  only ever lower a verdict. MD5, DSA, every HMAC method, and RSA keys below
+  2048 bits stay refused whatever it is set to, and certificate-path validation
+  is not loosened at all.
+- Reference-scope matching follows what real dossiers contain: the signature's
+  own profile object is located by content and satisfied by a reference to
+  either the `ds:Object` holding an `es:SignatureProfile` (in any allowed
+  dossier namespace) or to that element itself, in either object order; and
+  `xades:SignedProperties` coverage is decided by what a reference *resolves
+  to* — the element in any recognised XAdES namespace (1.1.1, 1.2.2, 1.3.2,
+  1.4.1) or an ancestor of it — with the `Type` attribute as corroboration
+  only, since an attacker controls it. A reference that declares the
+  `SignedProperties` `Type` without resolving to one is named in the failure
+  message.
+- `references[].resolved_to` is populated by the resolution stage, so a caller
+  sees what every URI pointed at even when the run stopped at a policy failure
+  before any digest was recomputed.
+- Candidate certificates are harvested from `xades:CertificateValues` (and any
+  other `xades:EncapsulatedX509Certificate` under the signature's XAdES
+  properties, in every recognised namespace) as well as `ds:KeyInfo`, which is
+  what real dossiers need: they carry only the signer in `ds:KeyInfo` and the
+  intermediates and root in `CertificateValues`. **Only the trust store can
+  supply an anchor** — a self-signed root found inside a dossier is an
+  untrusted candidate like any other. A non-self-signed file in the trust store
+  is an extra untrusted intermediate; the `anchors/` and `intermediates/` split
+  is a convention, and the verifier classifies what it is given.
+- Each `chain` entry now reports `subject_cn`, `issuer_cn`, `serial_hex`,
+  `not_before`, `not_after`, `is_trust_anchor`, and `source` (`key_info`,
+  `certificate_values`, or `trust_store`). A `cert_path_untrusted` failure says
+  how many candidates were considered and names the issuer CN that could not be
+  chained, which is the public CA name a caller needs to add to their store.
+- The signing certificate is selected as the `ds:KeyInfo` candidate whose key
+  actually verifies `ds:SignatureValue`, not the first one listed: XMLDSig
+  imposes no order and real material lists the issuer first, which used to
+  cause a false `signature_value_invalid`. The choice is reported as
+  `signing_certificate_index`, and a total failure says how many were tried.
+- `xades:SigningTime` is extracted into `signatures[].signing_time`, normalised
+  to RFC 3339 UTC, with the new `signing_time_present` check. It is a *claim*:
+  it never becomes the validation time, which stays `--at` or the clock, and it
+  is unauthenticated until phase 2 binds it to a timestamp.
+- Same-document reference dereferencing now removes comments before transforms
+  run, as XMLDSig 4.4.3.3 requires, so a with-comments transform cannot let an
+  inserted comment change a digest.
+- Path building is bounded by a hard budget of 256 total search expansions, not
+  just by completed paths: a bag of same-named certificates that never reaches
+  an anchor used to be explored exponentially. Hitting the budget is the new
+  `cert_path_search_exhausted`, which says the tool stopped looking rather than
+  that no path exists.
+- Name constraints follow RFC 5280 section 4.2.1.10 and fail closed. URI
+  subtrees are matched against the URI's *host* rather than by substring, so
+  `https://evil.test/example.com` no longer satisfies `example.com`; dNSName
+  and rfc822Name match on label boundaries; `iPAddress` subtrees are evaluated
+  as address and mask instead of ignored; and an unimplemented constraint form,
+  an unevaluable name, or a permitted subtree of a type the certificate carries
+  but does not match are all violations.
+- Critical extensions are accepted only where their semantics are implemented:
+  `basicConstraints`, `keyUsage`, `nameConstraints`, `subjectAltName`, and
+  `extendedKeyUsage`. `certificatePolicies`, QCStatements,
+  `cRLDistributionPoints`, and `authorityInfoAccess` marked critical now fail
+  closed. A critical `extendedKeyUsage` must contain `anyExtendedKeyUsage`,
+  since no standard EKU authorises document signing.
+- A malformed extension is `cert_malformed` rather than an absent one: a
+  corrupt `keyUsage` or `nameConstraints` no longer silently vanishes.
+- Trust-store entries are parsed as X.509 certificates at load time, so one
+  malformed entry among good ones fails the whole store, matching the
+  documented all-or-nothing behaviour. The message names the entry's ordinal,
+  never the file.
+- `openszigno-core`: `XmlSource` and `id_map` are public, and `roxmltree` is
+  re-exported, so the verifier resolves references in exactly the tree the
+  structural parser saw. `parse` is refactored onto the same entry point with
+  no behaviour change.
+
+### Changed (M2)
+
+- `AGENTS.md`, `README.md`, `SECURITY.md`, `docs/architecture.md`, and
+  `docs/roadmap.md` state the new boundary: `verify` may report `invalid` but
+  never `valid`. The warning `cryptographic_verification_not_performed` keeps
+  its meaning for `inspect`, `list`, `extract`, and `validate-structure`, and
+  is deliberately not emitted by `verify`.
+- `deny.toml` ignores RUSTSEC-2023-0071 with a written reason: the Marvin-attack
+  advisory covers `rsa`'s non-constant-time *private-key* operation, no fixed
+  release exists, and openSzigno never holds an RSA private key — signing is a
+  permanent non-goal and only the public-key verification path is shipped. No
+  license allowlist change was needed; every new dependency is MIT, Apache-2.0,
+  BSD-3-Clause, ISC, Unicode-3.0, or Zlib.
+
+### Added
+
+- Distribution channels for the CLI: a shell installer, a PowerShell
+  installer, a Homebrew formula in the `watt-mind/homebrew-tap` tap,
+  `cargo binstall` support through `[package.metadata.binstall]`, and a
+  `ghcr.io/watt-mind/openszigno` container image built `FROM scratch` for
+  `linux/amd64` and `linux/arm64` with a build-provenance attestation.
+- `docs/releasing.md`, describing how a release is cut, what each workflow
+  produces, the required secrets, and how to rehearse a release with a
+  prerelease tag.
+- crates.io metadata (`readme`, `homepage`, `documentation`, `keywords`,
+  `categories`) on all three crates, and `publish-crates.yml`, which
+  publishes `openszigno-core`, `openszigno-verify`, and `openszigno-cli` in
+  that order and skips itself with a notice when `CARGO_REGISTRY_TOKEN` is
+  absent.
+
+### Changed
+
+- `.github/workflows/release.yml` is now generated by dist 0.32.0 from
+  `dist-workspace.toml` instead of being hand-written. The same five
+  targets are built; archives are now named
+  `openszigno-cli-<target>.tar.gz` (`.zip` on Windows) and unpack to a
+  directory of the same name. A pull request runs only the planning job,
+  and a custom job smoke-tests the built musl binary on a synthetic
+  fixture before anything is uploaded.
+- The crates.io and container publishes now run inside the dist release
+  workflow as custom publish jobs (`./publish-crates` and `./container`),
+  called as reusable workflows, with `workflow_dispatch` kept for a manual
+  rerun after a failed publish.
 
 ### Fixed
+
+- The crates.io and container publishes never ran for 0.1.0. GitHub reads a
+  `release`-event workflow from the tagged commit, which predated both
+  workflows, and dist undrafts the release with `GITHUB_TOKEN`, whose events
+  do not trigger any other workflow. Both publishes moved into the release
+  workflow itself.
+
+## [0.1.0] - 2026-09-07
+
+### Fixed (M1)
 
 - CI hygiene: `retention-days: 1` on all artifact uploads, and the baseline
   `concurrency` pattern in `ci.yml` so stale PR commits cancel.
@@ -201,4 +382,5 @@ This release performs no cryptographic verification of any kind.
   material is counted for reporting only.
 
 [0.1.0]: https://github.com/watt-mind/openSzigno/releases/tag/v0.1.0
-[Unreleased]: https://github.com/watt-mind/openSzigno/compare/v0.1.0...develop
+[0.2.0]: https://github.com/watt-mind/openSzigno/compare/v0.1.0...v0.2.0
+[Unreleased]: https://github.com/watt-mind/openSzigno/compare/v0.2.0...develop

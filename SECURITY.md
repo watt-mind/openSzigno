@@ -2,21 +2,30 @@
 
 ## The one thing to know first
 
-openSzigno does not verify anything cryptographic. In the current release it
-performs structural validation and bounded extraction only. It does not verify
-XMLDSig/XAdES signatures, certificate chains, revocation status, timestamps,
-or legal authenticity.
+**openSzigno can tell you a signature is broken. It cannot tell you one is
+good.**
 
-**Extraction is not verification.** A dossier that openSzigno parses, lists,
-and extracts without complaint may be entirely forged. Do not use openSzigno
-output as evidence that a document is authentic, signed, unmodified, or
-legally valid.
+`openszigno verify` checks XMLDSig canonicalization, reference digests,
+signature values, the e-dossier reference-scope rules, and certificate paths
+against a trust store you supply. A verdict of `invalid` is a real
+cryptographic finding and should be taken seriously. But revocation,
+timestamps, and the XAdES signing-certificate binding are not implemented, so
+the best verdict this release can reach is `indeterminate`, which means
+"nothing that was checked failed" — not "this is authentic". No openSzigno
+output ever says `valid`.
 
-Signature and timestamp verification and payload decryption are planned
-milestones, described in [docs/roadmap.md](docs/roadmap.md). Until that code
-exists, no openSzigno output claims or implies validity: `signatures_present`
-and `timestamps_present` are counts, and `signatures_verified` and
-`cryptographic_verification_performed` are always `false`.
+**Extraction is not verification.** `inspect`, `list`, `extract`, and
+`validate-structure` check nothing cryptographic at all; `signatures_verified`
+and `cryptographic_verification_performed` stay `false` for them. A dossier
+that openSzigno parses, lists, and extracts without complaint may be entirely
+forged.
+
+Equally, a rejection is not proof of forgery: the pinned algorithm policy
+refuses SHA-1, RSA below 2048 bits, and other weak algorithms outright, which
+will reject some genuine older dossiers.
+
+The remaining verification phases and payload decryption are planned
+milestones, described in [docs/roadmap.md](docs/roadmap.md).
 
 ## Threat model
 
@@ -42,7 +51,19 @@ openSzigno aims to guarantee that a hostile input cannot:
 - smuggle content into the machine-readable channel, since JSON mode emits
   exactly one object on stdout and all diagnostics go to stderr;
 - cause openSzigno to disclose input paths, document titles, or payload
-  content in an error message.
+  content in an error message;
+- cause `verify` to report a signature as anything better than it is: to
+  resolve a reference to a node other than the one the container semantics
+  require (signature wrapping), to reach the network or the filesystem while
+  resolving a reference, to have a weak or unlisted algorithm accepted, to have
+  a certificate path accepted without a configured anchor, or to reach a
+  `valid` verdict at all in this release.
+
+`verify --json` output can contain personal data of signers: the signing
+certificate's subject and issuer common names, its serial, and its
+fingerprint. Those are signature metadata a caller needs, so they appear in
+structured fields and never in a free-text message. Treat the output
+accordingly.
 
 The safety mechanisms behind these are documented in
 [docs/architecture.md](docs/architecture.md#parser-safety-model) and

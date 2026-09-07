@@ -1,0 +1,35 @@
+[package]
+name = "openszigno-verify"
+description = "XMLDSig canonicalization, signature, and certificate-path verification for Microsec e-Szigno dossiers"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+readme = "../../README.md"
+homepage = "https://github.com/watt-mind/openSzigno"
+documentation = "https://docs.rs/openszigno-verify"
+keywords = ["e-szigno", "es3", "xmldsig", "signature", "microsec"]
+categories = ["cryptography", "parser-implementations"]
+
+[dependencies]
+base64.workspace = true
+const-oid.workspace = true
+der.workspace = true
+openszigno-core = { version = "0.2.0", path = "../openszigno-core" }
+p256.workspace = true
+p384.workspace = true
+pem-rfc7468.workspace = true
+rsa.workspace = true
+serde.workspace = true
+# SHA-1 exists only so a legacy digest can be recomputed under
+# `--allow-legacy-algorithms`; it is never accepted by default.
+sha1.workspace = true
+sha2.workspace = true
+x509-cert.workspace = true
+
+[dev-dependencies]
+# `x509-parser` is needed so the test helper can issue a certificate for a key
+# the `ring` backend refuses to load, which is how the RSA-1024 case is built.
+rcgen = { workspace = true, features = ["x509-parser"] }
+serde_json.workspace = true

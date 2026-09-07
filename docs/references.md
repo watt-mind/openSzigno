@@ -118,11 +118,27 @@ committed to git except this index file itself.
 
 ## Summary of gaps and failures (nothing fabricated)
 
-- **`es3/`**: no PDF companion to the English `edossier-spec.html` page was found (it links out only to the XSD and to an unrelated NMHH PDF); no older/other XSD versions exist at `microsec.hu/ds/` besides `e-szigno30.xsd` (all guesses 404); `www.e-szigno.hu/?lap=edossier30` is a dead CMS link.
-- **`cegeljaras/`**: the raw namespace URIs (`http://www.e-cegjegyzek.hu/2007/e-cegeljaras#` etc.) are not fetchable documents by design (HTTP 400) — the actual schema documents live under `e-cegjegyzek.hu/schema/<year>/e-cegeljaras<year>.xsd` and were all four obtained successfully (2007, 2009, 2012, 2014), plus a bonus 2023 version.
-- **`xmldsig/`**: no standalone official W3C Canonical XML test-vector package could be located; the REC's own inline examples are the only official source found.
-- **`trust/`**: the `e-szigno.hu/ca-certificates` page is a client-rendered SPA shell with no certificate links in the static HTML; the two root certificates were instead obtained directly from their stable, documented `.crt` URLs and their SHA-256 fingerprints were computed and recorded independently (not just re-copied from a webpage) for verification.
-- **`other/`**: the canonical MEK library URL for the e-signature handbook failed outright (HTTP/2 stream errors, then empty replies) from this environment; a university-hosted mirror of the same PDF was used instead and is flagged as such in the table.
+- **`es3/`**: no PDF companion to the English `edossier-spec.html` page was
+  found (it links out only to the XSD and to an unrelated NMHH PDF); no
+  older/other XSD versions exist at `microsec.hu/ds/` besides `e-szigno30.xsd`
+  (all guesses 404); `www.e-szigno.hu/?lap=edossier30` is a dead CMS link.
+- **`cegeljaras/`**: the raw namespace URIs
+  (`http://www.e-cegjegyzek.hu/2007/e-cegeljaras#` etc.) are not fetchable
+  documents by design (HTTP 400) — the actual schema documents live under
+  `e-cegjegyzek.hu/schema/<year>/e-cegeljaras<year>.xsd` and were all four
+  obtained successfully (2007, 2009, 2012, 2014), plus a bonus 2023 version.
+- **`xmldsig/`**: no standalone official W3C Canonical XML test-vector package
+  could be located; the REC's own inline examples are the only official source
+  found.
+- **`trust/`**: the `e-szigno.hu/ca-certificates` page is a client-rendered SPA
+  shell with no certificate links in the static HTML; the two root certificates
+  were instead obtained directly from their stable, documented `.crt` URLs and
+  their SHA-256 fingerprints were computed and recorded independently (not just
+  re-copied from a webpage) for verification.
+- **`other/`**: the canonical MEK library URL for the e-signature handbook
+  failed outright (HTTP/2 stream errors, then empty replies) from this
+  environment; a university-hosted mirror of the same PDF was used instead and
+  is flagged as such in the table.
 
 ## Verification method used for every download
 
