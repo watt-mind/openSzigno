@@ -35,8 +35,11 @@ pr-run-mode = "plan"
 tap = "watt-mind/homebrew-tap"
 # Formula name in the tap, so the command is `brew install watt-mind/tap/openszigno`
 formula = "openszigno"
-# Publish the Homebrew formula after the artifacts are hosted
-publish-jobs = ["homebrew"]
+# Publish the Homebrew formula, the crates, and the container image after the
+# artifacts are hosted. The two custom jobs run inside this workflow on
+# purpose: dist undrafts the release with GITHUB_TOKEN, and a release event
+# raised by GITHUB_TOKEN does not trigger any other workflow.
+publish-jobs = ["homebrew", "./publish-crates", "./container"]
 # Do not create the GitHub Release: a maintainer drafts it first and dist
 # undrafts it once every job has succeeded. dist 0.32 has no option that
 # leaves a release drafted at the end of a run.
@@ -44,3 +47,11 @@ create-release = false
 # Smoke-test the built binary on a synthetic fixture before anything is
 # published.
 global-artifacts-jobs = ["./smoke-test"]
+
+# The permissions the release workflow grants each custom publish job. A
+# reusable workflow can only narrow the token it is called with, so the
+# container job's `attestations: write` and both jobs' `contents: read` have
+# to be granted here, at the caller.
+[dist.github-custom-job-permissions]
+publish-crates = { contents = "read" }
+container = { contents = "read", packages = "write", "id-token" = "write", attestations = "write" }

@@ -6,12 +6,17 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
+readme = "../../README.md"
+homepage = "https://github.com/watt-mind/openSzigno"
+documentation = "https://docs.rs/openszigno-verify"
+keywords = ["e-szigno", "es3", "xmldsig", "signature", "microsec"]
+categories = ["cryptography", "parser-implementations"]
 
 [dependencies]
 base64.workspace = true
 const-oid.workspace = true
 der.workspace = true
-openszigno-core = { version = "0.1.0", path = "../openszigno-core" }
+openszigno-core = { version = "0.2.0", path = "../openszigno-core" }
 p256.workspace = true
 p384.workspace = true
 pem-rfc7468.workspace = true

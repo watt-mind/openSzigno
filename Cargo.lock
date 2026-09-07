@@ -687,7 +687,7 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
 name = "openszigno-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "clap",
  "openszigno-core",
@@ -701,7 +701,7 @@ dependencies = [
 
 [[package]]
 name = "openszigno-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "base64",
  "encoding_rs",
@@ -715,7 +715,7 @@ dependencies = [
 
 [[package]]
 name = "openszigno-verify"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "base64",
  "const-oid",
