@@ -10,7 +10,150 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
 
 ## [Unreleased]
 
-Nothing yet.
+### Added (M3: container timestamps, online revocation, trusted-list identities)
+
+- **`--online` revocation fetching**, implemented in the CLI. The
+  `openszigno-verify` crate stays network-free and structurally cannot open a
+  socket; everything fetched reaches it through the same `RevocationSource` a
+  `--revocation-store` file arrives through, and is judged by exactly the same
+  offline rules. CRLs come from the certificate's own `cRLDistributionPoints`
+  and OCSP responses from its `authorityInfoAccess` responders — never from a
+  URL in the dossier's XML — with the scheme exactly as published, a 5 s
+  connect and 20 s total timeout, 16 MiB and 64 KiB size caps, at most three
+  redirects and **none across hosts**, and no proxy from the environment unless
+  `--online-proxy URL` names one. OCSP requests are RFC 6960 `OCSPRequest`
+  bodies posted as `application/ocsp-request`, with a SHA-256 `certID` and no
+  nonce. Nothing is fetched for a certificate the caller's own material already
+  covers. New sources `online_crl` and `online_ocsp` in
+  `chain[].revocation.source`; `policy.revocation` reads `online`. A failed
+  fetch is one `revocation_status_unknown` (blocking) naming the URL and the
+  failure class — `timeout`, `http status <code>`, `too large`, `redirect`,
+  `invalid`, `transport` — never a panic and never a hang.
+- **`--online-cache DIR`** writes every fetched artefact into a
+  `--revocation-store` shaped directory, named by the SHA-256 of its own bytes,
+  so a later run with `--revocation-store DIR` and no `--online` reproduces the
+  result with no network at all.
+- **Container `es:TimeStamp` validation**, dossier-level and document-level.
+  Each `xades:Include` is resolved on the parser's ID space, the
+  reference-scope rule for timestamps is enforced (a dossier timestamp must
+  cover `es:DossierProfile` and `es:Documents`; a document timestamp its
+  `es:DocumentProfile` and the payload `ds:Object`), each included element is
+  canonicalized with the declared method and the results concatenated in
+  `Include` order per XAdES 7.1.4.3.1, and the token is verified by the
+  existing RFC 3161 machinery including the TSA path, its revocation, and
+  trust. New codes `dossier_timestamp_verified` (`info`),
+  `dossier_timestamp_invalid` (`failed`), `dossier_timestamp_not_checked`
+  (`info`) and the matching `document_timestamp_*` set. These never change a
+  signature's checks or verdict; an `_invalid` lowers the **dossier** verdict,
+  because an imprint that does not match is evidence the container was altered
+  after it was stamped.
+- **New JSON.** `data.timestamps[]` holds one entry per container
+  `es:TimeStamp` with its `kind`, `document_index`, token details and own
+  `checks`; `data.counts.timestamps_verified` counts the ones that verified
+  completely. `signatures[].timestamps[]` entries gain a `document_index`
+  field, always `null` for a signature timestamp. `schema_version` stays `1`:
+  every addition is additive and no existing field changed meaning.
+- **Trusted lists: the identity forms a real national list actually uses.**
+  `X509SKI` and `X509SubjectName` service digital identities are now read. They
+  contribute **no trust anchor** — an identity that names a certificate without
+  supplying one cannot grant trust — but they can decide `qualified` over a
+  chain some other anchor has already validated. An SKI is matched against a
+  certificate's `subjectKeyIdentifier`; a subject name is matched attribute by
+  attribute against the certificate's subject, exactly as written, with only
+  the ASN.1 string tag dropped because an RFC 4514 string cannot express it. No
+  case folding and no RFC 4518 preparation. Both are documented as weaker than
+  a certificate identity.
+- **Pre-eIDAS trusted-list statuses.** `undersupervision` and `accredited`
+  count as granted at a validation time **before 2016-07-01**, when eIDAS began
+  to apply, and never after it. The status that was honoured is named in the
+  `certificate_qualified` message, so an eIDAS `granted` and a historical
+  `accredited` are never reported as the same statement. This is what lets a
+  pre-2016 Hungarian signature report a qualified status instead of
+  `certificate_not_qualified` for a reason unrelated to the signature.
+- `ServiceName` now prefers the `xml:lang="en"` entry over document order.
+- `ureq` 3.4 (MIT OR Apache-2.0) with rustls, in the CLI only, for `--online`.
+  Its `gzip` and platform-proxy features are off. This pulls in `webpki-roots`,
+  whose licence `CDLA-Permissive-2.0` was added to `deny.toml`: it is Mozilla's
+  CA root *data*, permissive, with no reciprocity or source-disclosure
+  obligation.
+
+### Changed (M3)
+
+- **OCSP responders are now authorised under all three RFC 6960 models.**
+  Alongside the issuing CA answering for itself and a responder that CA
+  delegated to, a **trusted responder** (section 2.2) is accepted: one whose
+  certificate carries `id-kp-OCSPSigning` and whose own path validates to a
+  configured trust anchor — trust store or trusted list — at the response's
+  `producedAt`, even though the queried certificate's issuer never delegated to
+  it. Central responders are how real national hierarchies are built: one
+  responder answers for every CA the operator runs, issued by a sibling CA, and
+  a verifier implementing only the delegation model rejected every one of those
+  answers. The authority is the caller's own trust material, checked by a full
+  path validation, so this can never admit a response whose signer the operator
+  had not already chosen to trust; the issuer and delegated models keep
+  precedence. Which model applied is reported in
+  `chain[].revocation.responder_model` (`issuer`, `delegated`, `trusted`), and
+  the new `ocsp_responder_trusted` (`info`) check names the third one when it
+  is used.
+- **A refused source no longer ends the search.** An OCSP response no model
+  authorises, a delta CRL, an out-of-scope CRL — any source that is found and
+  refused — is recorded and the remaining tiers are tried, so an unusable OCSP
+  answer followed by a good CRL now ends as `good` from the CRL.
+  `revocation_data_invalid` and `revocation_status_unknown` are reported only
+  after every tier has been exhausted. The refusal stays visible: the new
+  `chain[].revocation.detail` field says what was refused, why, and which
+  source answered instead, and the path summary repeats it. The
+  `revocation_data_invalid` message now names the cause instead of listing
+  every possible one.
+- **A failed `--online` fetch is now `online_fetch_failed` (`info`), not a
+  blocking dossier-level `revocation_status_unknown`.** A failed fetch is a
+  fact about the network, not about a certificate; whether the missing data
+  mattered is answered by the chain that needed it, which still reports
+  `revocation_status_unknown` and still blocks. Emitting a second blocking
+  check per URL added nothing there and did harm: a fetch attempted for a
+  certificate no verdict depended on — an over-fetch, or the timestamp
+  authority of a container `es:TimeStamp` — dragged dossiers whose every
+  signature was `valid` down to `indeterminate` and exit `7`.
+- **Container-timestamp findings never block the dossier verdict.** Revocation,
+  path and trust findings about a container `es:TimeStamp`'s timestamp
+  authority live on that timestamp's entry in `data.timestamps[]`, with its own
+  `checks` and `verified: false`, and surface at the dossier level only as
+  `dossier_timestamp_not_checked` / `document_timestamp_not_checked` (`info`)
+  naming the cause. The aggregation is now stated explicitly in
+  `docs/architecture.md`: `valid` when every signature is `valid`, `invalid`
+  when any signature is — or when a container timestamp's imprint or token
+  contradicts the container — and `indeterminate` otherwise.
+- The `--online` OCSP `POST` now sets `Content-Length` explicitly. `ureq` sent
+  a sized, unchunked body already — the request is passed as a slice — but a
+  request whose end the peer has to infer is the shape that behaves
+  differently on different platforms, and a responder that does not implement
+  chunked requests answers one with a `400`. The test suite now asserts at the
+  server that exactly one `Content-Length` arrives, that nothing is chunked,
+  and that the whole body is read before the answer.
+- Under `--online`, a fetched OCSP response no longer stops the CRL from being
+  fetched. Obtaining a response is not the same as being answered by one, so
+  coverage is re-tested with what was just fetched before the CRL is skipped.
+- `revocation_status_unknown` is now also emitted per failed `--online` fetch,
+  with the URL and failure class in the message. It remains `unknown` and
+  blocking either way.
+- `revocation_policy` reports `online` for a run given `--online`.
+
+### Removed (M3)
+
+- The `dossier_timestamp_not_validated` check code, which existed only to say
+  that container timestamps were not validated yet. They are now validated, and
+  the `dossier_timestamp_*` / `document_timestamp_*` codes above replace it.
+
+### Not implemented, deliberately (M3)
+
+- `xades:ArchiveTimeStamp` verification. It remains `archive_timestamp_present`
+  (`info`). The XAdES 1.4.1 clause 8.2.1 imprint is under-specified in ways
+  only interoperability evidence can settle, this project has no consented
+  real-world B-LTA material to check an implementation against, and a synthetic
+  fixture generated by the same code that verifies it would prove only that the
+  implementation agrees with itself. No `poe_times` are recorded and an archive
+  timestamp does not extend the validation-time reasoning. The reasoning is in
+  `docs/architecture.md`, "Archive timestamps".
 
 ## [0.3.0] - 2026-09-07
 

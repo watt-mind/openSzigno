@@ -22,7 +22,9 @@ openszigno-core = { version = "0.3.0", path = "../openszigno-core" }
 openszigno-verify = { version = "0.3.0", path = "../openszigno-verify" }
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 unicode-normalization.workspace = true
+ureq.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 rustix.workspace = true
@@ -41,7 +43,6 @@ p384.workspace = true
 rcgen = { workspace = true, features = ["x509-parser"] }
 rsa.workspace = true
 sha1.workspace = true
-sha2.workspace = true
 tempfile.workspace = true
 x509-cert.workspace = true
 x509-ocsp = "0.2.1"

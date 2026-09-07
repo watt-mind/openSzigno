@@ -9,11 +9,12 @@
 mod common;
 
 use common::{
-    CertSpec, DossierSpec, STATUS_GRANTED, STATUS_UNDER_SUPERVISION, STATUS_WITHDRAWN,
-    SVCTYPE_TSA_QTST, SigSpec, SigningCertificateSpec, TestKey, TlService, TrustListSpec, build,
-    build_trust_list, document_signature, issued_by, keys, qc_statements_extension, rsa_key,
-    self_signed,
+    CertSpec, DossierSpec, STATUS_ACCREDITED, STATUS_GRANTED, STATUS_UNDER_SUPERVISION,
+    STATUS_WITHDRAWN, SVCTYPE_TSA_QTST, SigSpec, SigningCertificateSpec, TestKey, TlService,
+    TrustListSpec, build, build_trust_list, document_signature, issued_by, keys,
+    qc_statements_extension, rsa_key, self_signed,
 };
+use openszigno_verify::certs::{CertificateSource, ParsedCertificate};
 use openszigno_verify::codes::{CheckCode, CheckStatus};
 use openszigno_verify::{
     FixedClock, MemoryRevocationStore, MemoryTrustStore, RoxmltreeC14n, TrustAnchorOrigin,
@@ -87,6 +88,7 @@ fn run_with_list(xml: &str, list: &str, signer: Option<&[u8]>, time: &str) -> Ve
         trust.push_check(check);
     }
     trust.extend_anchors(loaded.anchors);
+    trust.extend_services(loaded.service_identities);
 
     let revocation = MemoryRevocationStore::default();
     let clock = FixedClock(parse_rfc3339(time).expect("the fixed time parses"));
@@ -256,7 +258,7 @@ fn a_withdrawn_service_is_not_qualified_afterwards() {
 /// A pre-eIDAS status this build refuses to translate is not "granted", and
 /// saying so is more honest than guessing which historical status meant what.
 #[test]
-fn a_pre_eidas_status_is_not_treated_as_granted() {
+fn a_pre_eidas_status_is_not_granted_after_eidas_applied() {
     let pki = pki((2014, 1, 1), &[]);
     let mut service = TlService::ca_qc("openSzigno Test Qualified CA", pki.root_der.clone());
     service.status = STATUS_UNDER_SUPERVISION.to_owned();
@@ -369,6 +371,7 @@ fn a_chain_no_listed_service_covers_is_not_qualified() {
     let loaded = openszigno_verify::trustlist::load(list.as_bytes(), &[], &RoxmltreeC14n)
         .expect("the list loads");
     trust.extend_anchors(loaded.anchors);
+    trust.extend_services(loaded.service_identities);
 
     let revocation = MemoryRevocationStore::default();
     let backend = RoxmltreeC14n;
@@ -743,6 +746,7 @@ fn run_store_and_list(xml: &str, root_der: Vec<u8>, list: &str, time: &str) -> V
         trust.push_check(check);
     }
     trust.extend_anchors(loaded.anchors);
+    trust.extend_services(loaded.service_identities);
 
     let revocation = MemoryRevocationStore::default();
     let clock = FixedClock(parse_rfc3339(time).expect("the fixed time parses"));
@@ -955,5 +959,240 @@ fn the_lotl_pointers_verify_a_national_list() {
             .iter()
             .any(|check| check.code == CheckCode::TrustListSignatureInvalid),
         "a list signed by a certificate no pointer names must not verify"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// M3: the identity forms a real list uses beyond `X509Certificate`
+// ---------------------------------------------------------------------------
+
+/// A PKI whose root and signer are both valid from 2009, so a pre-eIDAS
+/// validation time can be used without the chain failing on validity.
+fn historic_pki() -> Pki {
+    let root_key = rsa_key(keys::ROOT_RSA2048);
+    let signer_key = rsa_key(keys::SIGNER_RSA2048);
+    let mut root_spec = CertSpec::ca(
+        "openSzigno Test Qualified CA",
+        BasicConstraints::Unconstrained,
+    );
+    root_spec.not_before = (2009, 1, 1);
+    let root = self_signed(&root_spec, &root_key);
+    let mut signer_spec = CertSpec::signer("openSzigno Test Signer");
+    signer_spec.not_before = (2009, 1, 1);
+    let signer = issued_by(&signer_spec, &signer_key, &root, &root_key);
+    let tl_signer = self_signed(
+        &CertSpec::signer("openSzigno Test Trusted List Signer"),
+        &rsa_key(keys::SECOND_RSA2048),
+    );
+    Pki {
+        root_der: root.der,
+        signer_der: signer.der,
+        signer_key,
+        tl_signer_der: tl_signer.der,
+    }
+}
+
+/// One certificate's subject as the RFC 4514 string a list operator would
+/// write into an `X509SubjectName` identity.
+fn subject_name_of(der: &[u8]) -> String {
+    ParsedCertificate::from_der(der, CertificateSource::TrustStore)
+        .expect("the certificate parses")
+        .certificate
+        .tbs_certificate
+        .subject
+        .to_string()
+}
+
+/// The raw `subjectKeyIdentifier` of one certificate.
+fn ski_of(der: &[u8]) -> Vec<u8> {
+    ParsedCertificate::from_der(der, CertificateSource::TrustStore)
+        .expect("the certificate parses")
+        .subject_key_identifier()
+        .expect("rcgen writes a subjectKeyIdentifier")
+}
+
+/// A service whose only digital identity is an `X509SKI` supplies no anchor —
+/// it names a certificate without carrying one — but it can still say that a
+/// chain some other anchor validated is covered by a granted CA/QC service.
+#[test]
+fn an_x509_ski_identity_qualifies_a_chain_it_names() {
+    let pki = hierarchy(&["0.4.0.1862.1.1"]);
+    let list = build_trust_list(&TrustListSpec::new(vec![TlService::by_ski(
+        "Qualified openSzigno CA 2009",
+        ski_of(&pki.intermediate_der),
+    )]));
+    let report = run_store_and_list(&hierarchy_dossier(&pki), pki.root_der.clone(), &list, AT);
+
+    assert_check(&report, CheckCode::CertificateQualified, CheckStatus::Info);
+    assert_eq!(report.signatures[0].qualified, Some(true));
+    // The report says *how* the determination was reached, because an SKI
+    // match is weaker evidence than a certificate identity.
+    let check = report.signatures[0]
+        .checks
+        .iter()
+        .find(|check| check.code == CheckCode::CertificateQualified)
+        .expect("the qualified check is present");
+    assert!(check.message.contains("X509SKI"), "{}", check.message);
+    // The anchor is still the store's root: an SKI grants nothing.
+    assert_eq!(
+        report.signatures[0]
+            .chain
+            .last()
+            .and_then(|entry| entry.trust_anchor_origin),
+        Some(TrustAnchorOrigin::TrustStore)
+    );
+}
+
+/// An SKI that belongs to no certificate in the chain decides nothing.
+#[test]
+fn an_x509_ski_identity_that_names_nothing_does_not_qualify() {
+    let pki = hierarchy(&["0.4.0.1862.1.1"]);
+    let list = build_trust_list(&TrustListSpec::new(vec![TlService::by_ski(
+        "Some Other CA",
+        vec![0xaa; 20],
+    )]));
+    let report = run_store_and_list(&hierarchy_dossier(&pki), pki.root_der.clone(), &list, AT);
+
+    assert_check(
+        &report,
+        CheckCode::CertificateNotQualified,
+        CheckStatus::Info,
+    );
+    assert_eq!(report.signatures[0].qualified, Some(false));
+}
+
+/// An `X509SubjectName` identity is matched by DER-exact subject, never by
+/// string comparison.
+#[test]
+fn an_x509_subject_name_identity_qualifies_a_chain_it_names() {
+    let pki = hierarchy(&["0.4.0.1862.1.1"]);
+    let list = build_trust_list(&TrustListSpec::new(vec![TlService::by_subject_name(
+        "Qualified openSzigno CA 2009",
+        &subject_name_of(&pki.intermediate_der),
+    )]));
+    let report = run_store_and_list(&hierarchy_dossier(&pki), pki.root_der.clone(), &list, AT);
+
+    assert_check(&report, CheckCode::CertificateQualified, CheckStatus::Info);
+    assert_eq!(report.signatures[0].qualified, Some(true));
+    let check = report.signatures[0]
+        .checks
+        .iter()
+        .find(|check| check.code == CheckCode::CertificateQualified)
+        .expect("the qualified check is present");
+    assert!(
+        check.message.contains("X509SubjectName"),
+        "{}",
+        check.message
+    );
+}
+
+/// A subject name that differs in any way — here one attribute value — does
+/// not match, because the comparison is on DER and nothing is normalised.
+#[test]
+fn a_subject_name_that_is_not_der_identical_does_not_qualify() {
+    let pki = hierarchy(&["0.4.0.1862.1.1"]);
+    let list = build_trust_list(&TrustListSpec::new(vec![TlService::by_subject_name(
+        "Nearly Right",
+        &subject_name_of(&pki.intermediate_der).replace("2009", "2010"),
+    )]));
+    let report = run_store_and_list(&hierarchy_dossier(&pki), pki.root_der.clone(), &list, AT);
+
+    assert_eq!(report.signatures[0].qualified, Some(false));
+}
+
+// ---------------------------------------------------------------------------
+// M3: the pre-eIDAS statuses, honoured for their historical window only
+// ---------------------------------------------------------------------------
+
+/// A signature made in 2014 under a supervised CA was made under exactly what
+/// a member state published for a qualified issuer at the time. The status is
+/// honoured at a validation time before eIDAS applied, and the report names it.
+#[test]
+fn under_supervision_is_granted_before_eidas_applied() {
+    let pki = historic_pki();
+    let mut service = TlService::ca_qc("openSzigno Test Qualified CA", pki.root_der.clone());
+    service.status = STATUS_UNDER_SUPERVISION.to_owned();
+    service.status_starting_time = "2009-01-01T00:00:00Z".to_owned();
+    let list = build_trust_list(&TrustListSpec::new(vec![service]));
+    let xml = dossier(signature(&pki), &pki.signer_key);
+
+    let report = run_with_list(&xml, &list, None, "2014-01-01T00:00:00Z");
+    assert_eq!(report.signatures[0].qualified, Some(true));
+    let check = report.signatures[0]
+        .checks
+        .iter()
+        .find(|check| check.code == CheckCode::CertificateQualified)
+        .expect("the qualified check is present");
+    assert!(
+        check.message.contains("undersupervision"),
+        "the status that was honoured is named: {}",
+        check.message
+    );
+}
+
+/// The same for `accredited`, the other pre-eIDAS vocabulary entry.
+#[test]
+fn accredited_is_granted_before_eidas_applied() {
+    let pki = historic_pki();
+    let mut service = TlService::ca_qc("openSzigno Test Qualified CA", pki.root_der.clone());
+    service.status = STATUS_ACCREDITED.to_owned();
+    service.status_starting_time = "2009-01-01T00:00:00Z".to_owned();
+    let list = build_trust_list(&TrustListSpec::new(vec![service]));
+    let xml = dossier(signature(&pki), &pki.signer_key);
+
+    let report = run_with_list(&xml, &list, None, "2014-01-01T00:00:00Z");
+    assert_eq!(report.signatures[0].qualified, Some(true));
+    let check = report.signatures[0]
+        .checks
+        .iter()
+        .find(|check| check.code == CheckCode::CertificateQualified)
+        .expect("the qualified check is present");
+    assert!(check.message.contains("accredited"), "{}", check.message);
+}
+
+/// A service left at a pre-eIDAS status once the eIDAS vocabulary applied has
+/// not been granted under it, so the window closes on 2016-07-01.
+#[test]
+fn a_pre_eidas_status_stops_being_granted_when_eidas_applies() {
+    let pki = historic_pki();
+    let mut service = TlService::ca_qc("openSzigno Test Qualified CA", pki.root_der.clone());
+    service.status = STATUS_ACCREDITED.to_owned();
+    service.status_starting_time = "2009-01-01T00:00:00Z".to_owned();
+    let list = build_trust_list(&TrustListSpec::new(vec![service]));
+    let xml = dossier(signature(&pki), &pki.signer_key);
+
+    let before = run_with_list(&xml, &list, None, "2016-06-30T00:00:00Z");
+    assert_eq!(before.signatures[0].qualified, Some(true));
+    let after = run_with_list(&xml, &list, None, "2016-07-01T00:00:00Z");
+    assert_eq!(after.signatures[0].qualified, Some(false));
+}
+
+// ---------------------------------------------------------------------------
+// M3: service names
+// ---------------------------------------------------------------------------
+
+/// A national list writes its own language first. The English name is the one
+/// worth reporting to an operator, so it wins over document order.
+#[test]
+fn the_english_service_name_is_preferred() {
+    let pki = pki((2019, 1, 1), &["0.4.0.1862.1.1"]);
+    let mut service = TlService::ca_qc("Qualified Certification Authority", pki.root_der.clone());
+    service.extra_names = vec![
+        (
+            "hu".to_owned(),
+            "Minositett Hitelesitesszolgaltato".to_owned(),
+        ),
+        (
+            "de".to_owned(),
+            "Qualifizierte Zertifizierungsstelle".to_owned(),
+        ),
+    ];
+    let list = build_trust_list(&TrustListSpec::new(vec![service]));
+    let xml = dossier(signature(&pki), &pki.signer_key);
+
+    let report = run_with_list(&xml, &list, None, AT);
+    assert_eq!(
+        report.signatures[0].qualified_service.as_deref(),
+        Some("Qualified Certification Authority")
     );
 }

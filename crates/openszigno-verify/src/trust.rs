@@ -62,6 +62,51 @@ pub enum TrustAnchorOrigin {
     TrustList,
 }
 
+/// How a trusted list names the digital identity of one service.
+///
+/// Only [`Certificate`](ServiceIdentity::Certificate) can become a trust
+/// anchor, because only it supplies a key. The other two forms *identify* a
+/// certificate without carrying one, so they can corroborate a chain that was
+/// already validated against some other anchor, and nothing more. Both are
+/// deliberately weaker than a certificate identity and are documented as such:
+/// a subject key identifier is an unauthenticated 20-odd bytes a CA chose, and
+/// a subject name is a name. Neither is proof of possession of anything.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ServiceIdentity {
+    /// `X509Certificate`: the DER of the service's certificate.
+    Certificate(Vec<u8>),
+    /// `X509SKI`: the raw bytes of the certificate's `subjectKeyIdentifier`.
+    SubjectKeyIdentifier(Vec<u8>),
+    /// `X509SubjectName`: the comparison key
+    /// [`crate::certs::name_key`] defines — every attribute type and value, in
+    /// order, exactly as written, with only the ASN.1 string tag left out
+    /// because an RFC 4514 string cannot express it. No case folding and no
+    /// RFC 4518 preparation.
+    SubjectName(Vec<u8>),
+}
+
+impl ServiceIdentity {
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Certificate(_) => "x509_certificate",
+            Self::SubjectKeyIdentifier(_) => "x509_ski",
+            Self::SubjectName(_) => "x509_subject_name",
+        }
+    }
+}
+
+/// One trusted-list service digital identity, with the service it belongs to.
+///
+/// Every identity a list records is offered here, whether or not it also
+/// became a trust anchor, because the qualified determination is made over the
+/// whole validated chain: in a real list the CA/QC identities are the
+/// *issuing* CAs, which are intermediates.
+#[derive(Clone, Debug)]
+pub struct TrustServiceIdentity {
+    pub identity: ServiceIdentity,
+    pub service: crate::trustlist::ServiceRecord,
+}
+
 /// One trust anchor and everything the caller knows about why it is trusted.
 #[derive(Clone, Debug)]
 pub struct TrustAnchor {
@@ -98,6 +143,12 @@ pub trait TrustSource {
     fn configured(&self) -> bool {
         true
     }
+    /// Every trusted-list service digital identity, in any of the three
+    /// forms, whether or not it also became an anchor. These decide qualified
+    /// status; they never grant trust.
+    fn services(&self) -> &[TrustServiceIdentity] {
+        &[]
+    }
     /// Checks the trust material itself produced while it was loaded — a
     /// trusted list whose own signature could not be verified, say. They are
     /// reported at the dossier level, because they are properties of the run
@@ -131,6 +182,7 @@ impl TrustSource for NoTrust {
 pub struct MemoryTrustStore {
     anchors: Vec<TrustAnchor>,
     intermediates: Vec<Vec<u8>>,
+    services: Vec<TrustServiceIdentity>,
     checks: Vec<Check>,
 }
 
@@ -140,6 +192,7 @@ impl MemoryTrustStore {
         Self {
             anchors: anchors.into_iter().map(TrustAnchor::from_store).collect(),
             intermediates,
+            services: Vec::new(),
             checks: Vec::new(),
         }
     }
@@ -148,6 +201,13 @@ impl MemoryTrustStore {
     /// union of both sources, each reported with its own origin.
     pub fn extend_anchors(&mut self, anchors: impl IntoIterator<Item = TrustAnchor>) {
         self.anchors.extend(anchors);
+    }
+
+    /// Add the service digital identities a trusted list records. They decide
+    /// qualified status and never grant trust, so an identity that is not also
+    /// an anchor is still worth carrying.
+    pub fn extend_services(&mut self, services: impl IntoIterator<Item = TrustServiceIdentity>) {
+        self.services.extend(services);
     }
 
     /// Record a check the trust material produced while it was loaded.
@@ -163,6 +223,10 @@ impl TrustSource for MemoryTrustStore {
 
     fn intermediates(&self) -> &[Vec<u8>] {
         &self.intermediates
+    }
+
+    fn services(&self) -> &[TrustServiceIdentity] {
+        &self.services
     }
 
     fn checks(&self) -> &[Check] {
@@ -182,6 +246,14 @@ pub enum RevocationPolicy {
     /// signature's own `xades:RevocationValues` and the revocation store.
     /// Nothing is fetched.
     Offline,
+    /// The caller passed `--online`, so the CLI was allowed to fetch CRLs and
+    /// OCSP responses that offline material did not cover, from the URLs the
+    /// certificates themselves publish. This crate still fetches nothing: the
+    /// policy value only records what the caller permitted, and every fetched
+    /// artefact reaches the verifier through the same
+    /// [`RevocationSource`] as any offline one, and is validated by the same
+    /// offline code path before it is believed.
+    Online,
 }
 
 impl RevocationPolicy {
@@ -189,6 +261,7 @@ impl RevocationPolicy {
         match self {
             Self::NotChecked => "not_checked",
             Self::Offline => "offline",
+            Self::Online => "online",
         }
     }
 }
@@ -207,6 +280,17 @@ pub trait RevocationSource {
     /// DER-encoded OCSP responses, each an `OCSPResponse` or a bare
     /// `BasicOCSPResponse`.
     fn ocsp_responses(&self) -> &[Vec<u8>] {
+        &[]
+    }
+    /// CRLs the caller fetched under `--online`. Kept apart from
+    /// [`crls`](RevocationSource::crls) only so that the report can name the
+    /// network as the source; they are consulted last and validated by exactly
+    /// the same code.
+    fn online_crls(&self) -> &[Vec<u8>] {
+        &[]
+    }
+    /// OCSP responses the caller fetched under `--online`.
+    fn online_ocsp_responses(&self) -> &[Vec<u8>] {
         &[]
     }
 }
@@ -228,17 +312,45 @@ impl RevocationSource for NoRevocation {
 pub struct MemoryRevocationStore {
     crls: Vec<Vec<u8>>,
     ocsp: Vec<Vec<u8>>,
+    online_crls: Vec<Vec<u8>>,
+    online_ocsp: Vec<Vec<u8>>,
+    online: bool,
 }
 
 impl MemoryRevocationStore {
     pub fn new(crls: Vec<Vec<u8>>, ocsp: Vec<Vec<u8>>) -> Self {
-        Self { crls, ocsp }
+        Self {
+            crls,
+            ocsp,
+            online_crls: Vec::new(),
+            online_ocsp: Vec::new(),
+            online: false,
+        }
+    }
+
+    /// Mark the store as having been filled under `--online`, so the reported
+    /// policy says so even when nothing was actually fetched.
+    pub fn into_online(mut self) -> Self {
+        self.online = true;
+        self
+    }
+
+    /// Add artefacts the CLI fetched, keeping them separate from the offline
+    /// tiers so that the report can say an answer came from the network.
+    pub fn extend_online(&mut self, crls: Vec<Vec<u8>>, ocsp: Vec<Vec<u8>>) {
+        self.online = true;
+        self.online_crls.extend(crls);
+        self.online_ocsp.extend(ocsp);
     }
 }
 
 impl RevocationSource for MemoryRevocationStore {
     fn policy(&self) -> RevocationPolicy {
-        RevocationPolicy::Offline
+        if self.online {
+            RevocationPolicy::Online
+        } else {
+            RevocationPolicy::Offline
+        }
     }
 
     fn crls(&self) -> &[Vec<u8>] {
@@ -247,6 +359,14 @@ impl RevocationSource for MemoryRevocationStore {
 
     fn ocsp_responses(&self) -> &[Vec<u8>] {
         &self.ocsp
+    }
+
+    fn online_crls(&self) -> &[Vec<u8>] {
+        &self.online_crls
+    }
+
+    fn online_ocsp_responses(&self) -> &[Vec<u8>] {
+        &self.online_ocsp
     }
 }
 

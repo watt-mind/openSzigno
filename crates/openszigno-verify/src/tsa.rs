@@ -139,12 +139,21 @@ const PKI_STATUS_GRANTED_WITH_MODS: i32 = 1;
 pub enum TimestampKind {
     /// `xades:SignatureTimeStamp`, over the canonicalized `ds:SignatureValue`.
     SignatureTimestamp,
+    /// A dossier-level `es:TimeStamp`, over the elements its `xades:Include`
+    /// children name.
+    DossierTimestamp,
+    /// A document-level `es:TimeStamp`, over the elements its `xades:Include`
+    /// children name.
+    DocumentTimestamp,
 }
 
 /// One timestamp token in the machine-readable report.
 #[derive(Clone, Debug, Serialize)]
 pub struct TimestampReport {
     pub kind: TimestampKind,
+    /// For a document-level `es:TimeStamp`, which document it belongs to.
+    /// `null` for every other kind.
+    pub document_index: Option<usize>,
     /// The `genTime` of the token, RFC 3339 UTC, or `null` when the token did
     /// not parse.
     pub gen_time: Option<String>,
@@ -163,6 +172,8 @@ pub struct TimestampReport {
 /// Everything one token needs to be verified.
 pub struct TokenInput<'a> {
     pub kind: TimestampKind,
+    /// For a document-level `es:TimeStamp`, which document it belongs to.
+    pub document_index: Option<usize>,
     /// The DER-encoded RFC 3161 token.
     pub token: Vec<u8>,
     /// The octets the imprint must be recomputed over: for a signature
@@ -196,10 +207,15 @@ pub struct TokenOutcome {
 }
 
 impl TokenOutcome {
-    fn failed(kind: TimestampKind, message: impl Into<String>) -> Self {
+    fn failed(
+        kind: TimestampKind,
+        document_index: Option<usize>,
+        message: impl Into<String>,
+    ) -> Self {
         Self {
             report: TimestampReport {
                 kind,
+                document_index,
                 gen_time: None,
                 accuracy_seconds: None,
                 serial_hex: None,
@@ -219,15 +235,20 @@ pub fn verify_token(input: &TokenInput<'_>) -> TokenOutcome {
     if input.token.len() > MAX_TOKEN_BYTES {
         return TokenOutcome::failed(
             input.kind,
+            input.document_index,
             "the timestamp token is larger than this build will parse",
         );
     }
     let content = match content_info(&input.token) {
         Ok(content) => content,
-        Err(message) => return TokenOutcome::failed(input.kind, message),
+        Err(message) => return TokenOutcome::failed(input.kind, input.document_index, message),
     };
     if content.content_type != OID_SIGNED_DATA {
-        return TokenOutcome::failed(input.kind, "the timestamp token is not a CMS SignedData");
+        return TokenOutcome::failed(
+            input.kind,
+            input.document_index,
+            "the timestamp token is not a CMS SignedData",
+        );
     }
     let signed_data = content
         .content
@@ -237,12 +258,14 @@ pub fn verify_token(input: &TokenInput<'_>) -> TokenOutcome {
     let Some(signed_data) = signed_data else {
         return TokenOutcome::failed(
             input.kind,
+            input.document_index,
             "the timestamp token's SignedData could not be decoded",
         );
     };
     if signed_data.encap_content_info.econtent_type != OID_CT_TST_INFO {
         return TokenOutcome::failed(
             input.kind,
+            input.document_index,
             "the timestamp token does not encapsulate an id-ct-TSTInfo content",
         );
     }
@@ -252,10 +275,18 @@ pub fn verify_token(input: &TokenInput<'_>) -> TokenOutcome {
         .as_ref()
         .and_then(|content| content.decode_as::<OctetString>().ok());
     let Some(econtent) = econtent else {
-        return TokenOutcome::failed(input.kind, "the timestamp token carries no eContent");
+        return TokenOutcome::failed(
+            input.kind,
+            input.document_index,
+            "the timestamp token carries no eContent",
+        );
     };
     let Ok(tst_info) = TstInfo::from_der(econtent.as_bytes()) else {
-        return TokenOutcome::failed(input.kind, "the encapsulated TSTInfo could not be decoded");
+        return TokenOutcome::failed(
+            input.kind,
+            input.document_index,
+            "the encapsulated TSTInfo could not be decoded",
+        );
     };
 
     let mut checks = vec![Check::passed(
@@ -387,6 +418,7 @@ pub fn verify_token(input: &TokenInput<'_>) -> TokenOutcome {
         let mut chain = path.chain;
         if !path.path.is_empty() {
             let outcome = crate::revocation::check_path(&crate::revocation::PathRevocationInput {
+                anchors: input.anchors,
                 path: &path.path,
                 candidates: &candidates,
                 data: &input.revocation,
@@ -404,6 +436,7 @@ pub fn verify_token(input: &TokenInput<'_>) -> TokenOutcome {
                 entry.revocation = Some(status);
             }
             checks.push(outcome.check);
+            checks.extend(outcome.notes);
         }
 
         // --- Ordering against the claimed signing time ----------------------
@@ -421,6 +454,7 @@ pub fn verify_token(input: &TokenInput<'_>) -> TokenOutcome {
         return TokenOutcome {
             report: TimestampReport {
                 kind: input.kind,
+                document_index: input.document_index,
                 gen_time: Some(format_rfc3339(gen_time)),
                 accuracy_seconds,
                 serial_hex: Some(hex(tst_info.serial_number.as_bytes())),
@@ -437,6 +471,7 @@ pub fn verify_token(input: &TokenInput<'_>) -> TokenOutcome {
     TokenOutcome {
         report: TimestampReport {
             kind: input.kind,
+            document_index: input.document_index,
             gen_time: Some(format_rfc3339(gen_time)),
             accuracy_seconds,
             serial_hex: Some(hex(tst_info.serial_number.as_bytes())),
@@ -458,6 +493,39 @@ pub fn verify_token(input: &TokenInput<'_>) -> TokenOutcome {
 /// was actually issued: a response that reports a rejection carries no
 /// timestamp to believe, and reading its token field anyway would turn a
 /// refusal into a verification.
+/// Every certificate carried inside one RFC 3161 token, as DER.
+///
+/// A caller that needs to know *which* certificates a dossier's revocation
+/// answers would have to cover has to look inside the tokens too: a TSA's own
+/// leaf certificate usually travels nowhere else. Nothing here is trusted or
+/// even validated — these are candidates, exactly as they are everywhere else.
+pub fn token_certificates(der: &[u8]) -> Vec<Vec<u8>> {
+    if der.len() > MAX_TOKEN_BYTES {
+        return Vec::new();
+    }
+    let Ok(content) = content_info(der) else {
+        return Vec::new();
+    };
+    let signed_data = content
+        .content
+        .to_der()
+        .ok()
+        .and_then(|der| SignedData::from_der(&der).ok());
+    let Some(signed_data) = signed_data else {
+        return Vec::new();
+    };
+    let Some(set) = signed_data.certificates else {
+        return Vec::new();
+    };
+    set.0
+        .iter()
+        .filter_map(|choice| match choice {
+            CertificateChoices::Certificate(certificate) => certificate.to_der().ok(),
+            CertificateChoices::Other(_) => None,
+        })
+        .collect()
+}
+
 fn content_info(der: &[u8]) -> Result<ContentInfo, String> {
     if let Ok(content) = ContentInfo::from_der(der) {
         return Ok(content);
@@ -916,6 +984,7 @@ mod tests {
     fn outcome(bytes: Vec<u8>) -> TokenOutcome {
         let limits = VerifyLimits::default();
         verify_token(&TokenInput {
+            document_index: None,
             kind: TimestampKind::SignatureTimestamp,
             token: bytes,
             imprint_input: b"data".to_vec(),

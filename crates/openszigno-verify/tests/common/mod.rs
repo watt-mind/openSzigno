@@ -422,6 +422,58 @@ impl TimestampSpec {
     }
 }
 
+/// Where a container `es:TimeStamp` sits.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TimestampPlacement {
+    /// A direct child of `es:Dossier`.
+    Dossier,
+    /// A direct child of the first `es:Document`.
+    Document,
+    /// A child of `es:Documents`, which the format does not describe.
+    Stray,
+}
+
+/// One container `es:TimeStamp`, which M3 verifies over the elements its
+/// `xades:Include` children name.
+pub struct ContainerTimestampSpec {
+    pub placement: TimestampPlacement,
+    /// The `xades:Include` URIs, in the order they are emitted, which is also
+    /// the order their canonical forms are concatenated in.
+    pub includes: Vec<String>,
+    /// The `ds:CanonicalizationMethod` of the timestamp element, if any.
+    pub c14n: Option<String>,
+    /// The token, or `None` to emit an undecodable placeholder.
+    pub token: Option<TimestampSpec>,
+    /// Emit an `xades:ReferenceInfo`, a selection form this build refuses.
+    pub reference_info: bool,
+    /// Digest something other than the included elements.
+    pub wrong_imprint: bool,
+}
+
+impl ContainerTimestampSpec {
+    pub fn dossier(token: TimestampSpec) -> Self {
+        Self {
+            placement: TimestampPlacement::Dossier,
+            includes: vec!["#dossier-profile".to_owned(), "#documents".to_owned()],
+            c14n: None,
+            token: Some(token),
+            reference_info: false,
+            wrong_imprint: false,
+        }
+    }
+
+    pub fn document(token: TimestampSpec) -> Self {
+        Self {
+            placement: TimestampPlacement::Document,
+            includes: vec!["#prof0".to_owned(), "#obj0".to_owned()],
+            token: Some(token),
+            c14n: None,
+            reference_info: false,
+            wrong_imprint: false,
+        }
+    }
+}
+
 /// The whole synthetic dossier.
 pub struct DossierSpec {
     pub namespace: String,
@@ -431,9 +483,11 @@ pub struct DossierSpec {
     /// An extra copy of the payload object, placed outside the signed document,
     /// for the signature-wrapping cases.
     pub decoy_object: Option<(String, String)>,
-    /// Emit a dossier-level `es:TimeStamp`, which M3 validates and this
-    /// release only reports.
+    /// Emit a bare `es:TimeStamp` with no data selection, which is the shape
+    /// this build reports as not checked.
     pub dossier_timestamp: bool,
+    /// Container `es:TimeStamp` elements with a real `xades:Include` selection.
+    pub container_timestamps: Vec<ContainerTimestampSpec>,
 }
 
 impl Default for DossierSpec {
@@ -445,6 +499,7 @@ impl Default for DossierSpec {
             dossier_signature: None,
             decoy_object: None,
             dossier_timestamp: false,
+            container_timestamps: Vec::new(),
         }
     }
 }
@@ -548,6 +603,32 @@ pub fn build(spec: &DossierSpec, keys: &[(&str, &TestKey)]) -> String {
             };
             xml = xml.replace(&format!("@@TIMESTAMP-{tag}@@"), &BASE64.encode(&token));
         }
+    }
+    // Container timestamps come last: a dossier-level one covers `es:Documents`,
+    // which holds every document signature's `ds:SignatureValue`. Within them,
+    // the inner ones are filled first for the same reason — a dossier
+    // timestamp covers the `es:Document` a document timestamp sits in.
+    let mut order: Vec<usize> = (0..spec.container_timestamps.len()).collect();
+    order.sort_by_key(|index| {
+        matches!(
+            spec.container_timestamps[*index].placement,
+            TimestampPlacement::Dossier
+        )
+    });
+    for index in order {
+        let timestamp = &spec.container_timestamps[index];
+        let Some(token) = &timestamp.token else {
+            continue;
+        };
+        let mut imprint = canonical_includes(&xml, timestamp);
+        if timestamp.wrong_imprint {
+            imprint.push(b'!');
+        }
+        let der = match &token.raw_token {
+            Some(bytes) => bytes.clone(),
+            None => build_timestamp_token(token, &imprint),
+        };
+        xml = xml.replace(&format!("@@CONTAINER-TS-{index}@@"), &BASE64.encode(&der));
     }
     xml
 }
@@ -844,6 +925,11 @@ fn render(spec: &DossierSpec) -> String {
             "<es:TimeStamp><xades:EncapsulatedTimeStamp xmlns:xades=\"http://uri.etsi.org/01903/v1.3.2#\">AA==</xades:EncapsulatedTimeStamp></es:TimeStamp>",
         );
     }
+    for (index, timestamp) in spec.container_timestamps.iter().enumerate() {
+        if timestamp.placement == TimestampPlacement::Document {
+            out.push_str(&render_container_timestamp(timestamp, index));
+        }
+    }
     out.push_str("</es:Document>");
     if let Some((id, payload)) = &spec.decoy_object {
         // A second, unsigned document carrying a copy of the payload: the
@@ -860,12 +946,86 @@ fn render(spec: &DossierSpec) -> String {
 </es:Document>"
         ));
     }
+    for (index, timestamp) in spec.container_timestamps.iter().enumerate() {
+        if timestamp.placement == TimestampPlacement::Stray {
+            out.push_str(&render_container_timestamp(timestamp, index));
+        }
+    }
     out.push_str("</es:Documents>");
+    for (index, timestamp) in spec.container_timestamps.iter().enumerate() {
+        if timestamp.placement == TimestampPlacement::Dossier {
+            out.push_str(&render_container_timestamp(timestamp, index));
+        }
+    }
     if let Some(signature) = &spec.dossier_signature {
         out.push_str(&render_signature(signature, "frame", namespace));
     }
     out.push_str("</es:Dossier>");
     out
+}
+
+/// One container `es:TimeStamp`, with its token left as a placeholder that
+/// [`build`] fills in once every signature value exists.
+fn render_container_timestamp(spec: &ContainerTimestampSpec, index: usize) -> String {
+    let mut out = String::from(
+        "<es:TimeStamp xmlns:xades=\"http://uri.etsi.org/01903/v1.3.2#\" xmlns:ds=\"http://www.w3.org/2000/09/xmldsig#\">",
+    );
+    if let Some(c14n) = &spec.c14n {
+        out.push_str(&format!(
+            "<ds:CanonicalizationMethod Algorithm=\"{c14n}\"/>"
+        ));
+    }
+    if spec.reference_info {
+        out.push_str("<xades:ReferenceInfo URI=\"#obj0\"/>");
+    }
+    for uri in &spec.includes {
+        out.push_str(&format!(
+            "<xades:Include URI=\"{uri}\" referencedData=\"true\"/>"
+        ));
+    }
+    match &spec.token {
+        Some(_) => out.push_str(&format!(
+            "<xades:EncapsulatedTimeStamp>@@CONTAINER-TS-{index}@@</xades:EncapsulatedTimeStamp>"
+        )),
+        None => {
+            out.push_str("<xades:EncapsulatedTimeStamp>not base64!!</xades:EncapsulatedTimeStamp>")
+        }
+    }
+    out.push_str("</es:TimeStamp>");
+    out
+}
+
+/// The octets a container `es:TimeStamp` covers: each included element
+/// canonicalized on its own, concatenated in `Include` order.
+pub fn canonical_includes(xml: &str, spec: &ContainerTimestampSpec) -> Vec<u8> {
+    let source = XmlSource::decode(xml.as_bytes(), &Limits::default()).expect("decodes");
+    let tree = source.parse_tree(&Limits::default()).expect("parses");
+    let algorithm = spec
+        .c14n
+        .as_deref()
+        .and_then(C14nAlgorithm::from_uri)
+        .unwrap_or(C14nAlgorithm::Inclusive { comments: false });
+    let mut octets = Vec::new();
+    for uri in &spec.includes {
+        let id = uri.trim_start_matches('#');
+        let Some(node) = tree
+            .descendants()
+            .find(|node| node.attribute("Id") == Some(id))
+        else {
+            continue;
+        };
+        octets.extend_from_slice(
+            &RoxmltreeC14n
+                .canonicalize(
+                    source.text(),
+                    &NodeSet::subtree(node).without_comments(),
+                    algorithm,
+                    &[],
+                )
+                .expect("canonicalizes"),
+        );
+    }
+    octets
 }
 
 fn render_signature(spec: &SigSpec, tag: &str, namespace: &str) -> String {
@@ -1707,6 +1867,7 @@ pub const STATUS_GRANTED: &str = "http://uri.etsi.org/TrstSvc/TrustedList/Svcsta
 pub const STATUS_WITHDRAWN: &str = "http://uri.etsi.org/TrstSvc/TrustedList/Svcstatus/withdrawn";
 pub const STATUS_UNDER_SUPERVISION: &str =
     "http://uri.etsi.org/TrstSvc/TrustedList/Svcstatus/undersupervision";
+pub const STATUS_ACCREDITED: &str = "http://uri.etsi.org/TrstSvc/TrustedList/Svcstatus/accredited";
 
 /// One `TSPService` to write into a synthetic list.
 pub struct TlService {
@@ -1721,6 +1882,14 @@ pub struct TlService {
     /// Emit a `DigitalId` that names a subject rather than supplying a
     /// certificate, which must contribute no anchor.
     pub subject_name_only: bool,
+    /// An `X509SubjectName` identity, as an RFC 4514 string.
+    pub subject_name: Option<String>,
+    /// An `X509SKI` identity, as raw `subjectKeyIdentifier` octets.
+    pub subject_key_identifier: Option<Vec<u8>>,
+    /// Extra `ServiceName` entries as (`xml:lang`, name), emitted **before**
+    /// the English one, so a test can prove the English name is preferred
+    /// rather than merely first.
+    pub extra_names: Vec<(String, String)>,
 }
 
 impl TlService {
@@ -1733,6 +1902,27 @@ impl TlService {
             status_starting_time: "2016-07-01T00:00:00Z".to_owned(),
             history: Vec::new(),
             subject_name_only: false,
+            subject_name: None,
+            subject_key_identifier: None,
+            extra_names: Vec::new(),
+        }
+    }
+
+    /// A service whose only digital identity is an `X509SKI`.
+    pub fn by_ski(name: &str, ski: Vec<u8>) -> Self {
+        Self {
+            certificates: Vec::new(),
+            subject_key_identifier: Some(ski),
+            ..Self::ca_qc(name, Vec::new())
+        }
+    }
+
+    /// A service whose only digital identity is an `X509SubjectName`.
+    pub fn by_subject_name(name: &str, subject: &str) -> Self {
+        Self {
+            certificates: Vec::new(),
+            subject_name: Some(subject.to_owned()),
+            ..Self::ca_qc(name, Vec::new())
         }
     }
 }
@@ -1817,8 +2007,12 @@ pub fn build_trust_list(spec: &TrustListSpec) -> String {
             "<tsl:ServiceTypeIdentifier>{}</tsl:ServiceTypeIdentifier>",
             service.service_type
         ));
+        out.push_str("<tsl:ServiceName>");
+        for (lang, name) in &service.extra_names {
+            out.push_str(&format!("<tsl:Name xml:lang=\"{lang}\">{name}</tsl:Name>"));
+        }
         out.push_str(&format!(
-            "<tsl:ServiceName><tsl:Name xml:lang=\"en\">{}</tsl:Name></tsl:ServiceName>",
+            "<tsl:Name xml:lang=\"en\">{}</tsl:Name></tsl:ServiceName>",
             service.name
         ));
         out.push_str("<tsl:ServiceDigitalIdentity>");
@@ -1826,6 +2020,17 @@ pub fn build_trust_list(spec: &TrustListSpec) -> String {
             out.push_str(
                 "<tsl:DigitalId><tsl:X509SubjectName>CN=Named Only,C=HU</tsl:X509SubjectName></tsl:DigitalId>",
             );
+        }
+        if let Some(subject) = &service.subject_name {
+            out.push_str(&format!(
+                "<tsl:DigitalId><tsl:X509SubjectName>{subject}</tsl:X509SubjectName></tsl:DigitalId>"
+            ));
+        }
+        if let Some(ski) = &service.subject_key_identifier {
+            out.push_str(&format!(
+                "<tsl:DigitalId><tsl:X509SKI>{}</tsl:X509SKI></tsl:DigitalId>",
+                BASE64.encode(ski)
+            ));
         }
         for certificate in &service.certificates {
             out.push_str(&format!(
@@ -1986,4 +2191,20 @@ pub fn crl_distribution_point_extension(uri: &str) -> rcgen::CustomExtension {
         .to_der()
         .expect("the distribution points encode");
     rcgen::CustomExtension::from_oid_content(&[2, 5, 29, 31], encoded)
+}
+
+/// An `authorityInfoAccess` extension naming one OCSP responder, which is
+/// where `--online` learns a URL to POST a request to.
+pub fn authority_info_access_extension(uri: &str) -> rcgen::CustomExtension {
+    use der::Encode as _;
+    let description = x509_cert::ext::pkix::AccessDescription {
+        access_method: const_oid::ObjectIdentifier::new_unwrap("1.3.6.1.5.5.7.48.1"),
+        access_location: x509_cert::ext::pkix::name::GeneralName::UniformResourceIdentifier(
+            der::asn1::Ia5String::new(uri).expect("the URI encodes"),
+        ),
+    };
+    let encoded = vec![description]
+        .to_der()
+        .expect("the access descriptions encode");
+    rcgen::CustomExtension::from_oid_content(&[1, 3, 6, 1, 5, 5, 7, 1, 1], encoded)
 }
