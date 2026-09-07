@@ -1,0 +1,65 @@
+name: Security
+
+on:
+  push:
+    branches: [develop, master]
+  pull_request:
+    branches: [develop, master]
+  schedule:
+    # Weekly scan from the default branch (scheduled workflows only run
+    # from the default branch, which is develop here).
+    - cron: "17 4 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  gitleaks:
+    name: Gitleaks secret scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      # The gitleaks CLI is MIT-licensed and free; only the marketplace
+      # action requires a licence key for organisation repositories.
+      - name: Install gitleaks
+        env:
+          GITLEAKS_VERSION: 8.30.1
+        run: |
+          curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
+            | tar -xz -C /usr/local/bin gitleaks
+          gitleaks version
+      - name: Scan the full history
+        run: gitleaks git --redact --no-banner --exit-code 1 .
+
+  actionlint:
+    name: Workflow lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install actionlint
+        run: |
+          bash <(curl -sSfL https://raw.githubusercontent.com/rhysd/actionlint/v1.7.12/scripts/download-actionlint.bash) 1.7.12
+      - run: ./actionlint -color
+
+  codeql:
+    name: CodeQL
+    # CodeQL Rust coverage is unconfirmed for this repo; flip the
+    # CODEQL_ENABLED repo variable to 'true' once verified.
+    if: ${{ vars.CODEQL_ENABLED == 'true' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: github/codeql-action/init@v4
+        with:
+          languages: rust
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo check --workspace --all-targets --locked
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v4
+        with:
+          ram: 8192

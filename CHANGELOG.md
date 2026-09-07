@@ -10,6 +10,21 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
 
 ## [Unreleased]
 
+### Fixed
+
+- CI hygiene: `retention-days: 1` on all artifact uploads, and the baseline
+  `concurrency` pattern in `ci.yml` so stale PR commits cancel.
+- Added `security.yml`: Gitleaks secret scan and workflow lint on push/PR plus
+  a weekly run, with CodeQL gated on `vars.CODEQL_ENABLED` until Rust support
+  is confirmed.
+- Added Rust-appropriate local hooks (`lefthook.yml`, pre-commit fmt+clippy,
+  commit-msg Conventional Commits check) and documented the one-time install.
+- Added `AGENTS.md` (team LAB, project openSzigno) with thin `CLAUDE.md` /
+  `GEMINI.md` pointers and a documented no-worktree concurrency position.
+- Fixed the test harness passing unresolved temporary paths on macOS
+  (`/var -> /private/var` in `TMPDIR`), which the output-directory guard
+  rejects by design. No product behavior changed.
+
 Initial MVP: a bounded, agent-friendly CLI for inspecting, listing,
 structurally validating, and extracting Microsec e-Szignó `.es3` dossiers.
 This release performs no cryptographic verification of any kind.

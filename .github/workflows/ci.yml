@@ -13,6 +13,10 @@ env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
 
+concurrency:
+  group: ci-${{ github.event_name }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   lint:
     name: Format and lint
@@ -84,6 +88,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: coverage
+          retention-days: 1
           path: |
             lcov.info
             coverage-summary.txt

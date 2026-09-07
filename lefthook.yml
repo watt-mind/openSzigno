@@ -1,0 +1,19 @@
+# Local quality hooks (Rust equivalent of the Husky baseline).
+# One-time install: `lefthook install` (https://lefthook.dev).
+# CI runs the same checks on Linux, macOS, and Windows.
+
+pre-commit:
+  parallel: true
+  commands:
+    fmt:
+      # Applies rustfmt in place and re-stages the result, so a commit
+      # never lands unformatted.
+      run: cargo fmt --all
+      stage_fixed: true
+    clippy:
+      run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+commit-msg:
+  commands:
+    conventional:
+      run: scripts/commit-msg.sh
