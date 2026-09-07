@@ -472,6 +472,7 @@ not cover.
 openszigno verify FILE [--json]
     --trust-store DIR           # anchors, and optional extra CA certificates
     --trust-list FILE           # ETSI TS 119 612 trusted list, repeatable
+    --lotl FILE                 # EU list of trusted lists; names their signers
     --trust-list-signer CERT    # certificate that must have signed each list
     --revocation-store DIR      # CRLs and OCSP responses, offline
     --no-revocation             # switch revocation off; caps at indeterminate
@@ -993,37 +994,74 @@ refuses to guess which historical status was equivalent to which.
 signed with, obtained out of band — for the EU list of trusted lists, from the
 Official Journal. The list's enveloped XMLDSig signature is then verified with
 the same core, the same canonicalization backend, and the same pinned
-allowlists a dossier gets, and it must cover the whole document. Without the
-flag the list is still read but `trust_list_unverified` (`unknown`) is emitted,
-so the run can never reach `valid`. Nothing is fetched; `docs/trust.md`
-describes the manual download workflow.
+allowlists a dossier gets, and it must cover the whole document. Without it,
+and without `--lotl`, the list is still read but `trust_list_unverified`
+(`unknown`) is emitted, so the run can never reach `valid`. Nothing is fetched;
+`docs/trust.md` describes the manual download workflow.
+
+`--lotl FILE` reads the EU list of trusted lists. Its `PointersToOtherTSL`
+entries name the signing certificates of the national lists, so **one**
+out-of-band certificate bootstraps the verification of every `--trust-list`:
+the LOTL is verified against `--trust-list-signer` first, and only then are its
+pointer certificates added to the pool each national list's signature is tried
+against. Any one of them verifying is enough, because a scheme operator may
+publish several and a verifier cannot know which signed the copy in hand. The
+LOTL contributes no trust anchors of its own — it names no CA/QC services — and
+its own `trust_list_unverified` check still blocks when it could not be
+verified, so pointers taken from an unverified LOTL cannot quietly support a
+`valid` verdict.
 
 A `--trust-list` file that is not a trusted list, or a `--trust-list-signer`
 file that is not exactly one certificate, is `trust_list_invalid` (exit 3).
 
 #### Qualified status
 
-`qualified` is reported per signature and mirrored onto
-`signing_certificate.qualified`. It is `true` only when **both** of these hold:
+`qualified` is reported per signature, mirrored onto
+`signing_certificate.qualified`, and accompanied by `qualified_service`, the
+name of the trusted-list service that decided it.
 
-1. the chain's anchor is a trusted-list entry whose CA/QC service was granted
-   at the validation time — a trust-store anchor says a human trusts this CA,
-   which is not the same as a member state saying it may issue qualified
-   certificates; and
-2. for a certificate issued on or after 2016-07-01, when eIDAS began to apply,
-   the certificate asserts `QcCompliance` (`0.4.0.1862.1.1`) in its RFC 3739
-   `qcStatements` extension.
+**The determination is made over the whole validated chain, not over its
+anchor.** In a real trusted list the CA/QC service identities are the *issuing*
+CAs, which are intermediates; the root above them is often present only in a
+`--trust-store` directory and is sometimes not listed at all. Asking only the
+anchor reports "not determined" for precisely the chains a trusted list exists
+to describe.
+
+So `qualified` is `true` when both of these hold:
+
+1. some certificate in the validated chain **is**, or was **issued by**, the
+   service digital identity of a CA/QC service the list records as granted at
+   the validation time. "Issued by" is a verified signature, not a name match,
+   so a certificate that merely claims a listed issuer gains nothing; and
+2. the signing certificate's own `QCStatements` do not contradict that. A
+   certificate issued on or after 2016-07-01, when eIDAS began to apply, whose
+   `qcStatements` extension is **present but omits** `QcCompliance`
+   (`0.4.0.1862.1.1`), or which will not parse, contradicts the list and yields
+   `false`.
+
+A post-eIDAS certificate carrying **no** `qcStatements` extension at all denies
+nothing, and the determination rests on the trusted list alone, exactly as it
+does for a pre-eIDAS certificate. That is the looser of the two readings and it
+is deliberate: the trusted list is the authority on which CA may issue
+qualified certificates, and an issuer that omitted an assertion has not denied
+it.
 
 `qualified_signature_device` reports the `QcSSCD`/QSCD statement
 (`0.4.0.1862.1.4`) separately. Both are the issuer's claims, which only a
 trusted list makes meaningful.
 
-The value is `null`, never `false`, when no trusted list covers the anchor:
-"not determined" and "determined not to be qualified" are different answers and
-the report keeps them apart. The three outcomes are reported as
+The value is `null`, never `false`, when no trusted list was consulted at all;
+`false` when one was and nothing in the chain is covered by a granted CA/QC
+service. "Not determined" and "determined not to be qualified" are different
+answers and the report keeps them apart. The three outcomes are reported as
 `certificate_qualified`, `certificate_not_qualified`, and
 `certificate_qualified_unknown`, all `info`, because they describe a legal
 category rather than the cryptographic soundness of the signature.
+
+When the same certificate is both a `--trust-store` anchor and a trusted-list
+service identity, `trust_anchor_origin` reports `trust_list`: the list is the
+stronger provenance, because it says *who* vouches for the CA where a directory
+only says that somebody copied it in.
 
 Scheme-level `Qualifications` extensions, which refine qualified status per
 certificate subset, are not processed and are never used to widen a
@@ -1034,9 +1072,22 @@ determination.
 Offline by default and offline only. Data is consulted in this order, and the
 first source that yields a definite answer for a certificate wins:
 
-1. the signature's own `xades:RevocationValues` — `EncapsulatedOCSPValue`, then
-   `EncapsulatedCRLValue` — in every recognised XAdES namespace;
+1. the signature's own validation data — `EncapsulatedOCSPValue`, then
+   `EncapsulatedCRLValue` — from **either** placement: directly under
+   `xades:UnsignedSignatureProperties/xades:RevocationValues`, or inside an
+   `xades141:TimeStampValidationData`. Real long-term Microsec dossiers file
+   almost all of their embedded OCSP responses in the second, so a verifier
+   that reads only the first finds nothing in most real material. The container
+   is matched in any recognised XAdES namespace and the encapsulating elements
+   inside it by name alone, because real dossiers nest 1.3.2-namespaced values
+   under a 1.4.1-namespaced container. `xades:CertificateValues` is harvested
+   from both placements too;
 2. `--revocation-store DIR`, whose OCSP responses are asked before its CRLs.
+
+Whether a blob was filed as signature validation data or as timestamp
+validation data changes nothing about how it is treated: every item is
+untrusted input that must be signature-checked against an authorised issuer, so
+gathering both can only widen what is *available*, never what is accepted.
 
 Embedded data is **untrusted input**, exactly like the certificates in
 `CertificateValues`: the signer supplied it. Every item is signature-checked
@@ -1101,6 +1152,21 @@ non-anchor certificate has fresh, verified, non-revoked status; `cert_revoked`
 when any was revoked at or before the validation time; and otherwise the worst
 of `cert_revoked_after_validation_time`, `revocation_data_invalid`,
 `revocation_data_stale`, and `revocation_status_unknown`.
+
+**Naming what is missing.** The summary message names *which* certificate is
+the problem — by role (`the end-entity certificate`, `the intermediate CA
+<name>`) and by the issuer common name above it — and repeats the CRL
+distribution point that certificate publishes when it has one. Only public CA
+material is used: a CA's subject and any certificate's issuer are names of
+organisations, which is exactly what a caller needs in order to fetch the right
+file. The **subject** of the end-entity certificate is never repeated, because
+that is the signer.
+
+This matters because real Hungarian dossiers embed an OCSP response for the
+**end-entity certificate only**. The intermediate and root CAs' status has to
+come from CRLs the operator fetches into `--revocation-store`, and without
+being told which certificate lacks data a caller cannot tell that apart from a
+dossier that embeds nothing at all. See [trust.md](trust.md).
 
 `--no-revocation` switches the check off. It emits `revocation_not_checked`
 (`skipped`), which is blocking, so it is documented as producing **at most**
@@ -1185,6 +1251,7 @@ verify anything.
         },
         "qualified": true,
         "qualified_signature_device": false,
+        "qualified_service": "Qualified e-Szigno CA 2009",
         "chain": [
           {
             "subject_cn": "…",
@@ -1308,8 +1375,11 @@ Notes on the shape:
   the source it came from. The anchor's entry is always `status:
   "trust_anchor"`, because the anchor is never asked about. It is `null` only
   when no path was built at all.
-- `qualified` and `qualified_signature_device` sit on the signature, and
-  `qualified` is mirrored onto `signing_certificate.qualified`.
+- `qualified`, `qualified_signature_device` and `qualified_service` sit on the
+  signature, and `qualified` is mirrored onto
+  `signing_certificate.qualified`. `qualified_service` names the trusted-list
+  service that decided it, so a caller can check the determination against the
+  list themselves; it is `null` when none matched.
 - `references[].resolved_to` is filled in by the resolution stage, so it is
   present even when the run stopped at a policy failure and no digest was ever
   recomputed. In that case every `references[].status` is `skipped` and
@@ -1389,8 +1459,8 @@ else that is not `passed` keeps the verdict below `valid`.
 | `xades_signing_certificate_bound` | `passed` | The signing certificate matches the digest the signed `SigningCertificate` / `SigningCertificateV2` property names. |
 | `xades_signing_certificate_mismatch` | `failed` | It does not: no offered certificate answers to the digest, an issuer and serial contradict it, the declared digest algorithm is outside the allowlist, or the certificate whose key verified the signature is not the digested one. The certificate-substitution check. |
 | `xades_signing_certificate_absent` | `unknown` | The signature carries no such property, so nothing signed says which certificate signed it. |
-| `xades_signature_policy_implied` | `unknown` | An implied signature policy is declared. Reported only; no policy is processed. |
-| `xades_signature_policy_explicit` | `unknown` | An explicit signature policy is declared. Its identifier is reported; no policy document is fetched or applied. |
+| `xades_signature_policy_implied` | `info` | An implied signature policy is declared. Informational: a declared policy describes how the signature was made and says nothing about whether it is sound, so it does not block. No policy is processed. |
+| `xades_signature_policy_explicit` | `info` | An explicit signature policy is declared. Its identifier is reported; no policy document is fetched or applied. Informational for the same reason. |
 | `signing_certificate_available` | `passed` | A usable certificate was found in `ds:KeyInfo`. |
 | `signing_certificate_missing` | `failed` | None was. |
 | `signing_time_present` | `info` | Reports whether a claimed `xades:SigningTime` was read. Informational: the claim is unauthenticated whether it is there or not, so its presence decides nothing. |

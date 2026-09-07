@@ -354,16 +354,19 @@ fn an_implied_signature_policy_is_reported_and_not_processed() {
     let xml = build(&dossier, &[("doc", &pki.signer_key)]);
     let report = run(&xml, vec![pki.root_der.clone()]);
 
+    // Informational: a declared policy describes how the signature was made
+    // and says nothing about whether it is sound, so it must not block.
     assert_check(
         &report,
         CheckCode::XadesSignaturePolicyImplied,
-        CheckStatus::Unknown,
+        CheckStatus::Info,
     );
     assert_eq!(
         report.signatures[0].xades.signature_policy,
         Some(openszigno_verify::xades::SignaturePolicy::Implied)
     );
-    // Reporting a policy is not applying one, so the verdict cannot improve.
+    // Reporting a policy is not applying one, and the verdict here is held
+    // below `valid` by the absent timestamp and the missing revocation data.
     assert_eq!(report.verdict, Verdict::Indeterminate);
 }
 

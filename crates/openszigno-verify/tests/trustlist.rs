@@ -78,8 +78,9 @@ fn dossier(signature: SigSpec, key: &TestKey) -> String {
 
 /// Load one trusted list and verify a dossier against the anchors it yields.
 fn run_with_list(xml: &str, list: &str, signer: Option<&[u8]>, time: &str) -> VerifyReport {
+    let signers: Vec<Vec<u8>> = signer.map(<[u8]>::to_vec).into_iter().collect();
     let backend = RoxmltreeC14n;
-    let loaded = openszigno_verify::trustlist::load(list.as_bytes(), signer, &backend)
+    let loaded = openszigno_verify::trustlist::load(list.as_bytes(), &signers, &backend)
         .expect("the synthetic trusted list loads");
     let mut trust = MemoryTrustStore::default();
     for check in loaded.checks {
@@ -157,7 +158,7 @@ fn the_list_metadata_is_read() {
         "openSzigno Test Qualified CA",
         pki.root_der.clone(),
     )]));
-    let loaded = openszigno_verify::trustlist::load(list.as_bytes(), None, &RoxmltreeC14n)
+    let loaded = openszigno_verify::trustlist::load(list.as_bytes(), &[], &RoxmltreeC14n)
         .expect("the list loads");
     assert_eq!(loaded.territory.as_deref(), Some("HU"));
     assert_eq!(loaded.sequence_number, Some(7));
@@ -174,7 +175,7 @@ fn a_digital_id_without_a_certificate_supplies_no_anchor() {
     service.certificates = Vec::new();
     service.subject_name_only = true;
     let list = build_trust_list(&TrustListSpec::new(vec![service]));
-    let loaded = openszigno_verify::trustlist::load(list.as_bytes(), None, &RoxmltreeC14n)
+    let loaded = openszigno_verify::trustlist::load(list.as_bytes(), &[], &RoxmltreeC14n)
         .expect("the list loads");
     assert!(loaded.anchors.is_empty());
 }
@@ -187,7 +188,7 @@ fn a_tsa_qtst_service_is_also_read() {
     let mut service = TlService::ca_qc("openSzigno Test QTSA", pki.root_der.clone());
     service.service_type = SVCTYPE_TSA_QTST.to_owned();
     let list = build_trust_list(&TrustListSpec::new(vec![service]));
-    let loaded = openszigno_verify::trustlist::load(list.as_bytes(), None, &RoxmltreeC14n)
+    let loaded = openszigno_verify::trustlist::load(list.as_bytes(), &[], &RoxmltreeC14n)
         .expect("the list loads");
     assert_eq!(loaded.anchors.len(), 1);
 }
@@ -195,7 +196,7 @@ fn a_tsa_qtst_service_is_also_read() {
 /// Something that is not a trusted list is refused rather than half-read.
 #[test]
 fn a_file_that_is_not_a_trusted_list_is_refused() {
-    let error = openszigno_verify::trustlist::load(b"<hello/>", None, &RoxmltreeC14n)
+    let error = openszigno_verify::trustlist::load(b"<hello/>", &[], &RoxmltreeC14n)
         .expect_err("a bare element is not a trusted list");
     assert!(
         error.contains("not an ETSI TS 119 612 trusted list"),
@@ -271,11 +272,13 @@ fn a_pre_eidas_status_is_not_treated_as_granted() {
 // Qualified determination
 // ---------------------------------------------------------------------------
 
-/// A post-eIDAS certificate must say so itself: the trusted list grants the
-/// service, but a certificate with no `QcCompliance` is not a qualified one.
+/// A post-eIDAS certificate whose `QCStatements` are present but omit
+/// `QcCompliance` contradicts the list, and the contradiction wins.
 #[test]
-fn a_post_eidas_certificate_without_qccompliance_is_not_qualified() {
-    let pki = pki((2019, 1, 1), &[]);
+fn a_post_eidas_certificate_that_contradicts_the_list_is_not_qualified() {
+    // `id-etsi-qcs-QcRetentionPeriod`: a statement, but not the one that says
+    // "this is a qualified certificate".
+    let pki = pki((2019, 1, 1), &["0.4.0.1862.1.3"]);
     let list = build_trust_list(&TrustListSpec::new(vec![TlService::ca_qc(
         "openSzigno Test Qualified CA",
         pki.root_der.clone(),
@@ -289,6 +292,24 @@ fn a_post_eidas_certificate_without_qccompliance_is_not_qualified() {
         CheckStatus::Info,
     );
     assert_eq!(report.signatures[0].qualified, Some(false));
+}
+
+/// A post-eIDAS certificate carrying **no** `QCStatements` extension at all
+/// denies nothing, so the trusted list remains the authority. This is the
+/// looser of the two readings, taken deliberately: an issuer that omitted an
+/// assertion has not contradicted the member state that listed it.
+#[test]
+fn a_post_eidas_certificate_with_no_statements_rests_on_the_list() {
+    let pki = pki((2019, 1, 1), &[]);
+    let list = build_trust_list(&TrustListSpec::new(vec![TlService::ca_qc(
+        "openSzigno Test Qualified CA",
+        pki.root_der.clone(),
+    )]));
+    let xml = dossier(signature(&pki), &pki.signer_key);
+    let report = run_with_list(&xml, &list, None, AT);
+
+    assert_check(&report, CheckCode::CertificateQualified, CheckStatus::Info);
+    assert_eq!(report.signatures[0].qualified, Some(true));
 }
 
 /// A pre-eIDAS certificate is judged on the trusted list alone, because the
@@ -325,6 +346,44 @@ fn a_qscd_statement_is_reported() {
             .and_then(|summary| summary.qualified),
         Some(true)
     );
+}
+
+/// A chain no trusted-list service covers is `false`, not `null`: a list was
+/// consulted and did not vouch for it.
+#[test]
+fn a_chain_no_listed_service_covers_is_not_qualified() {
+    let pki = pki((2019, 1, 1), &["0.4.0.1862.1.1"]);
+    // The list names some *other* CA, so nothing in this chain is covered.
+    let stranger = self_signed(
+        &CertSpec::ca(
+            "openSzigno Unrelated Qualified CA",
+            BasicConstraints::Unconstrained,
+        ),
+        &rsa_key(keys::THIRD_RSA2048),
+    );
+    let mut trust = MemoryTrustStore::new(vec![pki.root_der.clone()], Vec::new());
+    let list = build_trust_list(&TrustListSpec::new(vec![TlService::ca_qc(
+        "openSzigno Unrelated Qualified CA",
+        stranger.der,
+    )]));
+    let loaded = openszigno_verify::trustlist::load(list.as_bytes(), &[], &RoxmltreeC14n)
+        .expect("the list loads");
+    trust.extend_anchors(loaded.anchors);
+
+    let revocation = MemoryRevocationStore::default();
+    let backend = RoxmltreeC14n;
+    let clock = FixedClock(parse_rfc3339(AT).expect("the fixed time parses"));
+    let mut options = VerifyOptions::new(&clock, &trust, &revocation, &backend);
+    options.requested_time = Some(AT.to_owned());
+    let xml = dossier(signature(&pki), &pki.signer_key);
+    let report = verify(xml.as_bytes(), &options).expect("the dossier parses");
+
+    assert_check(
+        &report,
+        CheckCode::CertificateNotQualified,
+        CheckStatus::Info,
+    );
+    assert_eq!(report.signatures[0].qualified, Some(false));
 }
 
 /// With no trusted list at all the answer is "not determined", which the report
@@ -451,7 +510,7 @@ fn a_list_with_no_signature_fails_when_one_is_demanded() {
     )]));
     let loaded = openszigno_verify::trustlist::load(
         list.as_bytes(),
-        Some(&pki.tl_signer_der),
+        std::slice::from_ref(&pki.tl_signer_der),
         &RoxmltreeC14n,
     )
     .expect("the list still loads");
@@ -482,8 +541,9 @@ fn signed_list(pki: &Pki) -> String {
 }
 
 fn signature_check(list: &str, signer: &[u8]) -> openszigno_verify::codes::Check {
-    let loaded = openszigno_verify::trustlist::load(list.as_bytes(), Some(signer), &RoxmltreeC14n)
-        .expect("the list still parses");
+    let loaded =
+        openszigno_verify::trustlist::load(list.as_bytes(), &[signer.to_vec()], &RoxmltreeC14n)
+            .expect("the list still parses");
     loaded
         .checks
         .into_iter()
@@ -581,7 +641,9 @@ fn a_signer_that_is_not_a_certificate_is_refused() {
     let check = signature_check(&signed_list(&pki), b"not a certificate");
     assert_eq!(check.code, CheckCode::TrustListSignatureInvalid);
     assert!(
-        check.message.contains("not a usable X.509 certificate"),
+        check
+            .message
+            .contains("no supplied trust-list signer is a usable X.509 certificate"),
         "{}",
         check.message
     );
@@ -612,4 +674,286 @@ fn service_type_names_are_stable() {
     use openszigno_verify::ServiceType;
     assert_eq!(ServiceType::CaQc.as_str(), "ca_qc");
     assert_eq!(ServiceType::TsaQtst.as_str(), "tsa_qtst");
+}
+
+// ---------------------------------------------------------------------------
+// The determination is about the chain, not about the anchor
+// ---------------------------------------------------------------------------
+
+/// A root, an issuing CA, and a signer under the issuing CA. This is the shape
+/// every real Hungarian dossier has: the root is a certificate an operator
+/// pins, and the *issuing* CA is what the trusted list names as a CA/QC
+/// service.
+struct Hierarchy {
+    root_der: Vec<u8>,
+    intermediate_der: Vec<u8>,
+    signer_der: Vec<u8>,
+    signer_key: TestKey,
+}
+
+fn hierarchy(qc: &[&str]) -> Hierarchy {
+    let root_key = rsa_key(keys::ROOT_RSA2048);
+    let intermediate_key = rsa_key(keys::INTERMEDIATE_RSA2048);
+    let signer_key = rsa_key(keys::SIGNER_RSA2048);
+    let root = self_signed(
+        &CertSpec::ca("openSzigno Test Root", BasicConstraints::Unconstrained),
+        &root_key,
+    );
+    let intermediate = issued_by(
+        &CertSpec::ca(
+            "Qualified openSzigno CA 2009",
+            BasicConstraints::Constrained(0),
+        ),
+        &intermediate_key,
+        &root,
+        &root_key,
+    );
+    let mut signer_spec = CertSpec::signer("openSzigno Test Signer");
+    if !qc.is_empty() {
+        signer_spec.custom_extensions = vec![qc_statements_extension(qc)];
+    }
+    let signer = issued_by(&signer_spec, &signer_key, &intermediate, &intermediate_key);
+    Hierarchy {
+        root_der: root.der,
+        intermediate_der: intermediate.der,
+        signer_der: signer.der,
+        signer_key,
+    }
+}
+
+fn hierarchy_dossier(pki: &Hierarchy) -> String {
+    let mut signature = document_signature(vec![pki.signer_der.clone()]);
+    signature.signing_certificate = Some(SigningCertificateSpec::v1(pki.signer_der.clone()));
+    signature.certificate_values = vec![pki.intermediate_der.clone()];
+    let spec = DossierSpec {
+        document_signature: Some(signature),
+        ..Default::default()
+    };
+    build(&spec, &[("doc", &pki.signer_key)])
+}
+
+/// Verify with the root pinned in a `--trust-store` and the trusted list
+/// naming whichever certificate the test chooses.
+fn run_store_and_list(xml: &str, root_der: Vec<u8>, list: &str, time: &str) -> VerifyReport {
+    let backend = RoxmltreeC14n;
+    let mut trust = MemoryTrustStore::new(vec![root_der], Vec::new());
+    let loaded = openszigno_verify::trustlist::load(list.as_bytes(), &[], &backend)
+        .expect("the synthetic trusted list loads");
+    for check in loaded.checks {
+        trust.push_check(check);
+    }
+    trust.extend_anchors(loaded.anchors);
+
+    let revocation = MemoryRevocationStore::default();
+    let clock = FixedClock(parse_rfc3339(time).expect("the fixed time parses"));
+    let mut options = VerifyOptions::new(&clock, &trust, &revocation, &backend);
+    options.requested_time = Some(time.to_owned());
+    verify(xml.as_bytes(), &options).expect("the dossier parses structurally")
+}
+
+/// The trusted list names the **issuing CA**, not the root, and the root came
+/// from a directory. Asking only the anchor would report "not determined";
+/// asking the chain gets the right answer, which is the whole reason a trusted
+/// list is loaded.
+#[test]
+fn a_listed_intermediate_qualifies_the_chain() {
+    let pki = hierarchy(&["0.4.0.1862.1.1", "0.4.0.1862.1.4"]);
+    let list = build_trust_list(&TrustListSpec::new(vec![TlService::ca_qc(
+        "Qualified openSzigno CA 2009",
+        pki.intermediate_der.clone(),
+    )]));
+    let report = run_store_and_list(&hierarchy_dossier(&pki), pki.root_der.clone(), &list, AT);
+
+    assert_check(&report, CheckCode::CertPathOk, CheckStatus::Passed);
+    assert_check(&report, CheckCode::CertificateQualified, CheckStatus::Info);
+    assert_eq!(report.signatures[0].qualified, Some(true));
+    assert_eq!(report.signatures[0].qualified_signature_device, Some(true));
+    // The matched service is named, because a caller must be able to check the
+    // determination against the list themselves.
+    assert_eq!(
+        report.signatures[0].qualified_service.as_deref(),
+        Some("Qualified openSzigno CA 2009")
+    );
+    // The anchor is still the store's root, and is reported as such.
+    assert_eq!(
+        report.signatures[0]
+            .chain
+            .last()
+            .and_then(|entry| entry.trust_anchor_origin),
+        Some(TrustAnchorOrigin::TrustStore)
+    );
+}
+
+/// A service identity that is not in the chain but *issued* a certificate in
+/// it also covers the chain — and "issued" is a verified signature, so naming
+/// the right issuer is not enough.
+#[test]
+fn a_service_identity_that_issued_a_chain_certificate_covers_it() {
+    let pki = hierarchy(&["0.4.0.1862.1.1"]);
+    // The list names the root, which issued the intermediate in the chain. The
+    // root is also the store anchor, so this exercises the equals-DER branch
+    // and the origin preference below.
+    let list = build_trust_list(&TrustListSpec::new(vec![TlService::ca_qc(
+        "openSzigno Test Root",
+        pki.root_der.clone(),
+    )]));
+    let report = run_store_and_list(&hierarchy_dossier(&pki), pki.root_der.clone(), &list, AT);
+
+    assert_eq!(report.signatures[0].qualified, Some(true));
+    // The same certificate is both a store anchor and a trusted-list identity.
+    // The list is the stronger provenance and the one worth reporting.
+    assert_eq!(
+        report.signatures[0]
+            .chain
+            .last()
+            .and_then(|entry| entry.trust_anchor_origin),
+        Some(TrustAnchorOrigin::TrustList)
+    );
+}
+
+/// A certificate that merely *claims* a listed issuer is not covered by it:
+/// the match is a verified signature.
+#[test]
+fn a_name_match_alone_does_not_qualify_a_chain() {
+    let pki = hierarchy(&["0.4.0.1862.1.1"]);
+    // An impostor with the issuing CA's exact distinguished name and a
+    // different key. Nothing in the validated chain equals it, and nothing in
+    // the chain verifies against its key.
+    let impostor = self_signed(
+        &CertSpec::ca(
+            "Qualified openSzigno CA 2009",
+            BasicConstraints::Unconstrained,
+        ),
+        &rsa_key(keys::THIRD_RSA2048),
+    );
+    let list = build_trust_list(&TrustListSpec::new(vec![TlService::ca_qc(
+        "Qualified openSzigno CA 2009",
+        impostor.der,
+    )]));
+    let report = run_store_and_list(&hierarchy_dossier(&pki), pki.root_der.clone(), &list, AT);
+
+    assert_check(&report, CheckCode::CertPathOk, CheckStatus::Passed);
+    assert_check(
+        &report,
+        CheckCode::CertificateNotQualified,
+        CheckStatus::Info,
+    );
+    assert_eq!(report.signatures[0].qualified, Some(false));
+    assert_eq!(report.signatures[0].qualified_service, None);
+}
+
+/// A listed intermediate whose service was withdrawn before the validation
+/// time no longer qualifies the chain, even though the path still builds.
+#[test]
+fn a_withdrawn_intermediate_service_does_not_qualify() {
+    let pki = hierarchy(&["0.4.0.1862.1.1"]);
+    let mut service =
+        TlService::ca_qc("Qualified openSzigno CA 2009", pki.intermediate_der.clone());
+    service.status = STATUS_WITHDRAWN.to_owned();
+    service.status_starting_time = "2021-01-01T00:00:00Z".to_owned();
+    service.history = vec![(STATUS_GRANTED.to_owned(), "2016-07-01T00:00:00Z".to_owned())];
+    let list = build_trust_list(&TrustListSpec::new(vec![service]));
+    let dossier = hierarchy_dossier(&pki);
+
+    // While the service was granted, the chain qualifies.
+    let report = run_store_and_list(&dossier, pki.root_der.clone(), &list, AT);
+    assert_check(&report, CheckCode::CertPathOk, CheckStatus::Passed);
+    assert_eq!(report.signatures[0].qualified, Some(true));
+
+    // After the withdrawal the path still builds — the certificates are as
+    // valid as they were — but the chain is no longer qualified.
+    let report = run_store_and_list(
+        &dossier,
+        pki.root_der.clone(),
+        &list,
+        "2022-01-01T00:00:00Z",
+    );
+    assert_check(&report, CheckCode::CertPathOk, CheckStatus::Passed);
+    assert_eq!(report.signatures[0].qualified, Some(false));
+}
+
+// ---------------------------------------------------------------------------
+// Bootstrapping national lists from the list of trusted lists
+// ---------------------------------------------------------------------------
+
+/// The EU list of trusted lists names, in its `PointersToOtherTSL`, the signing
+/// certificates of the national lists. One out-of-band certificate — the
+/// LOTL's, from the Official Journal — therefore bootstraps the verification of
+/// every member state's list, which is the only chain of trust that means
+/// anything here.
+#[test]
+fn the_lotl_pointers_verify_a_national_list() {
+    let pki = pki((2019, 1, 1), &["0.4.0.1862.1.1"]);
+
+    // The national list, signed with a key only its own pointer names.
+    let national_signer_key = rsa_key(keys::THIRD_RSA2048);
+    let national_signer = self_signed(
+        &CertSpec::signer("openSzigno Test HU List Signer"),
+        &national_signer_key,
+    );
+    let mut national = TrustListSpec::new(vec![TlService::ca_qc(
+        "openSzigno Test Qualified CA",
+        pki.root_der.clone(),
+    )]);
+    national.signer = Some((rsa_key(keys::THIRD_RSA2048), national_signer.der.clone()));
+    let national_xml = build_trust_list(&national);
+
+    // The LOTL, signed with the certificate the caller holds out of band, and
+    // pointing at the national list's signer.
+    let mut lotl = TrustListSpec::new(Vec::new());
+    lotl.signer = Some((rsa_key(keys::SECOND_RSA2048), pki.tl_signer_der.clone()));
+    lotl.pointers = vec![national_signer.der.clone()];
+    let lotl_xml = build_trust_list(&lotl);
+
+    let loaded_lotl = openszigno_verify::trustlist::load(
+        lotl_xml.as_bytes(),
+        std::slice::from_ref(&pki.tl_signer_der),
+        &RoxmltreeC14n,
+    )
+    .expect("the LOTL loads");
+    assert!(
+        loaded_lotl
+            .checks
+            .iter()
+            .any(|check| check.code == CheckCode::TrustListSignatureOk),
+        "the LOTL must verify against the out-of-band certificate"
+    );
+    assert_eq!(loaded_lotl.pointer_certificates.len(), 1);
+    // The LOTL itself lists no CA/QC service, so it contributes no anchors.
+    assert!(loaded_lotl.anchors.is_empty());
+
+    let loaded_national = openszigno_verify::trustlist::load(
+        national_xml.as_bytes(),
+        &loaded_lotl.pointer_certificates,
+        &RoxmltreeC14n,
+    )
+    .expect("the national list loads");
+    assert!(
+        loaded_national
+            .checks
+            .iter()
+            .any(|check| check.code == CheckCode::TrustListSignatureOk),
+        "a pointer certificate must verify the national list"
+    );
+
+    // And a national list the pointers do not name is refused, so the pointer
+    // set is a real restriction rather than a formality.
+    let mut impostor = TrustListSpec::new(vec![TlService::ca_qc(
+        "openSzigno Test Qualified CA",
+        pki.root_der.clone(),
+    )]);
+    impostor.signer = Some((rsa_key(keys::SECOND_RSA2048), pki.tl_signer_der.clone()));
+    let loaded_impostor = openszigno_verify::trustlist::load(
+        build_trust_list(&impostor).as_bytes(),
+        &loaded_lotl.pointer_certificates,
+        &RoxmltreeC14n,
+    )
+    .expect("the list still parses");
+    assert!(
+        loaded_impostor
+            .checks
+            .iter()
+            .any(|check| check.code == CheckCode::TrustListSignatureInvalid),
+        "a list signed by a certificate no pointer names must not verify"
+    );
 }

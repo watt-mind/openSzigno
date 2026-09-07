@@ -537,3 +537,73 @@ fn human_output_states_the_policy() {
     assert!(text.contains("Revocation policy: offline"), "{text}");
     assert!(text.contains("not a legal opinion"), "{text}");
 }
+
+/// `--lotl` takes the national lists' signing certificates from the EU list of
+/// trusted lists, so one out-of-band certificate verifies both. The run still
+/// reaches `valid`.
+#[test]
+fn the_lotl_bootstraps_a_national_list_signature() {
+    let pki = pki();
+    let stores = Stores::new(
+        &pki,
+        &[build_crl(&CrlSpec::new(
+            pki.root_der.clone(),
+            rsa_key(keys::ROOT_RSA2048),
+        ))],
+    );
+    let directory = scratch();
+    let path = write_dossier(&directory, &dossier(&pki, signature(&pki)));
+
+    let national_signer = self_signed(
+        &CertSpec::signer("openSzigno Test HU List Signer"),
+        &rsa_key(keys::THIRD_RSA2048),
+    );
+    let mut national = TrustListSpec::new(vec![TlService::ca_qc(
+        "openSzigno Test Qualified CA",
+        pki.root_der.clone(),
+    )]);
+    national.signer = Some((rsa_key(keys::THIRD_RSA2048), national_signer.der.clone()));
+    let national_path = directory.path().join("HU_TL.xml");
+    std::fs::write(&national_path, build_trust_list(&national)).expect("the list is written");
+
+    let mut lotl = TrustListSpec::new(Vec::new());
+    lotl.signer = Some((rsa_key(keys::SECOND_RSA2048), pki.tl_signer_der.clone()));
+    lotl.pointers = vec![national_signer.der];
+    let lotl_path = directory.path().join("eu-lotl.xml");
+    std::fs::write(&lotl_path, build_trust_list(&lotl)).expect("the LOTL is written");
+
+    let signer_path = directory.path().join("lotl-signer.pem");
+    write_pem(&signer_path, "CERTIFICATE", &pki.tl_signer_der);
+
+    let output = run(&[
+        "verify",
+        path.to_str().unwrap(),
+        "--json",
+        "--at",
+        AT,
+        "--lotl",
+        lotl_path.to_str().unwrap(),
+        "--trust-list",
+        national_path.to_str().unwrap(),
+        "--trust-list-signer",
+        signer_path.to_str().unwrap(),
+        "--revocation-store",
+        stores.revocation().to_str().unwrap(),
+    ]);
+    assert_eq!(
+        status(&output),
+        0,
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let response = parse_json(&output);
+    assert_eq!(response["data"]["verdict"], "valid");
+    assert_eq!(response["data"]["signatures"][0]["qualified"], true);
+    // Both lists are cited, and both verified: the LOTL against the
+    // out-of-band certificate, the national list against a LOTL pointer.
+    let lists = response["data"]["policy"]["trust_lists"]
+        .as_array()
+        .expect("an array");
+    assert_eq!(lists.len(), 2);
+    assert!(lists.iter().all(|list| list["signature_verified"] == true));
+}

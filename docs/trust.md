@@ -14,6 +14,7 @@ anything.
 ```bash
 openszigno verify dossier.es3 --json \
   --trust-store   ./trust \
+  --lotl          ./trust-lists/eu-lotl.xml \
   --trust-list    ./trust-lists/HU_TL.xml \
   --trust-list-signer ./trust-lists/lotl-signer.pem \
   --revocation-store ./revocation
@@ -92,6 +93,25 @@ curl --proto '=https' --tlsv1.2 -sSf \
   https://nmhh.hu/tl/pub/HU_TL.xml -o trust-lists/HU_TL.xml
 ```
 
+### Bootstrapping national lists from the LOTL
+
+The LOTL's `PointersToOtherTSL` entries name the signing certificates of the
+national lists. `--lotl FILE` reads them, so **one** out-of-band certificate —
+the LOTL's, from the Official Journal — verifies the LOTL, and the LOTL's
+pointers then verify each `--trust-list`:
+
+```bash
+curl --proto '=https' --tlsv1.2 -sSf \
+  https://ec.europa.eu/tools/lotl/eu-lotl.xml -o trust-lists/eu-lotl.xml
+```
+
+The order is what makes it sound: the LOTL is verified against
+`--trust-list-signer` *first*, and only then are its pointer certificates
+trusted to verify anything. If the LOTL could not be verified its own
+`trust_list_unverified` check still blocks, so pointers taken from an
+unverified list cannot quietly support a `valid` verdict. The LOTL itself
+contributes no trust anchors: it names no CA/QC services, only pointers.
+
 ### Verifying the list's own signature
 
 A trusted list is itself XMLDSig-signed, and the whole point of a trusted list
@@ -107,11 +127,17 @@ same XMLDSig core it uses on a dossier — the same canonicalization backend, th
 same pinned algorithm and transform allowlists — and requires the signature to
 cover the whole document.
 
+Any one of the supplied certificates verifying is enough — the one from
+`--trust-list-signer` plus, when `--lotl` was given, every pointer certificate
+it named — because a scheme operator may publish several and a verifier cannot
+know which of them signed the copy in hand.
+
 - Signature verifies: `trust_list_signature_ok` (`passed`).
-- Signature does not verify, or the list carries none while one was demanded:
-  `trust_list_signature_invalid` (`failed`) — the run is `invalid`.
-- No `--trust-list-signer` given: `trust_list_unverified` (`unknown`). The
-  list's anchors are still used, but the run can never reach `valid`.
+- Signature does not verify against any supplied certificate, or the list
+  carries none while one was demanded: `trust_list_signature_invalid`
+  (`failed`) — the run is `invalid`.
+- No signer certificate at all: `trust_list_unverified` (`unknown`). The list's
+  anchors are still used, but the run can never reach `valid`.
 
 ### What is read, and what is not
 
@@ -151,23 +177,44 @@ Deliberately not read:
 
 ### How `qualified` is decided
 
-Two independent things must both hold, and neither is enough on its own:
+**Over the whole chain, not over its anchor.** This matters in practice: the
+Hungarian list names the *issuing* CAs — the "Qualified e-Szigno CA" style
+services — as its CA/QC service identities, while the Microsec roots that end
+the chain are certificates you pinned into `--trust-store` yourself. A rule that
+looked only at the anchor would answer "not determined" for every real dossier.
 
-1. the chain's anchor is a trusted-list entry whose CA/QC service was granted
-   at the validation time — a `--trust-store` anchor says *a human* trusts this
-   CA, which is not the same as a member state saying it may issue qualified
-   certificates; and
-2. for a certificate issued on or after 2016-07-01, when eIDAS began to apply,
-   the certificate itself asserts `QcCompliance`
-   (`0.4.0.1862.1.1`), because from then on a qualified certificate says so.
+Two things must both hold:
 
-`qualified_signature_device` reports the `QcSSCD`/QSCD statement
-(`0.4.0.1862.1.4`) separately. Both are claims by the issuer that the trusted
-list makes meaningful; neither is read as a determination on its own.
+1. some certificate in the validated chain **is**, or was **issued by**, the
+   service digital identity of a CA/QC service the list records as granted at
+   the validation time. "Issued by" is a verified signature, not a name match;
+   and
+2. the signing certificate's own `QCStatements` do not contradict it. A
+   certificate issued on or after 2016-07-01, when eIDAS began to apply, whose
+   `qcStatements` extension is present but omits `QcCompliance`
+   (`0.4.0.1862.1.1`) — or will not parse — contradicts the list and yields
+   `false`.
 
-The answer is `null`, never `false`, when no trusted list covers the anchor.
-"Not determined" and "determined not to be qualified" are different statements
-and the report keeps them apart.
+A post-eIDAS certificate carrying no `qcStatements` extension at all denies
+nothing, and the determination rests on the trusted list alone. That is the
+looser reading, taken deliberately: the list is the authority on which CA may
+issue qualified certificates, and an issuer that omitted an assertion has not
+denied it.
+
+`qualified_service` names the service that matched, so you can look the
+determination up in the list yourself. `qualified_signature_device` reports the
+`QcSSCD`/QSCD statement (`0.4.0.1862.1.4`) separately. Both are claims by the
+issuer that the trusted list makes meaningful; neither is read as a
+determination on its own.
+
+The answer is `null`, never `false`, when no trusted list was consulted;
+`false` when one was and nothing in the chain is covered. "Not determined" and
+"determined not to be qualified" are different statements and the report keeps
+them apart.
+
+When the same certificate is both a `--trust-store` anchor and a trusted-list
+service identity, the chain entry reports `trust_anchor_origin: "trust_list"`:
+the list is the stronger provenance.
 
 ## The revocation store
 
@@ -185,14 +232,42 @@ quietly dropped half its contents would be worse than no store at all.
 
 ### Where the data comes from, in priority order
 
-1. The signature's own `xades:RevocationValues` — `CRLValues` and `OCSPValues`,
-   in every XAdES namespace. This is what an archived, network-free validation
-   is meant to rely on, and it is what a long-term (`-XL`) signature carries
-   for exactly this purpose.
+1. The signature's own validation data — `CRLValues` and `OCSPValues` — from
+   **either** placement: directly under
+   `xades:UnsignedSignatureProperties/xades:RevocationValues`, or nested inside
+   an `xades141:TimeStampValidationData`. Real long-term Microsec dossiers put
+   almost all of their embedded OCSP responses in the second one, so both are
+   harvested; the container is matched in any recognised XAdES namespace and the
+   encapsulating elements inside it by name alone, because real dossiers nest
+   1.3.2-namespaced values under a 1.4.1-namespaced container.
 2. `--revocation-store DIR`.
 
 Within each tier OCSP is asked first, because it answers about *this*
 certificate rather than about a list.
+
+### What real dossiers actually embed, and what you still have to fetch
+
+**A real Microsec dossier embeds an OCSP response for the end-entity
+certificate only.** Its issuing CA and the root above that carry no embedded
+status at all. Since every non-anchor certificate in the chain needs a status —
+a revoked intermediate condemns everything under it, so exempting CAs would
+make the check worth much less than it looks — a `valid` verdict on real
+material needs the **CA CRLs** in `--revocation-store`, or online fetching once
+M3 ships.
+
+The tool tells you exactly which certificate is missing data. The message names
+it by role and by the public CA names around it, and repeats the CRL
+distribution point that certificate publishes, for example:
+
+```text
+revocation_status_unknown: no usable revocation data covers the intermediate CA
+Qualified e-Szigno CA 2009 issued by Microsec e-Szigno Root CA 2009: neither the
+signature's own RevocationValues nor the revocation store covers it; it
+publishes its CRL at http://...
+```
+
+Fetch that URL into `<store>/crls/` and re-run. The end-entity certificate's own
+subject is never repeated in a message, because that is the signer.
 
 Embedded data is **untrusted input**, exactly like the certificates in
 `CertificateValues`: the signer supplied it. Every CRL is signature-checked

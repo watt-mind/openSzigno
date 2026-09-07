@@ -60,19 +60,32 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
   `trust_list_loaded`, `trust_list_unverified`, `trust_list_signature_ok`,
   `trust_list_signature_invalid`, `certificate_qualified`,
   `certificate_not_qualified`, `certificate_qualified_unknown`.
-- Qualified status: `qualified` and `qualified_signature_device` per signature,
-  `true` only when a trusted list grants the anchor's CA/QC service at the
-  validation time **and**, for a certificate issued on or after 2016-07-01, the
-  certificate asserts `QcCompliance`. `null`, never `false`, when no trusted
-  list covers the anchor.
-- New flags: `--trust-list FILE`, `--trust-list-signer CERT`,
+- `--lotl FILE` reads the EU list of trusted lists and takes the national
+  lists' signing certificates from its `PointersToOtherTSL` entries, so one
+  out-of-band certificate bootstraps the verification of every `--trust-list`.
+  The LOTL is verified against `--trust-list-signer` first, and only then are
+  its pointers trusted; its own `trust_list_unverified` check still blocks when
+  it could not be verified. The LOTL contributes no trust anchors of its own.
+- Qualified status is determined **over the whole validated chain**, not over
+  its anchor: a chain is qualified when some certificate in it is, or was
+  issued by, the service digital identity of a granted CA/QC service. Real
+  trusted lists name the issuing CAs, which are intermediates, while the root
+  is usually a certificate the operator pinned into `--trust-store`, so an
+  anchor-only rule answers "not determined" for every real dossier. The signer's
+  `QCStatements` may then contradict the list: a post-eIDAS certificate whose
+  extension is present but omits `QcCompliance`, or will not parse, yields
+  `false`; one carrying no such extension denies nothing and rests on the list.
+  `qualified_service` names the service that matched. `null`, never `false`,
+  when no trusted list was consulted.
+- New flags: `--trust-list FILE`, `--lotl FILE`, `--trust-list-signer CERT`,
   `--revocation-store DIR`, `--no-revocation`. New error codes
   `trust_list_invalid` and `revocation_store_invalid` (exit 3).
 - New JSON fields: `policy.trust_lists[]` (territory, sequence number, issue
   date, next update, anchor count, whether the list's signature was verified);
   `signatures[].qualified` and `signatures[].qualified_signature_device`;
-  `chain[].trust_anchor_origin` (`trust_store` or `trust_list`); and
-  `chain[].revocation` with `status`, `code`, `source` (`embedded_crl`,
+  `signatures[].qualified_service`; `chain[].trust_anchor_origin`
+  (`trust_store` or `trust_list`, preferring `trust_list` when a certificate is
+  both); and `chain[].revocation` with `status`, `code`, `source` (`embedded_crl`,
   `embedded_ocsp`, `store_crl`, `store_ocsp`), `revocation_time`, `reason`,
   `this_update`, `next_update`, and `produced_at`. `schema_version` stays `1`:
   these are additions, and no existing field's contract changed.
@@ -84,10 +97,23 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
 
 - **New check status `info`**, for checks that report rather than decide. It is
   the only non-blocking status, which makes "`unknown` always blocks" true
-  without exception. `signing_time_present`, `cert_key_usage_advisory` and
-  `signature_timestamp_present` moved from `unknown` to `info`; consumers must
-  treat an unrecognised code as blocking unless its status is `passed` or
-  `info`.
+  without exception. `signing_time_present`, `cert_key_usage_advisory`,
+  `signature_timestamp_present`, `xades_signature_policy_implied` and
+  `xades_signature_policy_explicit` moved from `unknown` to `info`; a declared
+  signature policy describes how a signature was made and says nothing about
+  whether it is sound, so blocking on it capped every policy-bearing signature
+  at `indeterminate` for no gain. Consumers must treat an unrecognised code as
+  blocking unless its status is `passed` or `info`.
+- Embedded validation data is now harvested from
+  `xades141:TimeStampValidationData` as well as from a plain
+  `xades:RevocationValues` / `xades:CertificateValues`, for both CRLs, OCSP
+  responses and certificates. Real long-term Microsec dossiers file almost all
+  of their embedded OCSP responses in the former, so the previous reader found
+  nothing in most real material.
+- The revocation coverage message now names *which* certificate lacks data, by
+  role and by the public CA names around it, and repeats that certificate's CRL
+  distribution point when it publishes one. The end-entity certificate's own
+  subject is still never repeated.
 - `timestamp_verified` now summarises a token's checks **excluding** its
   revocation checks, which are folded into the signature's verdict separately
   so they are counted once. An unobtainable revocation answer for a TSA no

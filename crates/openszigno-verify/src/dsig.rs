@@ -655,6 +655,7 @@ fn finish(
             signing_certificate: signer.as_ref().map(ParsedCertificate::summary),
             qualified: None,
             qualified_signature_device: None,
+            qualified_service: None,
             chain: Vec::new(),
             references,
             xades: stage_c.report,
@@ -693,12 +694,16 @@ fn stage_c_presence(properties: &XadesProperties<'_, '_>) -> StageC {
 
     // A signature policy is reported by identifier only: no policy document is
     // fetched, parsed, or applied, so neither form can contribute a `passed`.
+    // Informational: a declared policy is a statement about how the signature
+    // was made, not a question this build failed to answer. Blocking on it
+    // would cap every policy-bearing signature at `indeterminate` for a
+    // property that says nothing about whether the signature is sound.
     match properties.signature_policy {
-        Some(SignaturePolicy::Implied) => checks.push(Check::unknown(
+        Some(SignaturePolicy::Implied) => checks.push(Check::info(
             CheckCode::XadesSignaturePolicyImplied,
             "the signature declares an implied signature policy; no policy is processed",
         )),
-        Some(SignaturePolicy::Explicit) => checks.push(Check::unknown(
+        Some(SignaturePolicy::Explicit) => checks.push(Check::info(
             CheckCode::XadesSignaturePolicyExplicit,
             "the signature declares an explicit signature policy; its identifier is reported and no policy is processed",
         )),
@@ -1397,24 +1402,35 @@ fn key_info_certificates(signature: Node<'_, '_>) -> Vec<ParsedCertificate> {
 ///
 /// Real dossiers put only the signer in `ds:KeyInfo` and carry the
 /// intermediates — and usually the root — in
-/// `xades:CertificateValues/xades:EncapsulatedX509Certificate`. These are
-/// **untrusted path candidates**: a self-signed root found here is still not an
-/// anchor, and only the trust store can make one.
+/// `xades:CertificateValues/xades:EncapsulatedX509Certificate`, and long-term
+/// material repeats them inside `xades141:TimeStampValidationData`. Both
+/// placements are harvested, and inside either container the element is matched
+/// by name alone, because real dossiers mix the 1.3.2 and 1.4.1 namespaces
+/// within one block.
+///
+/// These are **untrusted path candidates**: a self-signed root found here is
+/// still not an anchor, and only the trust store or a trusted list can make
+/// one.
 fn encapsulated_certificates(signature: Node<'_, '_>, limit: usize) -> Vec<ParsedCertificate> {
-    signature
-        .descendants()
-        .filter(|node| {
-            node.is_element()
-                && node.tag_name().name() == "EncapsulatedX509Certificate"
-                && node
-                    .tag_name()
-                    .namespace()
-                    .is_some_and(|namespace| XADES_NAMESPACES.contains(&namespace))
-        })
-        .filter_map(|node| decode_base64(&text_of(node)))
-        .filter_map(|der| ParsedCertificate::from_der(&der, CertificateSource::CertificateValues))
-        .take(limit)
-        .collect()
+    let mut certificates = Vec::new();
+    for container in xades::validation_data_containers(signature) {
+        for node in container.descendants().filter(|node| {
+            node.is_element() && node.tag_name().name() == "EncapsulatedX509Certificate"
+        }) {
+            if certificates.len() >= limit {
+                return certificates;
+            }
+            if let Some(certificate) = decode_base64(&text_of(node)).and_then(|der| {
+                ParsedCertificate::from_der(&der, CertificateSource::CertificateValues)
+            }) && !certificates
+                .iter()
+                .any(|existing: &ParsedCertificate| existing.der == certificate.der)
+            {
+                certificates.push(certificate);
+            }
+        }
+    }
+    certificates
 }
 
 /// Choose the signing certificate: the candidate whose public key actually

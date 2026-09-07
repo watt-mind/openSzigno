@@ -160,11 +160,23 @@ pub fn verify(bytes: &[u8], options: &VerifyOptions<'_>) -> Result<VerifyReport,
     let mut anchors: Vec<ParsedCertificate> = Vec::new();
     let mut anchor_provenance: Vec<(Vec<u8>, &trust::TrustAnchor)> = Vec::new();
     let mut store_certificates: Vec<ParsedCertificate> = Vec::new();
+    // Every trusted-list service identity, whether or not it is also an anchor.
+    // The identities that decide qualified status are usually the *issuing*
+    // CAs, which are intermediates: a list that names them says nothing about
+    // the root, and asking only the anchor would report `null` for exactly the
+    // chains a trusted list exists to describe.
+    let mut services: Vec<(ParsedCertificate, &trust::TrustAnchor)> = Vec::new();
     for anchor in options.trust.anchors() {
-        let Some(parsed) = ParsedCertificate::from_der(&anchor.der, CertificateSource::TrustStore)
-        else {
+        let source = match anchor.origin {
+            trust::TrustAnchorOrigin::TrustList => CertificateSource::TrustList,
+            trust::TrustAnchorOrigin::TrustStore => CertificateSource::TrustStore,
+        };
+        let Some(parsed) = ParsedCertificate::from_der(&anchor.der, source) else {
             continue;
         };
+        if anchor.service.is_some() {
+            services.push((parsed.clone(), anchor));
+        }
         if parsed.is_self_signed() {
             anchor_provenance.push((anchor.der.clone(), anchor));
             anchors.push(parsed);
@@ -330,25 +342,35 @@ pub fn verify(bytes: &[u8], options: &VerifyOptions<'_>) -> Result<VerifyReport,
                 .checks
                 .push(Check::new(path.code, status, path.message));
 
-            // --- The anchor's provenance, and what it makes this chain ------
+            // --- The anchor's provenance, and what the chain makes it -------
             if let Some(anchor) = path.path.last() {
+                // When the same certificate is both a store anchor and a
+                // trusted-list identity, the list is the stronger provenance
+                // and the one worth reporting: it says *who* vouches for the
+                // CA, where a directory only says that somebody copied it in.
+                let listed = services.iter().any(|(certificate, _)| {
+                    certificate.der == anchor.der
+                        && certificate.source == CertificateSource::TrustList
+                });
                 let provenance = anchor_provenance
                     .iter()
                     .find(|(der, _)| *der == anchor.der)
                     .map(|(_, anchor)| *anchor);
                 if let Some(entry) = chain.last_mut() {
-                    entry.trust_anchor_origin = provenance.map(|anchor| anchor.origin);
+                    entry.trust_anchor_origin = if listed {
+                        Some(trust::TrustAnchorOrigin::TrustList)
+                    } else {
+                        provenance.map(|anchor| anchor.origin)
+                    };
                 }
-                let (qualified, device, qualification_check) =
-                    qualification(provenance, &path.path, signature_time);
-                report.qualified = qualified;
-                report.qualified_signature_device = device;
+                let outcome = qualification(&services, &path.path, signature_time);
+                report.qualified = outcome.qualified;
+                report.qualified_signature_device = outcome.device;
+                report.qualified_service = outcome.service.clone();
                 if let Some(certificate) = report.signing_certificate.as_mut() {
-                    certificate.qualified = qualified;
+                    certificate.qualified = outcome.qualified;
                 }
-                if let Some(check) = qualification_check {
-                    report.checks.push(check);
-                }
+                report.checks.push(outcome.check);
             }
 
             // --- Stage E: revocation ----------------------------------------
@@ -453,78 +475,136 @@ pub fn verify(bytes: &[u8], options: &VerifyOptions<'_>) -> Result<VerifyReport,
 /// statement had not been mandated yet.
 const EIDAS_APPLICATION_DATE: trust::UnixTime = 1_467_324_000; // 2016-07-01T00:00:00Z
 
-/// Decide the qualified status of one chain.
+/// What was concluded about one chain's qualified status.
+struct Qualification {
+    qualified: Option<bool>,
+    device: Option<bool>,
+    service: Option<String>,
+    check: Check,
+}
+
+/// Decide the qualified status of one validated chain.
 ///
-/// Two independent things must both hold, and neither is enough on its own:
+/// The determination is made over the **whole chain**, not over its anchor. In
+/// a real trusted list the CA/QC service identities are the issuing CAs, which
+/// are intermediates; the root above them is often present only in a
+/// `--trust-store` directory, and sometimes is not listed at all. Asking only
+/// the anchor therefore reports "not determined" for precisely the chains a
+/// trusted list exists to describe.
 ///
-/// 1. the anchor must be a **trusted list** entry whose CA/QC service was
-///    granted at the validation time — a `--trust-store` anchor says a human
-///    trusts this CA, which is not the same as a member state saying it may
-///    issue qualified certificates;
-/// 2. for a certificate issued after eIDAS applied, the certificate must
-///    itself assert `QcCompliance`, because from then on a qualified
-///    certificate says so.
+/// So: a chain is qualified when some certificate in it **is**, or was
+/// **issued by**, the service digital identity of a CA/QC service the list
+/// records as granted at the validation time. "Issued by" is a verified
+/// signature, not a name match, so nothing is gained by minting a certificate
+/// that merely claims the right issuer.
 ///
-/// The answer is `None`, never `false`, when no trusted list was consulted:
+/// The signer's own `QCStatements` may then contradict the list, and do when a
+/// certificate issued after eIDAS applied carries the extension without
+/// `QcCompliance`, or carries one that will not parse. A post-eIDAS
+/// certificate with **no** `QCStatements` extension at all does not contradict
+/// anything, and the determination rests on the trusted list alone, exactly as
+/// it does for a pre-eIDAS certificate. That is the looser of the two readings
+/// and it is deliberate: the trusted list is the authority on which CA may
+/// issue qualified certificates, and an issuer that omitted an assertion has
+/// not denied it.
+///
+/// The answer is `None`, never `false`, when no trusted list covers the chain:
 /// "not determined" and "determined not to be qualified" are different
 /// statements and the report keeps them apart.
 fn qualification(
-    anchor: Option<&trust::TrustAnchor>,
+    services: &[(ParsedCertificate, &trust::TrustAnchor)],
     path: &[ParsedCertificate],
     time: trust::UnixTime,
-) -> (Option<bool>, Option<bool>, Option<Check>) {
-    let Some(service) = anchor.and_then(|anchor| anchor.service.as_ref()) else {
-        return (
-            None,
-            None,
-            Some(Check::info(
-                CheckCode::CertificateQualifiedUnknown,
-                "no trusted list covers this chain's trust anchor, so its qualified status is not determined",
-            )),
-        );
-    };
-    if !service.granted_at(time, trustlist::ServiceType::CaQc) {
-        return (
-            Some(false),
-            None,
-            Some(Check::info(
-                CheckCode::CertificateNotQualified,
-                "the trusted list does not record this chain's trust anchor as a granted CA/QC service at the validation time",
-            )),
-        );
+) -> Qualification {
+    let mut listed = false;
+    let mut matched: Option<(&ParsedCertificate, &trustlist::ServiceRecord)> = None;
+    for (identity, anchor) in services {
+        let Some(record) = anchor.service.as_ref() else {
+            continue;
+        };
+        listed = true;
+        if !record.granted_at(time, trustlist::ServiceType::CaQc) {
+            continue;
+        }
+        let covers = path.iter().any(|certificate| {
+            certificate.der == identity.der
+                || (certificate.issuer_der() == identity.subject_der()
+                    && crate::certs::verify_issued_by(certificate, identity))
+        });
+        if covers {
+            matched = Some((identity, record));
+            break;
+        }
     }
 
+    let Some((identity, record)) = matched else {
+        if !listed {
+            return Qualification {
+                qualified: None,
+                device: None,
+                service: None,
+                check: Check::info(
+                    CheckCode::CertificateQualifiedUnknown,
+                    "no trusted list was consulted, so this chain's qualified status is not determined",
+                ),
+            };
+        }
+        return Qualification {
+            qualified: Some(false),
+            device: None,
+            service: None,
+            check: Check::info(
+                CheckCode::CertificateNotQualified,
+                "no certificate in the validated chain is, or was issued by, a trusted-list CA/QC service granted at the validation time",
+            ),
+        };
+    };
+    let service_name = record
+        .service_name
+        .clone()
+        .or_else(|| crate::certs::common_name(&identity.certificate.tbs_certificate.subject));
+    let named = service_name
+        .as_deref()
+        .map(|name| format!(" ({name})"))
+        .unwrap_or_default();
+
     let leaf = &path[0];
-    let statements = leaf.qc_statement_oids();
     let post_eidas = crate::certs::unix_time(leaf.certificate.tbs_certificate.validity.not_before)
         >= EIDAS_APPLICATION_DATE;
-    let (compliant, device) = match &statements {
+    let (contradicts, device) = match leaf.qc_statement_oids() {
         Ok(Some(oids)) => (
-            oids.contains(&crate::certs::OID_QC_COMPLIANCE),
+            !oids.contains(&crate::certs::OID_QC_COMPLIANCE),
             Some(oids.contains(&crate::certs::OID_QC_SSCD)),
         ),
+        // No statement is not a denial; the list is the authority.
         Ok(None) => (false, None),
-        // A malformed QCStatements extension is not read past.
-        Err(()) => (false, None),
+        // A malformed extension is not read past.
+        Err(()) => (true, None),
     };
-    if post_eidas && !compliant {
-        return (
-            Some(false),
+    if post_eidas && contradicts {
+        return Qualification {
+            qualified: Some(false),
             device,
-            Some(Check::info(
+            service: service_name,
+            check: Check::info(
                 CheckCode::CertificateNotQualified,
-                "the trusted list grants the issuing service, but the signing certificate carries no QcCompliance statement and was issued after eIDAS applied",
-            )),
-        );
+                format!(
+                    "a trusted-list CA/QC service{named} covers this chain, but the signing certificate was issued after eIDAS applied and its QCStatements do not assert QcCompliance"
+                ),
+            ),
+        };
     }
-    (
-        Some(true),
+    Qualification {
+        qualified: Some(true),
         device,
-        Some(Check::info(
+        service: service_name,
+        check: Check::info(
             CheckCode::CertificateQualified,
-            "the chain ends at a trusted-list CA/QC service granted at the validation time",
-        )),
-    )
+            format!(
+                "the validated chain is covered by a trusted-list CA/QC service{named} granted at the validation time"
+            ),
+        ),
+    }
 }
 
 fn count(signatures: &[SignatureReport], verdict: Verdict) -> usize {

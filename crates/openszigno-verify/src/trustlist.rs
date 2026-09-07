@@ -69,6 +69,11 @@ pub const MAX_TRUST_LIST_BYTES: usize = 32 * 1024 * 1024;
 /// The largest number of anchors one list may contribute.
 const MAX_ANCHORS: usize = 4096;
 
+/// The largest number of pointer certificates read from a list of trusted
+/// lists, and so the largest number of candidate signers tried for one
+/// national list.
+const MAX_POINTER_CERTIFICATES: usize = 512;
+
 /// Which kind of service an anchor is the digital identity of.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -151,6 +156,12 @@ pub struct TrustList {
     pub issue_date: Option<String>,
     pub next_update: Option<String>,
     pub anchors: Vec<TrustAnchor>,
+    /// The certificates this list names in `PointersToOtherTSL`, which for the
+    /// EU list of trusted lists are the signing certificates of the national
+    /// lists it points at. Reading them is what lets one out-of-band
+    /// certificate — the LOTL's, from the Official Journal — bootstrap the
+    /// verification of every member state's list.
+    pub pointer_certificates: Vec<Vec<u8>>,
     /// Checks the list itself produced: whether its own signature was
     /// verified, and how many anchors it contributed.
     pub checks: Vec<Check>,
@@ -158,14 +169,18 @@ pub struct TrustList {
 
 /// Read a trusted list, optionally verifying its own XMLDSig signature.
 ///
-/// `signer_der` is the certificate the caller obtained out of band — for the
-/// LOTL, the one published in the Official Journal. Without it the list's
-/// signature is not checked and a blocking `trust_list_unverified` is emitted:
-/// a list that could be anyone's is still readable, but it can never
-/// contribute to a `valid` verdict.
+/// `signers` are the certificates the list is allowed to have been signed
+/// with: the one the caller obtained out of band — for the LOTL, from the
+/// Official Journal — and, for a national list, the pointer certificates a
+/// verified LOTL named for it. Any one of them verifying is enough, because a
+/// scheme operator may publish several and a verifier cannot know which of them
+/// signed the copy in hand. An empty slice means the signature is not checked
+/// at all, and a blocking `trust_list_unverified` is emitted: a list that could
+/// be anyone's is still readable, but it can never contribute to a `valid`
+/// verdict.
 pub fn load(
     bytes: &[u8],
-    signer_der: Option<&[u8]>,
+    signers: &[Vec<u8>],
     backend: &dyn C14nBackend,
 ) -> Result<TrustList, String> {
     if bytes.len() > MAX_TRUST_LIST_BYTES {
@@ -198,12 +213,38 @@ pub fn load(
         .map(|node| sanitize(&text(node)));
 
     let mut checks = Vec::new();
-    match signer_der {
-        Some(der) => checks.push(verify_list_signature(&source, root, der, backend)),
-        None => checks.push(Check::unknown(
+    if signers.is_empty() {
+        checks.push(Check::unknown(
             CheckCode::TrustListUnverified,
-            "the trusted list's own signature was not checked, because no --trust-list-signer certificate was given; its anchors are used but cannot support a valid verdict",
-        )),
+            "the trusted list's own signature was not checked, because no signer certificate was given; its anchors are used but cannot support a valid verdict",
+        ));
+    } else {
+        checks.push(verify_list_signature(&source, root, signers, backend));
+    }
+
+    // The pointers are read whatever the signature said, so that a caller can
+    // see what a list claims; whether the list was verified is reported
+    // separately and is what decides if those pointers may be relied on.
+    let mut pointer_certificates: Vec<Vec<u8>> = Vec::new();
+    if let Some(scheme) = scheme
+        && let Some(pointers) = child(scheme, "PointersToOtherTSL")
+    {
+        for node in pointers
+            .descendants()
+            .filter(|node| node.is_element() && node.tag_name().name() == "X509Certificate")
+        {
+            if pointer_certificates.len() >= MAX_POINTER_CERTIFICATES {
+                break;
+            }
+            let Some(der) = decode_base64(&text(node)) else {
+                continue;
+            };
+            if ParsedCertificate::from_der(&der, CertificateSource::TrustList).is_some()
+                && !pointer_certificates.contains(&der)
+            {
+                pointer_certificates.push(der);
+            }
+        }
     }
 
     let mut anchors = Vec::new();
@@ -231,6 +272,7 @@ pub fn load(
         issue_date,
         next_update,
         anchors,
+        pointer_certificates,
         checks,
     })
 }
@@ -343,15 +385,21 @@ fn read_instance(
 fn verify_list_signature(
     source: &XmlSource,
     root: Node<'_, '_>,
-    signer_der: &[u8],
+    signers: &[Vec<u8>],
     backend: &dyn C14nBackend,
 ) -> Check {
     let invalid = |message: &str| Check::failed(CheckCode::TrustListSignatureInvalid, message);
 
-    let Some(signer) = ParsedCertificate::from_der(signer_der, CertificateSource::TrustStore)
-    else {
-        return invalid("the --trust-list-signer file is not a usable X.509 certificate");
-    };
+    // Any one of the supplied certificates verifying is enough: a scheme
+    // operator may publish several, and a verifier cannot know which of them
+    // signed the copy in hand.
+    let candidates: Vec<ParsedCertificate> = signers
+        .iter()
+        .filter_map(|der| ParsedCertificate::from_der(der, CertificateSource::TrustStore))
+        .collect();
+    if candidates.is_empty() {
+        return invalid("no supplied trust-list signer is a usable X.509 certificate");
+    }
     let signatures: Vec<Node<'_, '_>> = root
         .children()
         .filter(|node| {
@@ -425,15 +473,22 @@ fn verify_list_signature(
     let Some(value) = decode_base64(&text(signature_value)) else {
         return invalid("the trusted list's ds:SignatureValue is not Base64");
     };
-    match crate::certs::verify_with_spki(&signer.certificate, scheme, &canonical, &value, false) {
-        Ok(()) => Check::passed(
+    let verified = candidates.iter().any(|candidate| {
+        crate::certs::verify_with_spki(&candidate.certificate, scheme, &canonical, &value, false)
+            .is_ok()
+    });
+    if verified {
+        return Check::passed(
             CheckCode::TrustListSignatureOk,
-            "the trusted list's own XMLDSig signature verified against the supplied signer certificate",
-        ),
-        Err(_) => invalid(
-            "the trusted list's own XMLDSig signature did not verify against the supplied signer certificate",
-        ),
+            format!(
+                "the trusted list's own XMLDSig signature verified against one of {} supplied signer certificate(s)",
+                candidates.len()
+            ),
+        );
     }
+    invalid(
+        "the trusted list's own XMLDSig signature did not verify against any supplied signer certificate",
+    )
 }
 
 /// Verify one reference of the trusted list's signature.

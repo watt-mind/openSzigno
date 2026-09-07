@@ -57,7 +57,7 @@ use sha2::{Digest as _, Sha256, Sha384, Sha512};
 use x509_cert::crl::{CertificateList, RevokedCert};
 use x509_cert::ext::pkix::CrlReason;
 use x509_cert::ext::pkix::crl::IssuingDistributionPoint;
-use x509_cert::ext::pkix::name::DistributionPointName;
+use x509_cert::ext::pkix::name::{DistributionPointName, GeneralName};
 use x509_ocsp::{BasicOcspResponse, CertStatus, OcspResponse, OcspResponseStatus, ResponderId};
 
 use crate::certs::{ParsedCertificate, verify_der_signature};
@@ -92,6 +92,9 @@ const IMPLEMENTED_ENTRY: &[ObjectIdentifier] = &[OID_CRL_REASON, OID_INVALIDITY_
 
 /// The largest CRL or OCSP response this build will parse.
 const MAX_ITEM_BYTES: usize = 8 * 1024 * 1024;
+
+/// The largest number of CRL distribution point URLs repeated in a message.
+const MAX_HINTED_URLS: usize = 2;
 
 /// Where one certificate's revocation answer came from.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -286,22 +289,86 @@ pub fn check_path(
     }
     per_certificate.push(CertificateRevocation::trust_anchor());
 
-    let check = summarise(&per_certificate, data);
+    let check = summarise(path, &per_certificate, data);
     PathRevocation {
         per_certificate,
         check,
     }
 }
 
+/// Name one certificate in a path the way a caller needs in order to act.
+///
+/// Only public CA material is used: a CA's subject common name and the issuer
+/// common name of any certificate are names of organisations, which is what a
+/// caller must know in order to fetch the right CRL. The **subject** of the
+/// end-entity certificate is never named, because that is the signer.
+fn describe(path: &[ParsedCertificate], index: usize) -> String {
+    let certificate = &path[index];
+    let issuer = crate::certs::common_name(&certificate.certificate.tbs_certificate.issuer);
+    let issued_by = issuer
+        .map(|name| format!(" issued by {name}"))
+        .unwrap_or_default();
+    if index == 0 {
+        return format!("the end-entity certificate{issued_by}");
+    }
+    match crate::certs::common_name(&certificate.certificate.tbs_certificate.subject) {
+        Some(subject) => format!("the intermediate CA {subject}{issued_by}"),
+        None => format!("an intermediate CA{issued_by}"),
+    }
+}
+
+/// The CRL distribution points a certificate publishes, as a hint a caller can
+/// act on directly. These are URLs a CA publishes for exactly this purpose.
+fn crl_hint(certificate: &ParsedCertificate) -> String {
+    let Some(points) = certificate.crl_distribution_points() else {
+        return String::new();
+    };
+    let mut urls: Vec<String> = Vec::new();
+    for point in points {
+        let Some(DistributionPointName::FullName(names)) = point.distribution_point.as_ref() else {
+            continue;
+        };
+        for name in names {
+            if let GeneralName::UniformResourceIdentifier(uri) = name {
+                let url = crate::xades::sanitize(uri.as_str());
+                if !url.is_empty() && !urls.contains(&url) {
+                    urls.push(url);
+                }
+            }
+        }
+        if urls.len() >= MAX_HINTED_URLS {
+            break;
+        }
+    }
+    if urls.is_empty() {
+        return String::new();
+    }
+    format!(
+        "; it publishes its CRL at {}",
+        urls[..urls.len().min(MAX_HINTED_URLS)].join(", ")
+    )
+}
+
 /// Fold the per-certificate answers into the one check the verdict sees.
-fn summarise(entries: &[CertificateRevocation], data: &RevocationData<'_>) -> Check {
+///
+/// The message names **which** certificate is the problem, by role and by the
+/// public CA names around it, and repeats the CRL distribution point that
+/// certificate publishes when it has one. Without that, a caller reading "no
+/// usable revocation data" cannot tell whether to fetch a CA's CRL or the
+/// end-entity's, which is the difference between a fixable run and a dead end.
+fn summarise(
+    path: &[ParsedCertificate],
+    entries: &[CertificateRevocation],
+    data: &RevocationData<'_>,
+) -> Check {
     let checked = entries
         .iter()
         .filter(|entry| entry.status != RevocationStatus::TrustAnchor)
         .count();
-    if let Some(entry) = entries
+    if let Some((index, entry)) = entries
         .iter()
-        .find(|entry| entry.status == RevocationStatus::Revoked)
+        .enumerate()
+        .find(|(_, entry)| entry.status == RevocationStatus::Revoked)
     {
         let when = entry
             .revocation_time
@@ -310,7 +377,8 @@ fn summarise(entries: &[CertificateRevocation], data: &RevocationData<'_>) -> Ch
         return Check::failed(
             CheckCode::CertRevoked,
             format!(
-                "a certificate in the path was revoked at {when} ({}), at or before the validation time",
+                "{} was revoked at {when} ({}), at or before the validation time",
+                describe(path, index),
                 entry.reason.unwrap_or("no reason given")
             ),
         );
@@ -323,8 +391,12 @@ fn summarise(entries: &[CertificateRevocation], data: &RevocationData<'_>) -> Ch
         CheckCode::RevocationDataStale,
         CheckCode::RevocationStatusUnknown,
     ] {
-        if entries.iter().any(|entry| entry.code == code.as_str()) {
-            return Check::unknown(code, message_for(code, data));
+        if let Some((index, _)) = entries
+            .iter()
+            .enumerate()
+            .find(|(_, entry)| entry.code == code.as_str())
+        {
+            return Check::unknown(code, message_for(code, path, index, data));
         }
     }
     Check::passed(
@@ -335,24 +407,35 @@ fn summarise(entries: &[CertificateRevocation], data: &RevocationData<'_>) -> Ch
     )
 }
 
-fn message_for(code: CheckCode, data: &RevocationData<'_>) -> String {
+fn message_for(
+    code: CheckCode,
+    path: &[ParsedCertificate],
+    index: usize,
+    data: &RevocationData<'_>,
+) -> String {
+    let what = describe(path, index);
     match code {
-        CheckCode::CertRevokedAfterValidationTime => {
-            "a certificate in the path was revoked after the validation time; that revocation does not apply at the instant being validated, and the tool declines to call the result good"
-                .to_owned()
+        CheckCode::CertRevokedAfterValidationTime => format!(
+            "{what} was revoked after the validation time; that revocation does not apply at the instant being validated, and the tool declines to call the result good"
+        ),
+        CheckCode::RevocationDataInvalid => format!(
+            "the revocation data for {what} could not be used: it was not signed by an authorised issuer, or it uses a form this build refuses"
+        ),
+        CheckCode::RevocationDataStale => format!(
+            "the revocation data for {what} had expired before the validation time{}",
+            crl_hint(&path[index])
+        ),
+        _ => {
+            let source = if data.is_empty() {
+                "the signature embeds none and no --revocation-store was given"
+            } else {
+                "neither the signature's own RevocationValues nor the revocation store covers it"
+            };
+            format!(
+                "no usable revocation data covers {what}: {source}{}",
+                crl_hint(&path[index])
+            )
         }
-        CheckCode::RevocationDataInvalid => {
-            "revocation data for a certificate in the path could not be used: it was not signed by an authorised issuer, or it uses a form this build refuses"
-                .to_owned()
-        }
-        CheckCode::RevocationDataStale => {
-            "the revocation data for a certificate in the path had expired before the validation time".to_owned()
-        }
-        _ if data.is_empty() => {
-            "no revocation data was available offline; supply --revocation-store, or a dossier whose RevocationValues carry it"
-                .to_owned()
-        }
-        _ => "no usable revocation data covers a certificate in the path".to_owned(),
     }
 }
 

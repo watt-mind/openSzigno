@@ -27,6 +27,7 @@ pub const ESZIGNO_NS: &str = "https://www.microsec.hu/ds/e-szigno30#";
 pub const DS_NS: &str = "http://www.w3.org/2000/09/xmldsig#";
 pub const XADES_NS: &str = "http://uri.etsi.org/01903/v1.3.2#";
 pub const XADES_NS_122: &str = "http://uri.etsi.org/01903/v1.2.2#";
+pub const XADES_NS_141: &str = "http://uri.etsi.org/01903/v1.4.1#";
 pub const SIGNED_PROPERTIES_TYPE_122: &str = "http://uri.etsi.org/01903/v1.2.2#SignedProperties";
 
 pub const C14N_EXC: &str = "http://www.w3.org/2001/10/xml-exc-c14n#";
@@ -324,6 +325,13 @@ pub struct SigSpec {
     pub revocation_crls: Vec<Vec<u8>>,
     /// DER OCSP responses for `xades:RevocationValues/xades:OCSPValues`.
     pub revocation_ocsp: Vec<Vec<u8>>,
+    /// Wrap the `RevocationValues` (and any `validation_data_certificates`) in
+    /// an `xades141:TimeStampValidationData`, in the XAdES 1.4.1 namespace,
+    /// which is where real long-term Microsec dossiers put almost all of their
+    /// embedded OCSP responses.
+    pub revocation_in_validation_data: bool,
+    /// Certificates to encapsulate inside the `TimeStampValidationData`.
+    pub validation_data_certificates: Vec<Vec<u8>>,
     /// An `Id` on `ds:SignatureValue`, so an `xades:Include` can name it.
     pub signature_value_id: Option<String>,
 }
@@ -467,6 +475,8 @@ pub fn document_signature(certificates: Vec<Vec<u8>>) -> SigSpec {
         extra_unsigned_property: None,
         revocation_crls: Vec::new(),
         revocation_ocsp: Vec::new(),
+        revocation_in_validation_data: false,
+        validation_data_certificates: Vec::new(),
         signature_value_id: None,
     }
 }
@@ -497,6 +507,8 @@ pub fn dossier_signature(certificates: Vec<Vec<u8>>) -> SigSpec {
         extra_unsigned_property: None,
         revocation_crls: Vec::new(),
         revocation_ocsp: Vec::new(),
+        revocation_in_validation_data: false,
+        validation_data_certificates: Vec::new(),
         signature_value_id: None,
     }
 }
@@ -970,6 +982,25 @@ fn render_signature(spec: &SigSpec, tag: &str, namespace: &str) -> String {
             "<xades:ArchiveTimeStamp><xades:EncapsulatedTimeStamp>AA==</xades:EncapsulatedTimeStamp></xades:ArchiveTimeStamp>",
         );
     }
+    let validation_data = spec.revocation_in_validation_data;
+    if validation_data {
+        // XAdES 1.4.1 keeps this in its own namespace while the values inside
+        // stay in the 1.3.2 one, which is exactly the mix real dossiers use and
+        // the reason the harvester matches the inner elements by name alone.
+        unsigned.push_str(&format!(
+            "<xades141:TimeStampValidationData xmlns:xades141=\"{XADES_NS_141}\">"
+        ));
+        if !spec.validation_data_certificates.is_empty() {
+            unsigned.push_str("<xades:CertificateValues>");
+            for certificate in &spec.validation_data_certificates {
+                unsigned.push_str(&format!(
+                    "<xades:EncapsulatedX509Certificate>{}</xades:EncapsulatedX509Certificate>",
+                    BASE64.encode(certificate)
+                ));
+            }
+            unsigned.push_str("</xades:CertificateValues>");
+        }
+    }
     if !spec.revocation_crls.is_empty() || !spec.revocation_ocsp.is_empty() {
         unsigned.push_str("<xades:RevocationValues>");
         if !spec.revocation_crls.is_empty() {
@@ -993,6 +1024,9 @@ fn render_signature(spec: &SigSpec, tag: &str, namespace: &str) -> String {
             unsigned.push_str("</xades:OCSPValues>");
         }
         unsigned.push_str("</xades:RevocationValues>");
+    }
+    if validation_data {
+        unsigned.push_str("</xades141:TimeStampValidationData>");
     }
     if let Some(name) = &spec.extra_unsigned_property {
         unsigned.push_str(&format!("<xades:{name}/>"));
@@ -1713,6 +1747,9 @@ pub struct TrustListSpec {
     /// Sign the list with this key and certificate, which a test then passes as
     /// `--trust-list-signer`.
     pub signer: Option<(TestKey, Vec<u8>)>,
+    /// Certificates to name in `PointersToOtherTSL`, which is how the EU list
+    /// of trusted lists says who signs each national list.
+    pub pointers: Vec<Vec<u8>>,
     /// Corrupt one byte of the list after signing it.
     pub tamper: bool,
 }
@@ -1726,6 +1763,7 @@ impl TrustListSpec {
             next_update: "2021-01-01T00:00:00Z".to_owned(),
             services,
             signer: None,
+            pointers: Vec::new(),
             tamper: false,
         }
     }
@@ -1755,6 +1793,22 @@ pub fn build_trust_list(spec: &TrustListSpec) -> String {
         "<tsl:NextUpdate><tsl:dateTime>{}</tsl:dateTime></tsl:NextUpdate>",
         spec.next_update
     ));
+    if !spec.pointers.is_empty() {
+        out.push_str("<tsl:PointersToOtherTSL>");
+        for certificate in &spec.pointers {
+            out.push_str(
+                "<tsl:OtherTSLPointer><tsl:ServiceDigitalIdentities><tsl:ServiceDigitalIdentity><tsl:DigitalId>",
+            );
+            out.push_str(&format!(
+                "<tsl:X509Certificate>{}</tsl:X509Certificate>",
+                BASE64.encode(certificate)
+            ));
+            out.push_str(
+                "</tsl:DigitalId></tsl:ServiceDigitalIdentity></tsl:ServiceDigitalIdentities></tsl:OtherTSLPointer>",
+            );
+        }
+        out.push_str("</tsl:PointersToOtherTSL>");
+    }
     out.push_str("</tsl:SchemeInformation>");
     out.push_str("<tsl:TrustServiceProviderList><tsl:TrustServiceProvider><tsl:TSPServices>");
     for service in &spec.services {

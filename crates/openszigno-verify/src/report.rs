@@ -130,6 +130,10 @@ pub struct SignatureReport {
     /// Whether the signing certificate claims a qualified signature creation
     /// device (`QcSSCD`/QSCD). Only meaningful alongside `qualified: true`.
     pub qualified_signature_device: Option<bool>,
+    /// The name of the trusted-list CA/QC service the chain matched, when one
+    /// did. A service name is public information a caller needs in order to
+    /// check the determination against the list themselves.
+    pub qualified_service: Option<String>,
     pub chain: Vec<ChainEntry>,
     pub references: Vec<ReferenceReport>,
     pub xades: XadesReport,

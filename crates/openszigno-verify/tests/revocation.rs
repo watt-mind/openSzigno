@@ -1334,3 +1334,182 @@ fn pem(der: &[u8], label: &str) -> String {
     out.push_str(&format!("-----END {label}-----\n"));
     out
 }
+
+// ---------------------------------------------------------------------------
+// Where embedded validation data actually lives
+// ---------------------------------------------------------------------------
+
+/// Real long-term dossiers file almost all of their embedded OCSP responses
+/// under `xades141:TimeStampValidationData` rather than directly under
+/// `UnsignedSignatureProperties`. Both placements must be harvested, or the
+/// tool finds nothing in most real material.
+#[test]
+fn revocation_values_are_harvested_from_both_placements() {
+    let pki = pki();
+    let response = build_ocsp(&OcspSpec::new(
+        pki.root_der.clone(),
+        pki.signer_der.clone(),
+        rsa_key(keys::ROOT_RSA2048),
+    ));
+
+    for nested in [false, true] {
+        let mut signature = plain_signature(&pki);
+        signature.revocation_ocsp = vec![response.clone()];
+        signature.revocation_in_validation_data = nested;
+        let xml = dossier(signature, &pki.signer_key);
+        let report = run(&xml, vec![pki.root_der.clone()], Vec::new(), Vec::new());
+
+        assert_check(&report, CheckCode::RevocationOk, CheckStatus::Passed);
+        assert_eq!(
+            report.signatures[0].chain[0]
+                .revocation
+                .as_ref()
+                .and_then(|entry| entry.source),
+            Some(RevocationOrigin::EmbeddedOcsp),
+            "nested in TimeStampValidationData: {nested}"
+        );
+    }
+}
+
+/// Certificates encapsulated inside `TimeStampValidationData` are path
+/// candidates like any other, so a chain whose intermediate is filed only
+/// there still builds.
+#[test]
+fn certificates_are_harvested_from_validation_data() {
+    let root_key = rsa_key(keys::ROOT_RSA2048);
+    let intermediate_key = rsa_key(keys::INTERMEDIATE_RSA2048);
+    let signer_key = rsa_key(keys::SIGNER_RSA2048);
+    let root = self_signed(
+        &CertSpec::ca("openSzigno Test Root", BasicConstraints::Unconstrained),
+        &root_key,
+    );
+    let intermediate = issued_by(
+        &CertSpec::ca(
+            "openSzigno Test Issuing CA",
+            BasicConstraints::Constrained(0),
+        ),
+        &intermediate_key,
+        &root,
+        &root_key,
+    );
+    let signer = issued_by(
+        &CertSpec::signer("openSzigno Test Signer"),
+        &signer_key,
+        &intermediate,
+        &intermediate_key,
+    );
+
+    let mut signature = document_signature(vec![signer.der.clone()]);
+    signature.signing_certificate = Some(SigningCertificateSpec::v1(signer.der.clone()));
+    // The intermediate exists nowhere else: not in ds:KeyInfo, not in a plain
+    // CertificateValues, and not in the trust store.
+    signature.revocation_in_validation_data = true;
+    signature.validation_data_certificates = vec![intermediate.der.clone()];
+    signature.revocation_ocsp = vec![build_ocsp(&OcspSpec::new(
+        intermediate.der.clone(),
+        signer.der.clone(),
+        rsa_key(keys::INTERMEDIATE_RSA2048),
+    ))];
+    let xml = dossier(signature, &signer_key);
+    let report = run(
+        &xml,
+        vec![root.der.clone()],
+        vec![build_crl(&CrlSpec::new(
+            root.der.clone(),
+            rsa_key(keys::ROOT_RSA2048),
+        ))],
+        Vec::new(),
+    );
+
+    assert_check(&report, CheckCode::CertPathOk, CheckStatus::Passed);
+    assert_check(&report, CheckCode::RevocationOk, CheckStatus::Passed);
+}
+
+// ---------------------------------------------------------------------------
+// Saying which certificate is missing data
+// ---------------------------------------------------------------------------
+
+/// "No usable revocation data" is useless without saying *for what*. The
+/// message must name the certificate by role and by the public CA names around
+/// it, and repeat the CRL distribution point that certificate publishes, so a
+/// caller knows which file to fetch.
+#[test]
+fn the_coverage_message_names_the_certificate_and_its_crl() {
+    const CDP: &str = "http://crl.example.invalid/issuing-ca.crl";
+    let root_key = rsa_key(keys::ROOT_RSA2048);
+    let intermediate_key = rsa_key(keys::INTERMEDIATE_RSA2048);
+    let signer_key = rsa_key(keys::SIGNER_RSA2048);
+    let root = self_signed(
+        &CertSpec::ca("openSzigno Test Root", BasicConstraints::Unconstrained),
+        &root_key,
+    );
+    let mut intermediate_spec = CertSpec::ca(
+        "openSzigno Test Issuing CA",
+        BasicConstraints::Constrained(0),
+    );
+    intermediate_spec.custom_extensions = vec![common::crl_distribution_point_extension(CDP)];
+    let intermediate = issued_by(&intermediate_spec, &intermediate_key, &root, &root_key);
+    let signer = issued_by(
+        &CertSpec::signer("openSzigno Test Signer"),
+        &signer_key,
+        &intermediate,
+        &intermediate_key,
+    );
+
+    // The signer's status is answered; the intermediate's is not, which is
+    // exactly the shape of a real dossier that embeds OCSP for the end entity
+    // only.
+    let mut signature = document_signature(vec![signer.der.clone()]);
+    signature.signing_certificate = Some(SigningCertificateSpec::v1(signer.der.clone()));
+    signature.certificate_values = vec![intermediate.der.clone()];
+    signature.revocation_ocsp = vec![build_ocsp(&OcspSpec::new(
+        intermediate.der.clone(),
+        signer.der.clone(),
+        rsa_key(keys::INTERMEDIATE_RSA2048),
+    ))];
+    let xml = dossier(signature, &signer_key);
+    let report = run(&xml, vec![root.der], Vec::new(), Vec::new());
+
+    let message = report.signatures[0]
+        .checks
+        .iter()
+        .find(|check| check.code == CheckCode::RevocationStatusUnknown)
+        .map(|check| check.message.clone())
+        .expect("the coverage gap is reported");
+    assert!(
+        message.contains("the intermediate CA openSzigno Test Issuing CA"),
+        "the message must name the certificate by role and CA name; got {message}"
+    );
+    assert!(
+        message.contains("issued by openSzigno Test Root"),
+        "the message must name the issuer; got {message}"
+    );
+    assert!(
+        message.contains(CDP),
+        "the message must repeat the CRL distribution point; got {message}"
+    );
+}
+
+/// The same naming applies to the end-entity certificate, and its *subject* is
+/// never repeated: that is the signer.
+#[test]
+fn the_coverage_message_never_names_the_signer() {
+    let pki = pki();
+    let xml = dossier(plain_signature(&pki), &pki.signer_key);
+    let report = run(&xml, vec![pki.root_der.clone()], Vec::new(), Vec::new());
+
+    let message = report.signatures[0]
+        .checks
+        .iter()
+        .find(|check| check.code == CheckCode::RevocationStatusUnknown)
+        .map(|check| check.message.clone())
+        .expect("the coverage gap is reported");
+    assert!(
+        message.contains("the end-entity certificate issued by openSzigno Test Root"),
+        "got {message}"
+    );
+    assert!(
+        !message.contains("openSzigno Test Signer"),
+        "the signer's own subject must never appear in a message; got {message}"
+    );
+}

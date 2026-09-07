@@ -98,10 +98,17 @@ struct VerifyArgs {
     trust_list: Vec<PathBuf>,
     /// Certificate, PEM or DER, that must have signed every `--trust-list`.
     /// Obtain it out of band: for the EU list of trusted lists, from the
-    /// Official Journal. Without it the lists are read but reported as
-    /// unverified, which caps the verdict at `indeterminate`.
+    /// Official Journal. Without it, and without `--lotl`, the lists are read
+    /// but reported as unverified, which caps the verdict at `indeterminate`.
     #[arg(long = "trust-list-signer", value_name = "CERT")]
     trust_list_signer: Option<PathBuf>,
+    /// EU list of trusted lists (XML). Its `PointersToOtherTSL` entries name
+    /// the signing certificates of the national lists, so one out-of-band
+    /// certificate — the LOTL's, passed as `--trust-list-signer` — bootstraps
+    /// the verification of every `--trust-list`. The LOTL contributes no trust
+    /// anchors of its own.
+    #[arg(long = "lotl", value_name = "FILE")]
+    lotl: Option<PathBuf>,
     /// Directory of CRLs (`crls/`) and OCSP responses (`ocsp/`) to check
     /// revocation against, in addition to the signature's own
     /// `xades:RevocationValues`. Nothing is ever fetched.
@@ -485,7 +492,7 @@ fn verify_command(args: &VerifyArgs) -> CliResult {
     let empty = openszigno_verify::NoTrust;
     let mut snapshots: Vec<TrustListSnapshot> = Vec::new();
     let trust: &dyn openszigno_verify::TrustSource =
-        if args.trust_store.is_some() || !args.trust_list.is_empty() {
+        if args.trust_store.is_some() || !args.trust_list.is_empty() || args.lotl.is_some() {
             let mut loaded = match &args.trust_store {
                 Some(directory) => trust_store::load(directory).map_err(|message| {
                     failure(
@@ -499,41 +506,36 @@ fn verify_command(args: &VerifyArgs) -> CliResult {
                 })?,
                 None => openszigno_verify::MemoryTrustStore::default(),
             };
-            let signer = match &args.trust_list_signer {
-                Some(path) => Some(load_signer(path).map_err(|message| {
-                    failure(
-                        input.clone(),
-                        CliError {
-                            code: "trust_list_invalid",
-                            message,
-                            exit: 3,
-                        },
-                    )
-                })?),
-                None => None,
+            let unusable = |message: String| {
+                failure(
+                    input.clone(),
+                    CliError {
+                        code: "trust_list_invalid",
+                        message,
+                        exit: 3,
+                    },
+                )
             };
+            let mut signers: Vec<Vec<u8>> = Vec::new();
+            if let Some(path) = &args.trust_list_signer {
+                signers.push(load_signer(path).map_err(unusable)?);
+            }
+            // The LOTL is verified first, against whatever out-of-band
+            // certificate the caller has, and only then are its pointers added
+            // to the signer pool. Its own `trust_list_unverified` check still
+            // blocks when it could not be verified, so pointers taken from an
+            // unverified list cannot quietly support a `valid` verdict.
+            if let Some(path) = &args.lotl {
+                let lotl = load_trust_list(path, &signers, &backend).map_err(unusable)?;
+                snapshots.push(snapshot_of(&lotl));
+                for check in &lotl.checks {
+                    loaded.push_check(check.clone());
+                }
+                signers.extend(lotl.pointer_certificates);
+            }
             for path in &args.trust_list {
-                let list =
-                    load_trust_list(path, signer.as_deref(), &backend).map_err(|message| {
-                        failure(
-                            input.clone(),
-                            CliError {
-                                code: "trust_list_invalid",
-                                message,
-                                exit: 3,
-                            },
-                        )
-                    })?;
-                snapshots.push(TrustListSnapshot {
-                    territory: list.territory.clone(),
-                    sequence_number: list.sequence_number,
-                    issue_date: list.issue_date.clone(),
-                    next_update: list.next_update.clone(),
-                    anchors: list.anchors.len(),
-                    signature_verified: list.checks.iter().any(|check| {
-                        check.code == openszigno_verify::CheckCode::TrustListSignatureOk
-                    }),
-                });
+                let list = load_trust_list(path, &signers, &backend).map_err(unusable)?;
+                snapshots.push(snapshot_of(&list));
                 for check in list.checks {
                     loaded.push_check(check);
                 }
@@ -621,14 +623,30 @@ fn load_signer(path: &Path) -> Result<Vec<u8>, String> {
 
 fn load_trust_list(
     path: &Path,
-    signer: Option<&[u8]>,
+    signers: &[Vec<u8>],
     backend: &RoxmltreeC14n,
 ) -> Result<openszigno_verify::TrustList, String> {
     let bytes = read_bounded(
         path,
         openszigno_verify::trustlist::MAX_TRUST_LIST_BYTES as u64,
     )?;
-    openszigno_verify::trustlist::load(&bytes, signer, backend)
+    openszigno_verify::trustlist::load(&bytes, signers, backend)
+}
+
+/// The policy block's citation of one list, so a result names exactly which
+/// snapshot it relied on.
+fn snapshot_of(list: &openszigno_verify::TrustList) -> TrustListSnapshot {
+    TrustListSnapshot {
+        territory: list.territory.clone(),
+        sequence_number: list.sequence_number,
+        issue_date: list.issue_date.clone(),
+        next_update: list.next_update.clone(),
+        anchors: list.anchors.len(),
+        signature_verified: list
+            .checks
+            .iter()
+            .any(|check| check.code == openszigno_verify::CheckCode::TrustListSignatureOk),
+    }
 }
 
 /// Read a regular file, refusing symlinks and anything over `limit` bytes.
