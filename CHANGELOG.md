@@ -197,4 +197,4 @@ This release performs no cryptographic verification of any kind.
   material is counted for reporting only.
 
 [0.1.0]: https://github.com/watt-mind/openSzigno/releases/tag/v0.1.0
-[Unreleased]: https://github.com/watt-mind/openSzigno/commits/develop
+[Unreleased]: https://github.com/watt-mind/openSzigno/compare/v0.1.0...develop
