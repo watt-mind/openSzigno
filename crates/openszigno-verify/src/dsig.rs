@@ -18,7 +18,7 @@ use crate::c14n::{C14nAlgorithm, C14nBackend, EXC_C14N_NAMESPACE, NodeSet};
 use crate::certs::{CertificateSource, ParsedCertificate, dedup};
 use crate::codes::{Check, CheckCode, CheckStatus, Verdict, verdict_of};
 use crate::policy::{Digest, SignatureScheme, Transform, VerifyLimits};
-use crate::report::{ReferenceReport, SignatureReport, SignatureScope, XadesReport};
+use crate::report::{ReferenceReport, SignatureReport, SignatureRole, SignatureScope, XadesReport};
 use crate::tsa::TimestampKind;
 use crate::xades::{self, BindingFailure, SignaturePolicy, XadesProperties};
 
@@ -45,6 +45,32 @@ const SIGNED_PROPERTIES_TYPES: &[&str] = &[
     "http://uri.etsi.org/01903/v1.4.1#SignedProperties",
 ];
 
+/// `ds:Reference/@Type` values that announce a countersignature reference.
+///
+/// ETSI EN 319 132-1 clause 5.2.7.1 (and TS 101903 clause 7.2.4.1 before it)
+/// define `http://uri.etsi.org/01903#CountersignedSignature` and say its
+/// "only purpose ... is to serve as an easy identification of a signature as
+/// being a countersignature". It is corroboration only, exactly like the
+/// `SignedProperties` `Type`: **resolution decides** what a reference covers,
+/// because an attacker writes the attribute. The versioned spellings are
+/// listed because legacy material uses them.
+const COUNTERSIGNED_SIGNATURE_TYPES: &[&str] = &[
+    "http://uri.etsi.org/01903#CountersignedSignature",
+    "http://uri.etsi.org/01903/v1.1.1#CountersignedSignature",
+    "http://uri.etsi.org/01903/v1.2.2#CountersignedSignature",
+    "http://uri.etsi.org/01903/v1.3.2#CountersignedSignature",
+    "http://uri.etsi.org/01903/v1.4.1#CountersignedSignature",
+];
+
+/// `es:SignatureProfile/es:Type` values that declare a countersignature.
+///
+/// The e-dossier specification, clause 3.2.1.3.4.1.3, allows `signature` and
+/// `countersignature` plus the deprecated Hungarian spellings the schema keeps
+/// for compatibility with earlier versions. The declaration is *signed* — the
+/// profile object is inside the mandated reference set — but it still only
+/// declares a role: the binding is decided by what the references resolve to.
+const COUNTERSIGNATURE_PROFILE_TYPES: &[&str] = &["countersignature", "ellenjegyzés"];
+
 /// Everything one signature needs, gathered once for the whole dossier.
 pub struct Context<'a, 'input, 's> {
     pub source: &'s str,
@@ -54,6 +80,9 @@ pub struct Context<'a, 'input, 's> {
     /// Every dossier namespace the caller allows, so an `es:SignatureProfile`
     /// is recognised whichever compatible profile declared it.
     pub allowed_namespaces: &'a [String],
+    /// Every `ds:Signature` in the dossier, in document order, so a nested
+    /// signature can name the index of the signature it is embedded in.
+    pub signatures: &'a [Node<'a, 'input>],
     pub backend: &'a dyn C14nBackend,
     pub limits: &'a VerifyLimits,
     /// Whether `--allow-legacy-algorithms` admits SHA-1 for diagnosis.
@@ -81,6 +110,13 @@ pub struct SignatureOutcome {
     /// The claimed `xades:SigningTime` in Unix seconds, for the ordering check
     /// against a token's `genTime`.
     pub claimed_signing_time: Option<crate::trust::UnixTime>,
+    /// Set when this signature is nested inside another one in a shape this
+    /// build does not support, and names the index of that enclosing
+    /// signature. The caller records an informational
+    /// `nested_signatures_unsupported` on it: an unsupported nested signature
+    /// says nothing about the signature it was dropped into, so it must not
+    /// touch that signature's verdict.
+    pub unsupported_nesting_parent: Option<usize>,
 }
 
 /// One timestamp token found in a signature, and the data it covers.
@@ -99,10 +135,77 @@ pub struct TimestampSource {
 struct Header {
     index: usize,
     scope: SignatureScope,
+    /// The index of the signature this one is embedded in, for a recognised
+    /// `xades:CounterSignature`.
+    parent_signature_index: Option<usize>,
+    role: SignatureRole,
+    /// Every signature whose `ds:SignatureValue` this signature's references
+    /// resolve to, by index.
+    countersigns: Vec<usize>,
     document_index: Option<usize>,
     signature_id: Option<String>,
     /// The claimed `xades:SigningTime`, RFC 3339 UTC.
     signing_time: Option<String>,
+}
+
+/// Where one `ds:Signature` sits, and what that placement is bound to.
+///
+/// The classification is lexical and is made before anything is verified: it
+/// decides which mandated reference set applies, and for a nested signature it
+/// names the signature that is countersigned.
+struct Placement<'a, 'input> {
+    scope: SignatureScope,
+    /// The enclosing `ds:Signature`, for any nested signature — recognised or
+    /// not. `None` for a top-level one.
+    enclosing: Option<Node<'a, 'input>>,
+    /// The index of `enclosing` in the dossier's signature list.
+    enclosing_index: Option<usize>,
+    /// Why an unsupported nesting is unsupported, in the tool's own words.
+    reason: Option<String>,
+}
+
+impl<'a, 'input> Placement<'a, 'input> {
+    fn unsupported(
+        enclosing: Option<Node<'a, 'input>>,
+        enclosing_index: Option<usize>,
+        reason: impl Into<String>,
+    ) -> Self {
+        Self {
+            scope: SignatureScope::Unknown,
+            enclosing,
+            enclosing_index,
+            reason: Some(reason.into()),
+        }
+    }
+
+    fn top_level(scope: SignatureScope) -> Self {
+        Self {
+            scope,
+            enclosing: None,
+            enclosing_index: None,
+            reason: None,
+        }
+    }
+}
+
+/// What the countersignature classification concluded about one signature.
+struct Binding {
+    role: SignatureRole,
+    /// The indexes of every signature whose `ds:SignatureValue` this
+    /// signature's references resolve to, ascending and deduplicated.
+    countersigns: Vec<usize>,
+    /// The `countersignature_binding_*` check, when one applies.
+    check: Option<Check>,
+}
+
+impl Binding {
+    const fn none() -> Self {
+        Self {
+            role: SignatureRole::Signature,
+            countersigns: Vec::new(),
+            check: None,
+        }
+    }
 }
 
 /// The outcome of stage C, gathered before the report is assembled.
@@ -125,14 +228,25 @@ pub fn verify_signature(
     let mut checks: Vec<Check> = Vec::new();
     let mut references_report: Vec<ReferenceReport> = Vec::new();
 
-    let scope = placement_of(context, signature);
+    let placement = placement_of(context, signature);
+    let scope = placement.scope;
     let properties = xades::parse(signature);
-    let header = Header {
+    let mut header = Header {
         index,
         scope,
+        parent_signature_index: match scope {
+            SignatureScope::Countersignature => placement.enclosing_index,
+            _ => None,
+        },
+        role: SignatureRole::Signature,
+        countersigns: Vec::new(),
         document_index: document_index_of(context, signature),
         signature_id: id_of(signature).map(str::to_owned),
         signing_time: properties.signing_time.clone(),
+    };
+    let unsupported_nesting_parent = match scope {
+        SignatureScope::Unknown => placement.enclosing_index,
+        _ => None,
     };
     let claimed_signing_time = properties
         .signing_time
@@ -149,7 +263,7 @@ pub fn verify_signature(
             "the signature is missing ds:SignedInfo or ds:SignatureValue",
         ));
         return finish(
-            header,
+            header.clone(),
             stage_c_presence(&properties),
             checks,
             references_report,
@@ -158,6 +272,7 @@ pub fn verify_signature(
             None,
             Vec::new(),
             claimed_signing_time,
+            unsupported_nesting_parent,
         );
     };
     let c14n_node = direct_child(signed_info, XMLDSIG_NAMESPACE, "CanonicalizationMethod");
@@ -170,7 +285,7 @@ pub fn verify_signature(
             "ds:SignedInfo is missing its canonicalization or signature method",
         ));
         return finish(
-            header,
+            header.clone(),
             stage_c_presence(&properties),
             checks,
             references_report,
@@ -179,6 +294,7 @@ pub fn verify_signature(
             None,
             Vec::new(),
             claimed_signing_time,
+            unsupported_nesting_parent,
         );
     };
     if reference_nodes.is_empty() {
@@ -187,7 +303,7 @@ pub fn verify_signature(
             "ds:SignedInfo contains no ds:Reference",
         ));
         return finish(
-            header,
+            header.clone(),
             stage_c_presence(&properties),
             checks,
             references_report,
@@ -196,6 +312,7 @@ pub fn verify_signature(
             None,
             Vec::new(),
             claimed_signing_time,
+            unsupported_nesting_parent,
         );
     }
     if reference_nodes.len() > context.limits.max_references_per_signature {
@@ -207,7 +324,7 @@ pub fn verify_signature(
             ),
         ));
         return finish(
-            header,
+            header.clone(),
             stage_c_presence(&properties),
             checks,
             references_report,
@@ -216,6 +333,7 @@ pub fn verify_signature(
             None,
             Vec::new(),
             claimed_signing_time,
+            unsupported_nesting_parent,
         );
     }
     checks.push(Check::passed(
@@ -233,9 +351,22 @@ pub fn verify_signature(
             CheckCode::SigPlacement,
             "the signature is placed on the dossier frame",
         )),
+        SignatureScope::Countersignature => checks.push(Check::passed(
+            CheckCode::SigPlacement,
+            format!(
+                "the signature is an enveloped xades:CounterSignature of signature {}",
+                placement.enclosing_index.unwrap_or_default()
+            ),
+        )),
         SignatureScope::Unknown => checks.push(Check::failed(
             CheckCode::SigPlacementInvalid,
-            "the signature is not at a placement the e-dossier format defines",
+            format!(
+                "the signature is not at a placement the e-dossier format defines: {}",
+                placement
+                    .reason
+                    .as_deref()
+                    .unwrap_or("the placement is not one this build describes")
+            ),
         )),
     }
 
@@ -400,11 +531,22 @@ pub fn verify_signature(
     checks.push(reference_scope_check(
         context,
         signature,
-        scope,
+        &placement,
         properties.qualifying_properties,
         &references,
         &resolved,
     ));
+
+    // --- Stage A10: the countersignature binding ----------------------------
+    // What a countersignature attests is *another signature's value*, so the
+    // binding is a policy question about the reference set and belongs here,
+    // beside the scope rule, not in the cryptographic stage.
+    let binding = countersignature_binding(context, signature, &placement, &references, &resolved);
+    header.role = binding.role;
+    header.countersigns = binding.countersigns;
+    if let Some(check) = binding.check {
+        checks.push(check);
+    }
 
     let policy_failed = checks
         .iter()
@@ -602,6 +744,7 @@ pub fn verify_signature(
         signer_index,
         timestamps,
         claimed_signing_time,
+        unsupported_nesting_parent,
     )
 }
 
@@ -616,6 +759,7 @@ fn finish(
     signer_index: Option<usize>,
     timestamps: Vec<TimestampSource>,
     claimed_signing_time: Option<crate::trust::UnixTime>,
+    unsupported_nesting_parent: Option<usize>,
 ) -> SignatureOutcome {
     checks.extend(stage_c.checks);
     // The claimed signing time is read and reported, never believed: it is a
@@ -640,6 +784,10 @@ fn finish(
         report: SignatureReport {
             index: header.index,
             scope: header.scope,
+            placement: header.scope,
+            role: header.role,
+            parent_signature_index: header.parent_signature_index,
+            countersigns: header.countersigns,
             document_index: header.document_index,
             signature_id: header.signature_id,
             verdict: Verdict::Indeterminate,
@@ -662,6 +810,7 @@ fn finish(
         extra_certificates,
         timestamps,
         claimed_signing_time,
+        unsupported_nesting_parent,
     }
 }
 
@@ -1178,11 +1327,12 @@ pub fn covers(resolved: &[NodeId], node: Node<'_, '_>) -> bool {
 fn reference_scope_check(
     context: &Context<'_, '_, '_>,
     signature: Node<'_, '_>,
-    scope: SignatureScope,
+    placement: &Placement<'_, '_>,
     xades: Option<Node<'_, '_>>,
     references: &[Reference],
     resolved: &[Option<Node<'_, '_>>],
 ) -> Check {
+    let scope = placement.scope;
     let namespace = context.namespace;
     // Each requirement lists the nodes that would satisfy it. An empty list
     // means the element the container mandates is not in the document at all,
@@ -1229,6 +1379,30 @@ fn reference_scope_check(
                     .collect(),
             ));
         }
+        SignatureScope::Countersignature => {
+            // A countersignature attests the *signature*, not the payload, so
+            // its mandated set says nothing about documents: EN 319 132-1
+            // clause 5.2.7.2 requires exactly one `ds:Reference` over the
+            // embedding signature's `ds:SignatureValue`, and the e-dossier
+            // rules for a document or frame signature do not apply to it.
+            let Some(parent) = placement.enclosing else {
+                return Check::unknown(
+                    CheckCode::ReferenceScopeUnknown,
+                    "the countersigned signature could not be determined",
+                );
+            };
+            let value = direct_child(parent, XMLDSIG_NAMESPACE, "SignatureValue");
+            if value.is_none() {
+                return Check::unknown(
+                    CheckCode::ReferenceScopeUnknown,
+                    "the countersigned signature carries no ds:SignatureValue, so the mandated reference set is undefined",
+                );
+            }
+            required.push((
+                "the countersigned ds:SignatureValue",
+                value.into_iter().collect(),
+            ));
+        }
         SignatureScope::Unknown => {
             return Check::unknown(
                 CheckCode::ReferenceScopeUnknown,
@@ -1242,10 +1416,19 @@ fn reference_scope_check(
     // wraps it, and the profile and qualifying-properties objects occur in
     // either order, so the object is found by content and both nodes satisfy
     // the requirement.
-    required.push((
-        "ds:Signature/ds:Object holding es:SignatureProfile",
-        signature_profile_nodes(signature, context.allowed_namespaces),
-    ));
+    //
+    // A countersignature is required to cover its profile object only when it
+    // carries one: the e-dossier format mandates the object for a document or
+    // frame signature, and a bare XMLDSIG countersignature under EN 319 132-1
+    // has no such element to cover.
+    let requires_profile = scope != SignatureScope::Countersignature
+        || own_signature_profile(signature, context.allowed_namespaces).is_some();
+    if requires_profile {
+        required.push((
+            "ds:Signature/ds:Object holding es:SignatureProfile",
+            signature_profile_nodes(signature, context.allowed_namespaces),
+        ));
+    }
 
     if xades.is_some() {
         // Decided by resolution: a reference that resolves to the
@@ -1317,6 +1500,10 @@ fn signature_profile_nodes<'a, 'input>(
                         .iter()
                         .any(|allowed| allowed == namespace)
                 })
+                // A nested countersignature carries its own profile inside
+                // this signature's qualifying-properties object; it satisfies
+                // that signature's requirement, never this one's.
+                && owning_signature(*node) == Some(signature)
         });
         if let Some(profile) = profile {
             nodes.push(object);
@@ -1341,6 +1528,10 @@ fn signed_properties<'a, 'input>(signature: Node<'a, 'input>) -> Option<Node<'a,
                 .tag_name()
                 .namespace()
                 .is_some_and(|namespace| XADES_NAMESPACES.contains(&namespace))
+            // A countersignature nested in this signature's unsigned
+            // properties has signed properties of its own; they are not this
+            // signature's, and covering them would satisfy nothing here.
+            && owning_signature(*node) == Some(signature)
     })
 }
 
@@ -1451,20 +1642,311 @@ fn element_path(node: Node<'_, '_>) -> String {
     parts.join("/")
 }
 
-fn placement_of(context: &Context<'_, '_, '_>, signature: Node<'_, '_>) -> SignatureScope {
-    let Some(parent) = signature.parent() else {
-        return SignatureScope::Unknown;
+/// Classify one `ds:Signature` by where it sits.
+///
+/// Four answers, and the fourth is deliberately not a synonym for "invalid":
+///
+/// - `document` and `dossier` are the two placements the e-dossier
+///   specification defines, and are direct children of `es:Document` and
+///   `es:Dossier` respectively.
+/// - `countersignature` is the XAdES enveloped form: the single `ds:Signature`
+///   child of an `xades:CounterSignature` that sits directly in another
+///   signature's `xades:UnsignedSignatureProperties`, in any recognised XAdES
+///   namespace. ETSI EN 319 132-1 clause 5.2.7.2 (TS 101903 clause 7.2.4.2)
+///   defines `CounterSignatureType` as a sequence of exactly one
+///   `ds:Signature`, so a `CounterSignature` holding two of them is not a
+///   countersignature this build will guess at.
+/// - `unknown` is every other nesting: **unsupported placement**, not
+///   forgery. The reason is carried so the check message can name it.
+fn placement_of<'a, 'input>(
+    context: &Context<'a, 'input, '_>,
+    signature: Node<'a, 'input>,
+) -> Placement<'a, 'input> {
+    let enclosing = enclosing_signature(signature);
+    let enclosing_index = enclosing.and_then(|node| signature_index(context, node));
+    let Some(parent) = signature.parent().filter(Node::is_element) else {
+        return Placement::unsupported(
+            enclosing,
+            enclosing_index,
+            "the signature has no element parent",
+        );
     };
-    if !parent.is_element() {
-        return SignatureScope::Unknown;
+
+    if let Some(enclosing) = enclosing {
+        return nested_placement(parent, enclosing, enclosing_index);
     }
+
     if parent.tag_name().namespace() != Some(context.namespace) {
-        return SignatureScope::Unknown;
+        return Placement::unsupported(
+            None,
+            None,
+            "the signature is not a direct child of es:Document or es:Dossier",
+        );
     }
     match parent.tag_name().name() {
-        "Document" => SignatureScope::Document,
-        "Dossier" => SignatureScope::Dossier,
-        _ => SignatureScope::Unknown,
+        "Document" => Placement::top_level(SignatureScope::Document),
+        "Dossier" => Placement::top_level(SignatureScope::Dossier),
+        _ => Placement::unsupported(
+            None,
+            None,
+            "the signature is not a direct child of es:Document or es:Dossier",
+        ),
+    }
+}
+
+/// Classify a `ds:Signature` that sits inside another one.
+fn nested_placement<'a, 'input>(
+    parent: Node<'a, 'input>,
+    enclosing: Node<'a, 'input>,
+    enclosing_index: Option<usize>,
+) -> Placement<'a, 'input> {
+    let unsupported =
+        |reason: &str| Placement::unsupported(Some(enclosing), enclosing_index, reason.to_owned());
+    if !is_xades(parent, "CounterSignature") {
+        return unsupported(
+            "the signature is nested inside another signature but is not the child of a xades:CounterSignature",
+        );
+    }
+    let siblings = direct_children(parent, XMLDSIG_NAMESPACE, "Signature").count();
+    if siblings != 1 {
+        // EN 319 132-1 clause 5.2.7.2: `CounterSignatureType` is a sequence of
+        // exactly one `ds:Signature`. Two of them leave two candidate parents
+        // and no rule for choosing, so nothing is guessed.
+        return unsupported(
+            "the xades:CounterSignature holds more than one ds:Signature, so which signature each one countersigns is ambiguous",
+        );
+    }
+    let Some(properties) = parent.parent().filter(Node::is_element) else {
+        return unsupported("the xades:CounterSignature has no element parent");
+    };
+    if !is_xades(properties, "UnsignedSignatureProperties") {
+        return unsupported(
+            "the xades:CounterSignature is not inside a xades:UnsignedSignatureProperties",
+        );
+    }
+    // The properties block has to belong to the signature the countersignature
+    // is lexically inside, or the "parent" it names is not the one it sits in.
+    if enclosing_signature(properties) != Some(enclosing) {
+        return unsupported(
+            "the xades:CounterSignature is not inside the enclosing signature's own unsigned properties",
+        );
+    }
+    if enclosing_index.is_none() {
+        return unsupported(
+            "the countersigned signature was not among the signatures this run examined",
+        );
+    }
+    Placement {
+        scope: SignatureScope::Countersignature,
+        enclosing: Some(enclosing),
+        enclosing_index,
+        reason: None,
+    }
+}
+
+/// The nearest `ds:Signature` strictly above a node.
+fn enclosing_signature<'a, 'input>(node: Node<'a, 'input>) -> Option<Node<'a, 'input>> {
+    node.ancestors().skip(1).find(|candidate| {
+        candidate.is_element()
+            && candidate.tag_name().namespace() == Some(XMLDSIG_NAMESPACE)
+            && candidate.tag_name().name() == "Signature"
+    })
+}
+
+/// The `ds:Signature` a node belongs to: itself when it is one, else the
+/// nearest one above it.
+fn owning_signature<'a, 'input>(node: Node<'a, 'input>) -> Option<Node<'a, 'input>> {
+    node.ancestors().find(|candidate| {
+        candidate.is_element()
+            && candidate.tag_name().namespace() == Some(XMLDSIG_NAMESPACE)
+            && candidate.tag_name().name() == "Signature"
+    })
+}
+
+/// This signature's index in the dossier's signature list.
+fn signature_index(context: &Context<'_, '_, '_>, signature: Node<'_, '_>) -> Option<usize> {
+    context
+        .signatures
+        .iter()
+        .position(|candidate| candidate.id() == signature.id())
+}
+
+/// Whether an element is `name` in any recognised XAdES namespace.
+fn is_xades(node: Node<'_, '_>, name: &str) -> bool {
+    node.is_element()
+        && node.tag_name().name() == name
+        && node
+            .tag_name()
+            .namespace()
+            .is_some_and(|namespace| XADES_NAMESPACES.contains(&namespace))
+}
+
+/// The signed `es:SignatureProfile/es:Type` of one signature, lowercased.
+///
+/// Read from the signature's *own* profile object only: a nested
+/// countersignature carries its own profile inside the enclosing signature's
+/// qualifying-properties object, and letting that answer for the enclosing
+/// signature would let a nested element relabel the signature it was dropped
+/// into.
+fn signature_profile_type(
+    signature: Node<'_, '_>,
+    allowed_namespaces: &[String],
+) -> Option<String> {
+    let profile = own_signature_profile(signature, allowed_namespaces)?;
+    let node = profile.children().find(|child| {
+        child.is_element()
+            && child.tag_name().name() == "Type"
+            && child.tag_name().namespace() == profile.tag_name().namespace()
+    })?;
+    Some(text_of(node).trim().to_lowercase())
+}
+
+/// The `es:SignatureProfile` element this signature carries in one of its own
+/// direct `ds:Object` children, in any allowed dossier namespace.
+fn own_signature_profile<'a, 'input>(
+    signature: Node<'a, 'input>,
+    allowed_namespaces: &[String],
+) -> Option<Node<'a, 'input>> {
+    direct_children(signature, XMLDSIG_NAMESPACE, "Object").find_map(|object| {
+        object.descendants().find(|node| {
+            node.is_element()
+                && node.tag_name().name() == "SignatureProfile"
+                && node.tag_name().namespace().is_some_and(|namespace| {
+                    allowed_namespaces
+                        .iter()
+                        .any(|allowed| allowed == namespace)
+                })
+                // A profile that belongs to a countersignature nested in this
+                // signature's unsigned properties is that signature's, not
+                // this one's.
+                && owning_signature(*node) == Some(signature)
+        })
+    })
+}
+
+/// Decide the countersignature role and the binding check.
+///
+/// Two shapes are recognised, and both are decided by **what the references
+/// resolve to**, never by an attribute:
+///
+/// - the XAdES enveloped form (`placement: countersignature`), which must
+///   reference the `ds:SignatureValue` of the signature it is embedded in;
+/// - the e-dossier form, an ordinary document- or dossier-level signature
+///   whose signed `es:SignatureProfile/es:Type` says `countersignature` and
+///   whose references resolve to another signature's `ds:SignatureValue`
+///   (e-dossier specification clauses 3.2.1.3.1 and 3.2.1.3.4.1.3).
+fn countersignature_binding(
+    context: &Context<'_, '_, '_>,
+    signature: Node<'_, '_>,
+    placement: &Placement<'_, '_>,
+    references: &[Reference],
+    resolved: &[Option<Node<'_, '_>>],
+) -> Binding {
+    // Every other signature whose `ds:SignatureValue` a reference resolved to.
+    let mut countersigns: Vec<usize> = Vec::new();
+    let mut foreign_values = 0usize;
+    let mut parent_value_covered = false;
+    let parent_value = placement
+        .enclosing
+        .and_then(|parent| direct_child(parent, XMLDSIG_NAMESPACE, "SignatureValue"));
+    for node in resolved.iter().flatten() {
+        if !(node.is_element()
+            && node.tag_name().namespace() == Some(XMLDSIG_NAMESPACE)
+            && node.tag_name().name() == "SignatureValue")
+        {
+            continue;
+        }
+        let Some(owner) = owning_signature(*node) else {
+            continue;
+        };
+        if owner.id() == signature.id() {
+            // Its own value. A signature cannot countersign itself.
+            continue;
+        }
+        if parent_value.is_some_and(|value| value.id() == node.id()) {
+            parent_value_covered = true;
+        } else {
+            foreign_values += 1;
+        }
+        if let Some(index) = signature_index(context, owner)
+            && !countersigns.contains(&index)
+        {
+            countersigns.push(index);
+        }
+    }
+    countersigns.sort_unstable();
+
+    let declared_type = references.iter().any(|reference| {
+        reference
+            .reference_type
+            .as_deref()
+            .is_some_and(|value| COUNTERSIGNED_SIGNATURE_TYPES.contains(&value))
+    });
+
+    match placement.scope {
+        SignatureScope::Countersignature => {
+            let parent = placement.enclosing_index.unwrap_or_default();
+            let check = if parent_value_covered {
+                let note = if declared_type {
+                    ", and declares the CountersignedSignature Type"
+                } else {
+                    ""
+                };
+                Check::passed(
+                    CheckCode::CountersignatureBindingOk,
+                    format!(
+                        "the countersignature references the ds:SignatureValue of signature {parent}, the signature it is embedded in{note}"
+                    ),
+                )
+            } else if foreign_values > 0 {
+                Check::failed(
+                    CheckCode::CountersignatureBindingMismatch,
+                    format!(
+                        "the countersignature resolves to the ds:SignatureValue of another signature, not of signature {parent}, the one it is embedded in"
+                    ),
+                )
+            } else {
+                Check::failed(
+                    CheckCode::CountersignatureBindingMissing,
+                    format!(
+                        "the countersignature does not reference the ds:SignatureValue of signature {parent}, the signature it is embedded in"
+                    ),
+                )
+            };
+            Binding {
+                role: SignatureRole::Countersignature,
+                countersigns,
+                check: Some(check),
+            }
+        }
+        SignatureScope::Document | SignatureScope::Dossier => {
+            let declared_profile = signature_profile_type(signature, context.allowed_namespaces)
+                .is_some_and(|value| COUNTERSIGNATURE_PROFILE_TYPES.contains(&value.as_str()));
+            if !declared_profile {
+                return Binding::none();
+            }
+            let check = if countersigns.is_empty() {
+                Check::failed(
+                    CheckCode::CountersignatureBindingMissing,
+                    "the signed es:SignatureProfile declares a countersignature, but no reference resolves to another signature's ds:SignatureValue",
+                )
+            } else {
+                Check::passed(
+                    CheckCode::CountersignatureBindingOk,
+                    format!(
+                        "the countersignature references the ds:SignatureValue of {} other signature(s)",
+                        countersigns.len()
+                    ),
+                )
+            };
+            Binding {
+                role: SignatureRole::Countersignature,
+                countersigns,
+                check: Some(check),
+            }
+        }
+        // The placement already failed; nothing is concluded about a role.
+        SignatureScope::Unknown => Binding::none(),
     }
 }
 
