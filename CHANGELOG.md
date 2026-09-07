@@ -10,6 +10,10 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.1.0] - 2026-09-07
+
 ### Fixed
 
 - CI hygiene: `retention-days: 1` on all artifact uploads, and the baseline
@@ -196,4 +200,5 @@ This release performs no cryptographic verification of any kind.
 - No code path labels cryptographic material as valid. Signature and timestamp
   material is counted for reporting only.
 
-[Unreleased]: https://github.com/watt-mind/openSzigno/commits/develop
+[0.1.0]: https://github.com/watt-mind/openSzigno/releases/tag/v0.1.0
+[Unreleased]: https://github.com/watt-mind/openSzigno/compare/v0.1.0...develop

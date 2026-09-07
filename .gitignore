@@ -6,3 +6,6 @@ samples/*
 
 # Local extraction scratch area for private samples.
 tmp/
+
+# Local cache of downloaded specifications; see docs/references.md.
+refs/
