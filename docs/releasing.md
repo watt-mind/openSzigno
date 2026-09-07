@@ -54,7 +54,7 @@ Once the version pull request is merged and CI is green on `develop`, open
 a pull request from `develop` to `master` and merge it. `master` is the
 stable branch and is what the tag points at.
 
-### 3. Create the draft release, which also creates the tag
+### 3. Create the draft release, then push the tag
 
 ```sh
 gh release create vX.Y.Z \
@@ -62,11 +62,13 @@ gh release create vX.Y.Z \
   --target master \
   --title "openSzigno X.Y.Z" \
   --notes-file notes.md
+git tag -a vX.Y.Z master -m "openSzigno X.Y.Z"
+git push origin vX.Y.Z
 ```
 
-`--target master` makes `gh` create the tag `vX.Y.Z` on the tip of
-`master` as part of creating the release, so there is no separate
-`git tag` and `git push`. Creating the tag is what starts `release.yml`.
+A draft release does not create its tag; GitHub creates the tag only when
+the release is published. `release.yml` starts on the tag push, finds the
+draft with the same tag name, uploads into it, and undrafts it at the end.
 Put the `CHANGELOG.md` section for this version in `notes.md`.
 
 The release must exist as a draft first: `create-release = false` in
@@ -219,6 +221,8 @@ itself, and so do both custom publish jobs.
 ```sh
 gh release create vX.Y.Z-rc.1 --draft --prerelease --target master \
   --notes "release candidate"
+git tag -a vX.Y.Z-rc.1 master -m "release candidate"
+git push origin vX.Y.Z-rc.1
 ```
 
 Delete the tag and the release afterwards:
