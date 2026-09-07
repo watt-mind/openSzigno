@@ -36,7 +36,11 @@ pub struct Counts {
     pub signatures_valid: usize,
     pub signatures_invalid: usize,
     pub signatures_indeterminate: usize,
+    /// Container timestamps present: every `es:TimeStamp` the dossier carries.
     pub timestamps: usize,
+    /// How many of those were fully verified — imprint, TSA signature,
+    /// `id-kp-timeStamping`, and a path to a configured anchor at `genTime`.
+    pub timestamps_verified: usize,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -155,5 +159,8 @@ pub struct VerifyReport {
     pub counts: Counts,
     /// Checks that belong to the dossier rather than to one signature.
     pub checks: Vec<Check>,
+    /// Every container-level `es:TimeStamp`, dossier and document alike, each
+    /// with its own checks. These decide nothing about any signature.
+    pub timestamps: Vec<TimestampReport>,
     pub signatures: Vec<SignatureReport>,
 }

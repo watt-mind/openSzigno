@@ -1290,7 +1290,7 @@ fn parse_reference(node: Node<'_, '_>, index: usize) -> Reference {
 }
 
 /// The `PrefixList` of an `ec:InclusiveNamespaces` child, if present.
-fn inclusive_prefixes(node: Node<'_, '_>) -> Vec<String> {
+pub(crate) fn inclusive_prefixes(node: Node<'_, '_>) -> Vec<String> {
     direct_child(node, EXC_C14N_NAMESPACE, "InclusiveNamespaces")
         .and_then(|element| attribute(element, "PrefixList"))
         .map(|list| {

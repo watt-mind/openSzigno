@@ -108,6 +108,12 @@ pub enum RevocationOrigin {
     StoreCrl,
     /// An OCSP response file in `--revocation-store DIR`.
     StoreOcsp,
+    /// A CRL the CLI fetched from a distribution point the certificate
+    /// publishes, under `--online`.
+    OnlineCrl,
+    /// An OCSP response the CLI fetched from an AIA responder the certificate
+    /// publishes, under `--online`.
+    OnlineOcsp,
 }
 
 impl RevocationOrigin {
@@ -117,6 +123,8 @@ impl RevocationOrigin {
             Self::EmbeddedOcsp => "embedded_ocsp",
             Self::StoreCrl => "store_crl",
             Self::StoreOcsp => "store_ocsp",
+            Self::OnlineCrl => "online_crl",
+            Self::OnlineOcsp => "online_ocsp",
         }
     }
 }
@@ -198,6 +206,12 @@ pub struct RevocationData<'a> {
     pub embedded_ocsp: &'a [Vec<u8>],
     pub store_crls: &'a [Vec<u8>],
     pub store_ocsp: &'a [Vec<u8>],
+    /// Artefacts the CLI fetched under `--online`. They are consulted last and
+    /// checked by exactly the same code as any offline item: fetching from a
+    /// URL a certificate published is a way of *obtaining* data, never a
+    /// reason to believe it.
+    pub online_crls: &'a [Vec<u8>],
+    pub online_ocsp: &'a [Vec<u8>],
 }
 
 impl RevocationData<'_> {
@@ -206,6 +220,8 @@ impl RevocationData<'_> {
             && self.embedded_ocsp.is_empty()
             && self.store_crls.is_empty()
             && self.store_ocsp.is_empty()
+            && self.online_crls.is_empty()
+            && self.online_ocsp.is_empty()
     }
 }
 
@@ -268,7 +284,33 @@ pub fn policy_check(policy: RevocationPolicy) -> Check {
             CheckCode::RevocationPolicy,
             "revocation is checked offline, from the signature's own RevocationValues and the revocation store",
         ),
+        RevocationPolicy::Online => Check::info(
+            CheckCode::RevocationPolicy,
+            "revocation is checked from the signature's own RevocationValues and the revocation store first, and --online allowed CRL distribution points and AIA OCSP responders named by the certificates themselves to be fetched for what they did not cover; every fetched artefact was checked by the same offline rules",
+        ),
     }
+}
+
+/// Whether offline material already answers `good` for one certificate.
+///
+/// This is the question `--online` asks before it fetches anything: online
+/// data may only *add* to what is already to hand, so the CLI consults the
+/// very same code path the verdict will use rather than a cheaper
+/// approximation of it. A certificate that is already covered is never
+/// fetched for, which is what keeps `--online` from broadcasting a request for
+/// every dossier a caller opens.
+pub fn is_covered(
+    subject: &ParsedCertificate,
+    issuer: &ParsedCertificate,
+    candidates: &[ParsedCertificate],
+    data: &RevocationData<'_>,
+    time: UnixTime,
+    limits: &VerifyLimits,
+) -> bool {
+    matches!(
+        check_certificate(subject, issuer, candidates, data, time, limits).status,
+        RevocationStatus::Good | RevocationStatus::Revoked
+    )
 }
 
 /// Check every certificate in `path` except the trust anchor.
@@ -530,6 +572,11 @@ fn message_for(
             } else {
                 "neither the signature's own RevocationValues nor the revocation store covers it"
             };
+            let source = if input.policy == RevocationPolicy::Online {
+                &format!("{source}, and nothing usable was fetched online either")
+            } else {
+                source
+            };
             format!(
                 "in {chain}, no usable revocation data covers {what}: {source}{}",
                 crl_hint(&path[index])
@@ -575,11 +622,15 @@ fn check_certificate(
     // network-free validation is meant to rely on; the store is the operator's
     // material and comes second. Within each tier OCSP is asked first, because
     // it answers about this certificate rather than about a list.
-    let tiers: [(RevocationOrigin, &[Vec<u8>]); 4] = [
+    // Online material comes last: it can only fill a gap the caller's own
+    // material left, never displace an answer that was already to hand.
+    let tiers: [(RevocationOrigin, &[Vec<u8>]); 6] = [
         (RevocationOrigin::EmbeddedOcsp, data.embedded_ocsp),
         (RevocationOrigin::EmbeddedCrl, data.embedded_crls),
         (RevocationOrigin::StoreOcsp, data.store_ocsp),
         (RevocationOrigin::StoreCrl, data.store_crls),
+        (RevocationOrigin::OnlineOcsp, data.online_ocsp),
+        (RevocationOrigin::OnlineCrl, data.online_crls),
     ];
 
     let mut fallback: Option<CertificateRevocation> = None;
@@ -589,10 +640,12 @@ fn check_certificate(
                 continue;
             }
             let answer = match origin {
-                RevocationOrigin::EmbeddedOcsp | RevocationOrigin::StoreOcsp => {
-                    ocsp_answer(item, subject, issuer, time)
-                }
-                RevocationOrigin::EmbeddedCrl | RevocationOrigin::StoreCrl => {
+                RevocationOrigin::EmbeddedOcsp
+                | RevocationOrigin::StoreOcsp
+                | RevocationOrigin::OnlineOcsp => ocsp_answer(item, subject, issuer, time),
+                RevocationOrigin::EmbeddedCrl
+                | RevocationOrigin::StoreCrl
+                | RevocationOrigin::OnlineCrl => {
                     crl_answer(item, subject, issuer, candidates, time)
                 }
             };
@@ -1121,6 +1174,59 @@ impl ParsedCertificate {
         )
         .ok()
     }
+}
+
+/// Build an RFC 6960 `OCSPRequest` asking about one certificate.
+///
+/// This is DER assembly, not networking: the crate still opens no socket, and
+/// what the CLI does with the bytes is the CLI's business. Building the
+/// request here keeps every line of OCSP ASN.1 this project speaks in one
+/// file, next to the code that will have to make sense of the answer.
+///
+/// The `certID` is computed with **SHA-256**, which is inside the pinned
+/// allowlist. RFC 6960 makes SHA-1 the default and a responder is entitled to
+/// answer only about the `certID` it was asked about, so a responder that
+/// insists on SHA-1 simply yields no usable answer and the certificate stays
+/// `revocation_status_unknown` — the same place it was before anything was
+/// fetched. Asking with SHA-1 to raise the hit rate would mean this build
+/// *generating* a legacy digest, which is a different thing from accepting one
+/// in an archived response it did not create.
+///
+/// No nonce is sent. A nonce defends a live request against replay, and the
+/// response is going to be handed to a verifier that deliberately ignores
+/// nonces because it must also read responses archived years ago; adding one
+/// would defend nothing and would make some responders refuse outright.
+pub fn ocsp_request(subject: &ParsedCertificate, issuer: &ParsedCertificate) -> Option<Vec<u8>> {
+    use der::asn1::OctetString;
+
+    let key = issuer
+        .certificate
+        .tbs_certificate
+        .subject_public_key_info
+        .subject_public_key
+        .as_bytes()?;
+    let cert_id = x509_ocsp::CertId {
+        hash_algorithm: x509_cert::spki::AlgorithmIdentifierOwned {
+            oid: OID_SHA256,
+            parameters: Some(der::Any::null()),
+        },
+        issuer_name_hash: OctetString::new(Sha256::digest(subject.issuer_der()).to_vec()).ok()?,
+        issuer_key_hash: OctetString::new(Sha256::digest(key).to_vec()).ok()?,
+        serial_number: subject.certificate.tbs_certificate.serial_number.clone(),
+    };
+    let request = x509_ocsp::OcspRequest {
+        tbs_request: x509_ocsp::TbsRequest {
+            version: x509_ocsp::Version::V1,
+            requestor_name: None,
+            request_list: vec![x509_ocsp::Request {
+                req_cert: cert_id,
+                single_request_extensions: None,
+            }],
+            request_extensions: None,
+        },
+        optional_signature: None,
+    };
+    request.to_der().ok()
 }
 
 /// What a file in a revocation store turned out to hold.

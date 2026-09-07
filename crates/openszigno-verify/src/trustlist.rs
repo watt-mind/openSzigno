@@ -19,9 +19,16 @@
 //! that CA was withdrawn, and a signature made after the withdrawal not.
 //!
 //! A `DigitalId` that carries only an `X509SubjectName` or an `X509SKI` — both
-//! common in real lists — is not an anchor: it identifies a certificate
+//! common in real lists — is **not** an anchor: it identifies a certificate
 //! without supplying one, and this build will not go looking. Only
-//! `X509Certificate` produces an anchor.
+//! `X509Certificate` produces an anchor. Since M3 the other two forms are
+//! still *read*, as service identities that can corroborate the qualified
+//! status of a chain some other anchor already validated: an `X509SKI` is
+//! matched against a certificate's `subjectKeyIdentifier` and an
+//! `X509SubjectName` against its **DER-encoded** subject, never by string
+//! comparison. Both are deliberately weaker than a certificate identity — a
+//! key identifier and a name are things a CA wrote down, not proof of
+//! possession — so they may decide `qualified`, and can never grant trust.
 //!
 //! # What is deliberately not done
 //!
@@ -41,7 +48,9 @@ use crate::c14n::{C14nAlgorithm, C14nBackend, NodeSet};
 use crate::certs::{CertificateSource, ParsedCertificate};
 use crate::codes::{Check, CheckCode};
 use crate::policy::{Digest, SignatureScheme, Transform};
-use crate::trust::{TrustAnchor, TrustAnchorOrigin, UnixTime, parse_rfc3339};
+use crate::trust::{
+    ServiceIdentity, TrustAnchor, TrustAnchorOrigin, TrustServiceIdentity, UnixTime, parse_rfc3339,
+};
 
 /// The TS 119 612 namespaces this build recognises. TLv5 and TLv6 share the
 /// element namespace; only the content differs.
@@ -50,18 +59,38 @@ const TSL_NAMESPACES: &[&str] = &["http://uri.etsi.org/02231/v2#"];
 const SVCTYPE_CA_QC: &str = "http://uri.etsi.org/TrstSvc/Svctype/CA/QC";
 const SVCTYPE_TSA_QTST: &str = "http://uri.etsi.org/TrstSvc/Svctype/TSA/QTST";
 
-/// The statuses that mean "this service may be relied on".
+/// The statuses that mean "this service may be relied on", at any time.
 ///
 /// `granted` is the eIDAS status; `recognisedatnationallevel` is the national
-/// equivalent a member state may publish. Every other status —
-/// `withdrawn`, `supervisionceased`, `deprecated*`, and the pre-eIDAS
-/// `undersupervision` and `accredited` — is deliberately absent: this build
-/// refuses to guess which historical status was equivalent to which, and
-/// reports the service as not granted instead of silently accepting it.
-const GRANTED_STATUSES: &[&str] = &[
+/// equivalent a member state may publish. Every terminal status —
+/// `withdrawn`, `supervisionceased`, the `deprecated*` family — is
+/// deliberately absent.
+pub const GRANTED_STATUSES: &[&str] = &[
     "http://uri.etsi.org/TrstSvc/TrustedList/Svcstatus/granted",
     "http://uri.etsi.org/TrstSvc/TrustedList/Svcstatus/recognisedatnationallevel",
 ];
+
+/// The pre-eIDAS statuses, which counted as granted **only while they were
+/// the current vocabulary** — that is, at a validation time before eIDAS began
+/// to apply.
+///
+/// Before 2016-07-01 a Hungarian supervised or accredited CA was exactly what
+/// a member state published for a CA entitled to issue qualified
+/// certificates; the eIDAS `granted` vocabulary did not exist yet. Refusing
+/// them outright, as this build did through M2, made every pre-2016 signature
+/// report `certificate_not_qualified` for a reason that had nothing to do with
+/// the signature. Honouring them *after* the migration would be the real
+/// mistake, because a service left at a pre-eIDAS status once the new
+/// vocabulary applied has not been granted under it — so the window is closed
+/// at [`EIDAS_APPLICATION_DATE`] and the status name is always reported
+/// alongside the determination.
+pub const PRE_EIDAS_GRANTED_STATUSES: &[&str] = &[
+    "http://uri.etsi.org/TrstSvc/TrustedList/Svcstatus/undersupervision",
+    "http://uri.etsi.org/TrstSvc/TrustedList/Svcstatus/accredited",
+];
+
+/// When eIDAS (Regulation (EU) 910/2014) began to apply.
+pub const EIDAS_APPLICATION_DATE: UnixTime = 1_467_324_000; // 2016-07-01T00:00:00Z
 
 /// The largest trusted list this build will parse.
 pub const MAX_TRUST_LIST_BYTES: usize = 32 * 1024 * 1024;
@@ -107,8 +136,11 @@ pub struct ServiceStatusEntry {
     pub service_type: ServiceType,
     /// The last path segment of the status URI, sanitised.
     pub status: String,
-    /// Whether this status means the service may be relied on.
+    /// Whether this status means the service may be relied on at any time.
     pub granted: bool,
+    /// Whether this is a pre-eIDAS status that counts as granted only at a
+    /// validation time before [`EIDAS_APPLICATION_DATE`].
+    pub granted_before_eidas: bool,
     /// RFC 3339 UTC, or `null` when the list gave an unparseable time.
     pub starting_time: Option<String>,
     #[serde(skip)]
@@ -142,9 +174,21 @@ impl ServiceRecord {
     }
 
     /// Whether this service was granted at `time` for the given kind of use.
+    ///
+    /// A pre-eIDAS status counts only at a `time` before eIDAS applied; see
+    /// [`PRE_EIDAS_GRANTED_STATUSES`].
     pub fn granted_at(&self, time: UnixTime, wanted: ServiceType) -> bool {
-        self.status_at(time)
-            .is_some_and(|entry| entry.granted && entry.service_type == wanted)
+        self.status_at(time).is_some_and(|entry| {
+            entry.service_type == wanted
+                && (entry.granted || (entry.granted_before_eidas && time < EIDAS_APPLICATION_DATE))
+        })
+    }
+
+    /// The name of the status that decided [`granted_at`](Self::granted_at),
+    /// so a report can say *which* status was honoured — an eIDAS `granted` and
+    /// a pre-eIDAS `accredited` are not the same statement.
+    pub fn status_name_at(&self, time: UnixTime) -> Option<&str> {
+        self.status_at(time).map(|entry| entry.status.as_str())
     }
 }
 
@@ -156,6 +200,10 @@ pub struct TrustList {
     pub issue_date: Option<String>,
     pub next_update: Option<String>,
     pub anchors: Vec<TrustAnchor>,
+    /// Every service digital identity the list records, in all three forms.
+    /// Only the `X509Certificate` ones are also anchors; the others can
+    /// corroborate a chain's qualified status and nothing else.
+    pub service_identities: Vec<TrustServiceIdentity>,
     /// The certificates this list names in `PointersToOtherTSL`, which for the
     /// EU list of trusted lists are the signing certificates of the national
     /// lists it points at. Reading them is what lets one out-of-band
@@ -248,12 +296,19 @@ pub fn load(
     }
 
     let mut anchors = Vec::new();
+    let mut service_identities = Vec::new();
     for service in root
         .descendants()
         .filter(|node| node.is_element() && node.tag_name().name() == "TSPService" && is_tsl(*node))
     {
-        collect_service(service, territory.as_deref(), sequence_number, &mut anchors);
-        if anchors.len() >= MAX_ANCHORS {
+        collect_service(
+            service,
+            territory.as_deref(),
+            sequence_number,
+            &mut anchors,
+            &mut service_identities,
+        );
+        if anchors.len() >= MAX_ANCHORS || service_identities.len() >= MAX_ANCHORS {
             break;
         }
     }
@@ -272,6 +327,7 @@ pub fn load(
         issue_date,
         next_update,
         anchors,
+        service_identities,
         pointer_certificates,
         checks,
     })
@@ -283,27 +339,26 @@ fn collect_service(
     territory: Option<&str>,
     sequence_number: Option<u64>,
     into: &mut Vec<TrustAnchor>,
+    identities_into: &mut Vec<TrustServiceIdentity>,
 ) {
     let Some(information) = child(service, "ServiceInformation") else {
         return;
     };
     let mut entries = Vec::new();
-    let mut certificates: Vec<Vec<u8>> = Vec::new();
-    let service_name = child(information, "ServiceName")
-        .and_then(|node| child(node, "Name"))
-        .map(|node| sanitize(&text(node)));
+    let mut identities: Vec<ServiceIdentity> = Vec::new();
+    let service_name = child(information, "ServiceName").and_then(preferred_name);
 
-    read_instance(information, &mut entries, &mut certificates);
+    read_instance(information, &mut entries, &mut identities);
     if let Some(history) = child(service, "ServiceHistory") {
         for instance in history
             .children()
             .filter(|node| node.is_element() && node.tag_name().name() == "ServiceHistoryInstance")
         {
-            read_instance(instance, &mut entries, &mut certificates);
+            read_instance(instance, &mut entries, &mut identities);
         }
     }
 
-    if entries.is_empty() || certificates.is_empty() {
+    if entries.is_empty() || identities.is_empty() {
         return;
     }
     entries.sort_by_key(|entry: &ServiceStatusEntry| entry.starting_unix);
@@ -313,21 +368,49 @@ fn collect_service(
         sequence_number,
         entries,
     };
-    for der in certificates {
-        into.push(TrustAnchor {
-            der,
-            origin: TrustAnchorOrigin::TrustList,
-            service: Some(record.clone()),
+    for identity in identities {
+        if let ServiceIdentity::Certificate(der) = &identity {
+            into.push(TrustAnchor {
+                der: der.clone(),
+                origin: TrustAnchorOrigin::TrustList,
+                service: Some(record.clone()),
+            });
+        }
+        identities_into.push(TrustServiceIdentity {
+            identity,
+            service: record.clone(),
         });
     }
 }
+
+/// The service name to report, preferring the English one.
+///
+/// TS 119 612 makes `ServiceName` a list of `Name` elements distinguished by
+/// `xml:lang`, and a national list writes its own language first. Reporting
+/// that name back to an operator who does not read it is unhelpful, so the
+/// `en` entry wins when the list publishes one and the first entry is used
+/// otherwise.
+fn preferred_name(container: Node<'_, '_>) -> Option<String> {
+    let names: Vec<Node<'_, '_>> = container
+        .children()
+        .filter(|node| node.is_element() && node.tag_name().name() == "Name" && is_tsl(*node))
+        .collect();
+    let english = names.iter().find(|node| {
+        node.attribute((XML_NAMESPACE, "lang"))
+            .is_some_and(|lang| lang.eq_ignore_ascii_case("en"))
+    });
+    english.or(names.first()).map(|node| sanitize(&text(*node)))
+}
+
+/// The XML namespace, which is where `xml:lang` lives.
+const XML_NAMESPACE: &str = "http://www.w3.org/XML/1998/namespace";
 
 /// Read the status and digital identity of one `ServiceInformation` or
 /// `ServiceHistoryInstance`.
 fn read_instance(
     node: Node<'_, '_>,
     entries: &mut Vec<ServiceStatusEntry>,
-    certificates: &mut Vec<Vec<u8>>,
+    identities: &mut Vec<ServiceIdentity>,
 ) {
     let Some(service_type) = child(node, "ServiceTypeIdentifier")
         .and_then(|node| ServiceType::from_uri(text(node).trim()))
@@ -343,31 +426,56 @@ fn read_instance(
         service_type,
         status: sanitize(status_uri.rsplit('/').next().unwrap_or_default()),
         granted: GRANTED_STATUSES.contains(&status_uri.as_str()),
+        granted_before_eidas: PRE_EIDAS_GRANTED_STATUSES.contains(&status_uri.as_str()),
         starting_time: starting_unix.map(crate::trust::format_rfc3339),
         starting_unix,
     });
 
-    for identity in node
+    for container in node
         .children()
         .filter(|node| node.is_element() && node.tag_name().name() == "ServiceDigitalIdentity")
     {
-        for certificate in identity
-            .descendants()
-            .filter(|node| node.is_element() && node.tag_name().name() == "X509Certificate")
-        {
-            let Some(der) = decode_base64(&text(certificate)) else {
-                continue;
+        for element in container.descendants().filter(Node::is_element) {
+            let found = match element.tag_name().name() {
+                "X509Certificate" => decode_base64(&text(element))
+                    // Parsed here so that a list which loads is one whose
+                    // every anchor was understood as a certificate.
+                    .filter(|der| {
+                        ParsedCertificate::from_der(der, CertificateSource::TrustList).is_some()
+                    })
+                    .map(ServiceIdentity::Certificate),
+                // An SKI is the raw octets of the subjectKeyIdentifier, Base64
+                // encoded. It names a certificate without carrying one.
+                "X509SKI" => decode_base64(&text(element))
+                    .filter(|bytes| !bytes.is_empty() && bytes.len() <= 64)
+                    .map(ServiceIdentity::SubjectKeyIdentifier),
+                // An RFC 4514 string, parsed back into a name and kept as DER
+                // so that the comparison is exact. A list that writes a name
+                // this build cannot parse contributes nothing, which is the
+                // safe direction: it can only cost coverage.
+                "X509SubjectName" => subject_name_der(&text(element)),
+                _ => None,
             };
-            // Parsed here so that a list which loads is one whose every anchor
-            // was understood as a certificate.
-            if ParsedCertificate::from_der(&der, CertificateSource::TrustList).is_none() {
-                continue;
-            }
-            if !certificates.contains(&der) {
-                certificates.push(der);
+            if let Some(identity) = found
+                && !identities.contains(&identity)
+            {
+                identities.push(identity);
             }
         }
     }
+}
+
+/// Parse an RFC 4514 distinguished name into the comparison key
+/// [`crate::certs::name_key`] defines.
+///
+/// A name written in a form this parser does not accept simply yields no
+/// identity. That is the conservative direction: it can lose coverage, never
+/// grant it.
+fn subject_name_der(text: &str) -> Option<ServiceIdentity> {
+    use std::str::FromStr as _;
+
+    let name = x509_cert::name::Name::from_str(text.trim()).ok()?;
+    Some(ServiceIdentity::SubjectName(crate::certs::name_key(&name)))
 }
 
 // ---------------------------------------------------------------------------

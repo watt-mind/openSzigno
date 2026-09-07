@@ -1567,7 +1567,7 @@ fn a_dossier_timestamp_does_not_block_a_signature() {
 
     assert_check(
         &report,
-        CheckCode::DossierTimestampNotValidated,
+        CheckCode::DocumentTimestampNotChecked,
         CheckStatus::Info,
     );
     assert_eq!(report.signatures[0].verdict, Verdict::Valid);

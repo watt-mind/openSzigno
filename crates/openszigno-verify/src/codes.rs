@@ -195,8 +195,13 @@ check_codes! {
     TimestampVerified => "timestamp_verified",
     ArchiveTimestampPresent => "archive_timestamp_present",
 
-    // Dossier-level `es:TimeStamp`, which M3 completes.
-    DossierTimestampNotValidated => "dossier_timestamp_not_validated",
+    // Dossier-level and document-level `es:TimeStamp` (M3).
+    DossierTimestampVerified => "dossier_timestamp_verified",
+    DossierTimestampInvalid => "dossier_timestamp_invalid",
+    DossierTimestampNotChecked => "dossier_timestamp_not_checked",
+    DocumentTimestampVerified => "document_timestamp_verified",
+    DocumentTimestampInvalid => "document_timestamp_invalid",
+    DocumentTimestampNotChecked => "document_timestamp_not_checked",
 }
 
 impl From<CheckCode> for &'static str {

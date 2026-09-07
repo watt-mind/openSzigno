@@ -37,6 +37,11 @@ const OID_ECDSA_SHA256: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840
 const OID_ECDSA_SHA384: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.10045.4.3.3");
 
 const OID_EXT_KEY_USAGE: ObjectIdentifier = ObjectIdentifier::new_unwrap("2.5.29.37");
+const OID_SUBJECT_KEY_IDENTIFIER: ObjectIdentifier = ObjectIdentifier::new_unwrap("2.5.29.14");
+const OID_AUTHORITY_INFO_ACCESS: ObjectIdentifier =
+    ObjectIdentifier::new_unwrap("1.3.6.1.5.5.7.1.1");
+/// `id-ad-ocsp`, the access method that names an OCSP responder.
+const OID_AD_OCSP: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.3.6.1.5.5.7.48.1");
 /// `id-pe-qcStatements`, RFC 3739 section 3.2.6.
 const OID_QC_STATEMENTS: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.3.6.1.5.5.7.1.3");
 /// `id-etsi-qcs-QcCompliance`, ETSI EN 319 412-5 section 4.2.1.
@@ -252,7 +257,11 @@ impl ParsedCertificate {
             .unwrap_or_default()
     }
 
-    pub(crate) fn issuer_der(&self) -> Vec<u8> {
+    /// The DER encoding of the issuer name, which is what "issued by" is
+    /// compared on. Never a string comparison: this project implements no RFC
+    /// 4518 name preparation, and a lenient comparison can only ever widen
+    /// what a chain accepts.
+    pub fn issuer_der(&self) -> Vec<u8> {
         self.certificate
             .tbs_certificate
             .issuer
@@ -354,6 +363,133 @@ impl ParsedCertificate {
             .map(Some)
             .map_err(|_| ())
     }
+
+    /// The raw `subjectKeyIdentifier` octets, when the certificate carries the
+    /// extension.
+    ///
+    /// A trusted list may name a service by SKI alone, which is why this is
+    /// public. It is an identifier a CA chose, not a proof of anything, so it
+    /// may corroborate a chain and never grant trust to one.
+    pub fn subject_key_identifier(&self) -> Option<Vec<u8>> {
+        let extensions = self.certificate.tbs_certificate.extensions.as_ref()?;
+        let extension = extensions
+            .iter()
+            .find(|extension| extension.extn_id == OID_SUBJECT_KEY_IDENTIFIER)?;
+        der::asn1::OctetString::from_der(extension.extn_value.as_bytes())
+            .ok()
+            .map(|value| value.as_bytes().to_vec())
+    }
+
+    /// The DER encoding of the subject name.
+    pub fn subject_name_der(&self) -> Vec<u8> {
+        self.subject_der()
+    }
+
+    /// The subject as a [`name_key`], for comparison against a trusted list's
+    /// `X509SubjectName` identity.
+    pub fn subject_name_key(&self) -> Vec<u8> {
+        name_key(&self.certificate.tbs_certificate.subject)
+    }
+
+    /// The `http`/`https` CRL distribution point URLs this certificate
+    /// publishes, in the order it publishes them.
+    ///
+    /// Only the `fullName`/`uniformResourceIdentifier` form is read: a
+    /// distribution point given as a name relative to the CRL issuer is one
+    /// this build refuses to use even when it is handed the file, so
+    /// constructing a URL for it would be pointless. The scheme is never
+    /// upgraded or rewritten — what a caller may fetch is exactly what the CA
+    /// published.
+    pub fn crl_distribution_urls(&self) -> Vec<String> {
+        let Some(points) = self.crl_distribution_points() else {
+            return Vec::new();
+        };
+        let mut urls = Vec::new();
+        for point in points {
+            let Some(x509_cert::ext::pkix::name::DistributionPointName::FullName(names)) =
+                point.distribution_point.as_ref()
+            else {
+                continue;
+            };
+            for name in names {
+                if let x509_cert::ext::pkix::name::GeneralName::UniformResourceIdentifier(uri) =
+                    name
+                {
+                    let url = uri.as_str().to_owned();
+                    if !urls.contains(&url) {
+                        urls.push(url);
+                    }
+                }
+            }
+        }
+        urls
+    }
+
+    /// The OCSP responder URLs this certificate's `authorityInfoAccess`
+    /// extension publishes, in order.
+    pub fn ocsp_responder_urls(&self) -> Vec<String> {
+        let Some(extensions) = self.certificate.tbs_certificate.extensions.as_ref() else {
+            return Vec::new();
+        };
+        let Some(extension) = extensions
+            .iter()
+            .find(|extension| extension.extn_id == OID_AUTHORITY_INFO_ACCESS)
+        else {
+            return Vec::new();
+        };
+        let Ok(descriptions) = Vec::<x509_cert::ext::pkix::AccessDescription>::from_der(
+            extension.extn_value.as_bytes(),
+        ) else {
+            return Vec::new();
+        };
+        let mut urls = Vec::new();
+        for description in descriptions {
+            if description.access_method != OID_AD_OCSP {
+                continue;
+            }
+            if let x509_cert::ext::pkix::name::GeneralName::UniformResourceIdentifier(uri) =
+                &description.access_location
+            {
+                let url = uri.as_str().to_owned();
+                if !urls.contains(&url) {
+                    urls.push(url);
+                }
+            }
+        }
+        urls
+    }
+}
+
+/// A comparison key for a distinguished name: every attribute's OID and its
+/// **value octets**, in order, with the ASN.1 string tag left out.
+///
+/// Everywhere else in this project a name is compared as DER, which is exact
+/// and conservative. One place cannot do that, and the reason is worth
+/// stating: a trusted list's `X509SubjectName` identity is an RFC 4514
+/// *string*, so re-encoding it can reproduce the attribute types, their order
+/// and their values, but not which of `PrintableString`, `UTF8String` or
+/// `IA5String` the CA happened to choose. A byte-for-byte DER comparison would
+/// therefore never match anything, which is a defect dressed up as strictness.
+///
+/// So the tag — an encoding choice the list cannot express — is dropped, and
+/// nothing else is. There is no case folding, no whitespace collapsing, and no
+/// RFC 4518 string preparation: two names that differ in a single character,
+/// in the order of their attributes, or in the number of them, are still
+/// different names. This is deliberately weaker than a certificate identity
+/// and is used for one purpose only, deciding `qualified`, where it can never
+/// grant trust.
+pub fn name_key(name: &Name) -> Vec<u8> {
+    let mut key = Vec::new();
+    for rdn in name.0.iter() {
+        key.push(b'/');
+        for attribute in rdn.0.iter() {
+            key.extend_from_slice(attribute.oid.as_bytes());
+            key.push(b'=');
+            key.extend_from_slice(attribute.value.value());
+            key.push(b',');
+        }
+    }
+    key
 }
 
 /// Read one or more certificates from a PEM or DER buffer.
