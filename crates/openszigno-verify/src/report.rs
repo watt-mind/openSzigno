@@ -118,6 +118,22 @@ pub struct SignatureReport {
     /// zero in document order, or `null` when none did.
     pub signing_certificate_index: Option<usize>,
     pub signing_certificate: Option<CertificateSummary>,
+    /// Whether this signature's certificate chain is qualified under eIDAS.
+    ///
+    /// `true` only when the chain ends at an anchor an ETSI TS 119 612 trusted
+    /// list lists as a granted CA/QC service at the validation time **and**,
+    /// for a certificate issued after eIDAS applied, the certificate itself
+    /// asserts `QcCompliance`. `false` when a trusted list says the answer is
+    /// no. `null` — never `false` — when no trusted list was consulted: "not
+    /// determined" and "determined not to be qualified" are different answers.
+    pub qualified: Option<bool>,
+    /// Whether the signing certificate claims a qualified signature creation
+    /// device (`QcSSCD`/QSCD). Only meaningful alongside `qualified: true`.
+    pub qualified_signature_device: Option<bool>,
+    /// The name of the trusted-list CA/QC service the chain matched, when one
+    /// did. A service name is public information a caller needs in order to
+    /// check the determination against the list themselves.
+    pub qualified_service: Option<String>,
     pub chain: Vec<ChainEntry>,
     pub references: Vec<ReferenceReport>,
     pub xades: XadesReport,

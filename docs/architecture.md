@@ -14,16 +14,12 @@ described here is intended to be stable for a given `schema_version`.
 
 ## Not yet implemented
 
-The current release does not do the following. The first three are planned
-milestones, described in [roadmap.md](roadmap.md); until the corresponding
-code exists, no output may claim or imply that a signature, timestamp,
-certificate, or dossier is valid.
+The current release does not do the following. Both are planned milestones,
+described in [roadmap.md](roadmap.md); until the corresponding code exists, no
+output may claim or imply that anything they would have checked was checked.
 
-- the XAdES qualifying properties (`SigningCertificate`, `SigningTime`,
-  signature policy, level detection), revocation checking, and trusted-list
-  based qualified-status determination that complete M2. `verify` ships the
-  M2 phase-1 subset described below and can never return `valid`;
-- timestamp verification (M3);
+- dossier-level `es:TimeStamp` validation and `--online` fetching of CRL
+  distribution points and OCSP responders, both M3;
 - decryption of encrypted payloads (M4).
 
 Permanent non-goals for this tool:
@@ -49,7 +45,7 @@ future library use possible without weakening CLI safety.
 `openszigno-verify` is a separate crate, not a module, so that the crypto
 dependency tree stays out of anyone who only wants parsing, and so that the
 verification code can be audited as a unit. It performs no I/O of its own:
-the clock, the trust store, and (from phase 3) revocation data all arrive
+the clock, the trust store, and revocation data all arrive
 through the injected `Clock`, `TrustSource`, and `RevocationSource` traits,
 which makes "offline by default" a structural property rather than a runtime
 flag someone can forget to check. It owns the whole verification pipeline —
@@ -382,9 +378,14 @@ Exit statuses are stable at the category level:
 Statuses 6 and 7 describe a run that *completed*: the dossier parsed, the
 signatures were examined, and the tool is reporting what it found. A structural
 failure during `verify` still exits 4, so a caller can tell "this is not a
-dossier" apart from "this dossier's signatures do not verify". Because this
-release checks neither revocation nor timestamps, a dossier that carries
-signatures can never exit 0.
+dossier" apart from "this dossier's signatures do not verify".
+
+`verify` exits `0` when the overall verdict is `valid`, which means every
+signature in the dossier is `valid` and every check on each of them passed —
+see [Verdicts](#verdicts) for exactly what that requires and
+[Verification boundary](#verification-boundary) for what it does not mean. A
+missing trust store, a trusted list whose own signature was not checked,
+missing revocation data, and `--no-revocation` all exit `7`, never `0`.
 
 Failures have `ok: false`, stable machine-readable error codes, and a nonzero
 exit status. An unsupported encrypted document is a successful parse with an
@@ -455,27 +456,38 @@ Warning codes. Warnings never change the exit status by themselves:
 
 ## The `verify` command
 
-`verify` is the M2 milestone. This release ships **phase 2**: the XMLDSig
-core, the XAdES signed properties, RFC 3161 signature timestamps, and
-certificate-path validation against a caller-supplied trust store at a
-validation time a verified timestamp may move. Revocation is still reported as
-`skipped`, which caps every verdict at `indeterminate`: **this release cannot
-return `valid`**, by construction and by test. A caller that sees
-`indeterminate` has learned that nothing failed, not that anything is
-trustworthy.
+`verify` is the M2 milestone. This release ships **phase 3**, which completes
+it: the XMLDSig core, the XAdES signed properties, RFC 3161 signature
+timestamps, certificate-path validation against a caller-supplied trust store
+and ETSI TS 119 612 trusted lists, and offline revocation checking.
+
+With revocation implemented, `valid` is reachable — and reachable only when
+every emitted check passed. A caller that sees `indeterminate` has learned that
+nothing failed, not that anything is trustworthy. `valid` means every check
+this build makes passed at the stated validation time; it is not a legal
+opinion, and [Verification boundary](#verification-boundary) says what it does
+not cover.
 
 ```text
 openszigno verify FILE [--json]
     --trust-store DIR           # anchors, and optional extra CA certificates
+    --trust-list FILE           # ETSI TS 119 612 trusted list, repeatable
+    --lotl FILE                 # EU list of trusted lists; names their signers
+    --trust-list-signer CERT    # certificate that must have signed each list
+    --revocation-store DIR      # CRLs and OCSP responses, offline
+    --no-revocation             # switch revocation off; caps at indeterminate
     --at <RFC3339>              # validation time; overrides any timestamp
     --allow-legacy-algorithms   # admit SHA-1 for diagnosis only
     --allow-namespace URI       # as on every other command, repeatable
 ```
 
 `--offline` is not a flag because offline is the only mode: the verifier
-performs no network or filesystem access of its own, in any mode. Reference
-resolution is strictly same-document, and the trust store is the only external
-material a run consults.
+performs no network access of its own, in any mode, and `openszigno-verify`
+structurally cannot — revocation data reaches it only through the injected
+`RevocationSource`. Reference resolution is strictly same-document, and the
+trust store, the trusted lists, and the revocation store are the only external
+material a run consults. [trust.md](trust.md) describes how to obtain and lay
+out all three.
 
 ### Verification pipeline
 
@@ -519,7 +531,12 @@ meaningless:
    verified the signature; a path is then built from it through the other
    candidate certificates to a configured anchor and validated at this
    signature's [validation time](#validation-time).
-6. **Revocation.** Reported as `skipped`, never silently omitted.
+6. **Revocation.** Every certificate in the signer's chain except the trust
+   anchor, and every certificate in each timestamp authority's chain except its
+   anchor, is checked against the signature's own `xades:RevocationValues` and
+   the revocation store (see [Revocation](#revocation)). The anchor is never
+   asked about: its revocation is not a question the PKI it roots can answer,
+   and asking would invite a self-signed CRL to speak for itself.
 
 ### Reference scope
 
@@ -569,7 +586,7 @@ caller can see exactly what was signed without any content leaving the tool.
 
 The e-dossier container specification deliberately places no constraint on
 canonicalization, digest, or signature algorithms, so this pinned policy is the
-only defence against an algorithm downgrade. It is not configurable in phase 1.
+only defence against an algorithm downgrade. It is not configurable.
 
 | Kind | Accepted | Refused |
 | --- | --- | --- |
@@ -912,7 +929,7 @@ says they should is `cert_malformed` (failed). Treating a decoding failure as
 absence would make a corrupt `keyUsage` or `nameConstraints` silently vanish,
 which is the wrong direction for every one of them.
 
-Not implemented in phase 1: authority/subject key identifier matching as a path
+Not implemented: authority/subject key identifier matching as a path
 hint, certificate policies and `policyConstraints`, `inhibitAnyPolicy`,
 qualified-status determination, and cross-certificate handling beyond what
 plain name chaining gives.
@@ -950,7 +967,234 @@ whole store. A file above 4 MiB, a directory holding more than 1024 entries, an
 entry that is not a valid certificate, and an empty store are all
 `trust_store_invalid` (exit 3), and the message names the entry's ordinal, never
 the file, because the path may be private. No trust anchors are compiled into
-the binary; importing a pinned EU trusted-list snapshot is phase 3.
+the binary.
+
+### Trusted lists
+
+`--trust-list FILE`, repeatable, loads an ETSI TS 119 612 trusted list. The
+combined anchor set is the union of the `--trust-store` anchors and the
+trusted-list ones, and each anchor is reported with its origin in the chain
+entry's `trust_anchor_origin` (`trust_store` or `trust_list`).
+
+A trusted list gives what a directory of certificates cannot: **when** each CA
+was entitled to issue qualified certificates. For every `TSPService` of type
+`.../Svctype/CA/QC` or `.../Svctype/TSA/QTST`, each `X509Certificate` in the
+service digital identity becomes an anchor carrying the service's status
+timeline — the current `ServiceStatus` and `StatusStartingTime` plus every
+`ServiceHistoryInstance`. The status in force **at the validation time**
+decides, which is what lets a signature made while a CA was supervised still
+verify after that CA was withdrawn.
+
+Only `granted` and `recognisedatnationallevel` count as granted. The pre-eIDAS
+statuses (`undersupervision`, `accredited`) and every terminal one
+(`withdrawn`, `supervisionceased`, the `deprecated*` family) do not: this build
+refuses to guess which historical status was equivalent to which.
+
+`--trust-list-signer CERT` supplies the certificate the list must have been
+signed with, obtained out of band — for the EU list of trusted lists, from the
+Official Journal. The list's enveloped XMLDSig signature is then verified with
+the same core, the same canonicalization backend, and the same pinned
+allowlists a dossier gets, and it must cover the whole document. Without it,
+and without `--lotl`, the list is still read but `trust_list_unverified`
+(`unknown`) is emitted, so the run can never reach `valid`. Nothing is fetched;
+`docs/trust.md` describes the manual download workflow.
+
+`--lotl FILE` reads the EU list of trusted lists. Its `PointersToOtherTSL`
+entries name the signing certificates of the national lists, so **one**
+out-of-band certificate bootstraps the verification of every `--trust-list`:
+the LOTL is verified against `--trust-list-signer` first, and only then are its
+pointer certificates added to the pool each national list's signature is tried
+against. Any one of them verifying is enough, because a scheme operator may
+publish several and a verifier cannot know which signed the copy in hand. The
+LOTL contributes no trust anchors of its own — it names no CA/QC services — and
+its own `trust_list_unverified` check still blocks when it could not be
+verified, so pointers taken from an unverified LOTL cannot quietly support a
+`valid` verdict.
+
+A `--trust-list` file that is not a trusted list, or a `--trust-list-signer`
+file that is not exactly one certificate, is `trust_list_invalid` (exit 3).
+
+#### Qualified status
+
+`qualified` is reported per signature, mirrored onto
+`signing_certificate.qualified`, and accompanied by `qualified_service`, the
+name of the trusted-list service that decided it.
+
+**The determination is made over the whole validated chain, not over its
+anchor.** In a real trusted list the CA/QC service identities are the *issuing*
+CAs, which are intermediates; the root above them is often present only in a
+`--trust-store` directory and is sometimes not listed at all. Asking only the
+anchor reports "not determined" for precisely the chains a trusted list exists
+to describe.
+
+So `qualified` is `true` when both of these hold:
+
+1. some certificate in the validated chain **is**, or was **issued by**, the
+   service digital identity of a CA/QC service the list records as granted at
+   the validation time. "Issued by" is a verified signature, not a name match,
+   so a certificate that merely claims a listed issuer gains nothing; and
+2. the signing certificate's own `QCStatements` do not contradict that. A
+   certificate issued on or after 2016-07-01, when eIDAS began to apply, whose
+   `qcStatements` extension is **present but omits** `QcCompliance`
+   (`0.4.0.1862.1.1`), or which will not parse, contradicts the list and yields
+   `false`.
+
+A post-eIDAS certificate carrying **no** `qcStatements` extension at all denies
+nothing, and the determination rests on the trusted list alone, exactly as it
+does for a pre-eIDAS certificate. That is the looser of the two readings and it
+is deliberate: the trusted list is the authority on which CA may issue
+qualified certificates, and an issuer that omitted an assertion has not denied
+it.
+
+`qualified_signature_device` reports the `QcSSCD`/QSCD statement
+(`0.4.0.1862.1.4`) separately. Both are the issuer's claims, which only a
+trusted list makes meaningful.
+
+The value is `null`, never `false`, when no trusted list was consulted at all;
+`false` when one was and nothing in the chain is covered by a granted CA/QC
+service. "Not determined" and "determined not to be qualified" are different
+answers and the report keeps them apart. The three outcomes are reported as
+`certificate_qualified`, `certificate_not_qualified`, and
+`certificate_qualified_unknown`, all `info`, because they describe a legal
+category rather than the cryptographic soundness of the signature.
+
+When the same certificate is both a `--trust-store` anchor and a trusted-list
+service identity, `trust_anchor_origin` reports `trust_list`: the list is the
+stronger provenance, because it says *who* vouches for the CA where a directory
+only says that somebody copied it in.
+
+Scheme-level `Qualifications` extensions, which refine qualified status per
+certificate subset, are not processed and are never used to widen a
+determination.
+
+### Revocation
+
+Offline by default and offline only. Data is consulted in this order, and the
+first source that yields a definite answer for a certificate wins:
+
+1. the signature's own validation data — `EncapsulatedOCSPValue`, then
+   `EncapsulatedCRLValue` — from **either** placement: directly under
+   `xades:UnsignedSignatureProperties/xades:RevocationValues`, or inside an
+   `xades141:TimeStampValidationData`. Real long-term Microsec dossiers file
+   almost all of their embedded OCSP responses in the second, so a verifier
+   that reads only the first finds nothing in most real material. The container
+   is matched in any recognised XAdES namespace and the encapsulating elements
+   inside it by name alone, because real dossiers nest 1.3.2-namespaced values
+   under a 1.4.1-namespaced container. `xades:CertificateValues` is harvested
+   from both placements too;
+2. `--revocation-store DIR`, whose OCSP responses are asked before its CRLs.
+
+Whether a blob was filed as signature validation data or as timestamp
+validation data changes nothing about how it is treated: every item is
+untrusted input that must be signature-checked against an authorised issuer, so
+gathering both can only widen what is *available*, never what is accepted.
+
+Embedded data is **untrusted input**, exactly like the certificates in
+`CertificateValues`: the signer supplied it. Every item is signature-checked
+against an authorised issuer before anything in it is believed, because taking
+it at face value would let a signer prove its own certificate was never
+revoked.
+
+`--revocation-store DIR` reads `crls/` and `ocsp/`, or a flat directory,
+classifying every file by what it actually contains. A file that is neither a
+CRL nor an OCSP response is `revocation_store_invalid` (exit 3): "no revocation
+data" is itself a verdict-affecting answer, so a store that quietly dropped
+half its contents would be worse than no store at all.
+
+**CRLs**, per RFC 5280 section 6.3: the CRL `issuer` must equal the
+certificate's `issuer`; the signature must verify under the pinned allowlist
+against the issuing CA or against a delegate that CA issued whose subject is
+the CRL issuer and which asserts `cRLSign`; the scope must cover the
+certificate. Fail-closed on everything else — a delta CRL, an indirect CRL, an
+`issuingDistributionPoint` restricted to reasons or attribute certificates, one
+scoped to CA certificates when the target is an end-entity certificate (or the
+reverse), a partitioned CRL naming a distribution point the certificate does
+not, a `distributionPoint` given as a name relative to the CRL issuer, an entry
+carrying `certificateIssuer`, and any critical CRL extension other than
+`issuingDistributionPoint`. `certificateHold` counts as revoked: a suspended
+certificate is not a usable one.
+
+**OCSP**, per RFC 6960: the `OCSPResponseStatus` must be `successful`; the
+`certID` must match the certificate, by issuer-name hash, issuer-key hash and
+serial number; the responder must be the issuing CA itself or a delegate that
+CA issued which carries `id-kp-OCSPSigning`, identified `byName` or `byKey`;
+and the signature must verify under the pinned allowlist. The nonce is
+deliberately ignored: offline validation replays a response produced for
+someone else's request, so a nonce could never match and demanding one would
+make every archived response unusable.
+
+SHA-1 is accepted in the `certID` and nowhere else. Those hashes identify which
+certificate a response is about, they are not a signature, and RFC 6960 makes
+SHA-1 the default, so refusing it would make every real response unusable while
+defending nothing — the response's own signature still has to verify under the
+pinned allowlist.
+
+**Freshness.** Data whose `nextUpdate` is at or before the validation time is
+stale, because a newer CRL or response may carry a revocation this one
+predates. There is **no grace period**: a grace period is a decision to accept
+expired data, which is exactly the decision a verifier must not make silently.
+Data with no `nextUpdate` is usable only when its `thisUpdate` is at or after
+the validation time.
+
+**Time of revocation.** A revocation counts only when its `revocationTime` is
+at or before the validation time. A certificate revoked *after* the instant
+being validated was not revoked then, so it yields the distinct
+`cert_revoked_after_validation_time` rather than `cert_revoked`.
+
+Whether that blocks depends on how the validation time was arrived at, which is
+the distinction ETSI EN 319 102-1 draws around the best-signature-time:
+
+- **Proven** — the time came from a fully verified `xades:SignatureTimeStamp`.
+  The signature demonstrably existed then, so a revocation dated afterwards
+  says the certificate was withdrawn later and says nothing against the
+  signature. Reported as `info`, with the revocation time and reason, and does
+  not block.
+- **Asserted** — the time came from `--at` or the clock. A caller can pass any
+  `--at` they like, so an unproven time cannot be used to dismiss a real
+  revocation. Reported as `unknown`, and blocks.
+
+It is never `passed` either way: the certificate really was revoked, and the
+message says when and why. A timestamp authority's own chain is always treated
+as asserted, because the instant it is validated at is the `genTime` the token
+itself claims, and that cannot also be the proof that dismisses a revocation
+dated after it.
+
+**Two chains, two answers.** A signature reports one revocation summary for its
+signer's chain and one for each timestamp authority's, both under the same
+code. Each message names which chain it is about.
+
+**Per certificate**, each chain entry carries a `revocation` object with
+`status` (`good`, `revoked`, `unknown`, `not_checked`, `trust_anchor`), the
+check `code` that summarises it, the `source`
+(`embedded_crl`, `embedded_ocsp`, `store_crl`, `store_ocsp`), and the times the
+data stated. The path-level summary is one check: `revocation_ok` when every
+non-anchor certificate has fresh, verified, non-revoked status; `cert_revoked`
+when any was revoked at or before the validation time; and otherwise the worst
+of `cert_revoked_after_validation_time`, `revocation_data_invalid`,
+`revocation_data_stale`, and `revocation_status_unknown`.
+
+**Naming what is missing.** The summary message names *which* certificate is
+the problem — by role (`the end-entity certificate`, `the intermediate CA
+<name>`) and by the issuer common name above it — and repeats the CRL
+distribution point that certificate publishes when it has one. Only public CA
+material is used: a CA's subject and any certificate's issuer are names of
+organisations, which is exactly what a caller needs in order to fetch the right
+file. The **subject** of the end-entity certificate is never repeated, because
+that is the signer.
+
+This matters because real Hungarian dossiers embed an OCSP response for the
+**end-entity certificate only**. The intermediate and root CAs' status has to
+come from CRLs the operator fetches into `--revocation-store`, and without
+being told which certificate lacks data a caller cannot tell that apart from a
+dossier that embeds nothing at all. See [trust.md](trust.md).
+
+`--no-revocation` switches the check off. It emits `revocation_not_checked`
+(`skipped`), which is blocking, so it is documented as producing **at most**
+`indeterminate`.
+
+`--online` fetching from CRL distribution points and AIA is not implemented and
+is an M3 residual. The codes `online_crl` and `online_ocsp` are not emitted by
+this release.
 
 ### Verify result shape
 
@@ -975,6 +1219,16 @@ verify anything.
     "policy": {
       "revocation": "offline",
       "trust_store": "configured",
+      "trust_lists": [
+        {
+          "territory": "HU",
+          "sequence_number": 99,
+          "issue_date": "2026-07-15T08:42:53Z",
+          "next_update": "2027-01-15T00:00:00Z",
+          "anchors": 41,
+          "signature_verified": true
+        }
+      ],
       "trust_snapshot": null,
       "legacy_algorithms_allowed": false,
       "digest_algorithms": ["sha256", "sha384", "sha512"],
@@ -1013,8 +1267,11 @@ verify anything.
           "key_algorithm": "rsa",
           "key_bits": 2048,
           "sha256_fingerprint": "…",
-          "qualified": null
+          "qualified": true
         },
+        "qualified": true,
+        "qualified_signature_device": false,
+        "qualified_service": "Qualified e-Szigno CA 2009",
         "chain": [
           {
             "subject_cn": "…",
@@ -1023,11 +1280,27 @@ verify anything.
             "not_before": "2019-01-01T00:00:00Z",
             "not_after": "2039-01-01T00:00:00Z",
             "is_trust_anchor": false,
-            "source": "key_info"
+            "source": "key_info",
+            "trust_anchor_origin": null,
+            "revocation": {
+              "status": "good",
+              "code": "revocation_ok",
+              "source": "embedded_ocsp",
+              "revocation_time": null,
+              "reason": null,
+              "this_update": "2020-05-15T00:00:00Z",
+              "next_update": "2020-07-01T00:00:00Z",
+              "produced_at": "2020-05-15T00:00:00Z"
+            }
           },
           { "subject_cn": "…", "issuer_cn": "…", "serial_hex": "…",
             "not_before": "…", "not_after": "…",
-            "is_trust_anchor": true, "source": "trust_store" }
+            "is_trust_anchor": true, "source": "trust_store",
+            "trust_anchor_origin": "trust_list",
+            "revocation": { "status": "trust_anchor",
+              "code": "revocation_not_checked", "source": null,
+              "revocation_time": null, "reason": null,
+              "this_update": null, "next_update": null, "produced_at": null } }
         ],
         "references": [
           {
@@ -1070,7 +1343,12 @@ verify anything.
             "chain": [
               { "subject_cn": "…", "issuer_cn": "…", "serial_hex": "…",
                 "not_before": "…", "not_after": "…",
-                "is_trust_anchor": false, "source": "timestamp_token" }
+                "is_trust_anchor": false, "source": "timestamp_token",
+                "trust_anchor_origin": null,
+                "revocation": { "status": "good", "code": "revocation_ok",
+                  "source": "store_crl", "revocation_time": null,
+                  "reason": null, "this_update": "2020-05-01T00:00:00Z",
+                  "next_update": "2020-07-01T00:00:00Z", "produced_at": null } }
             ],
             "verified": true,
             "checks": [
@@ -1100,10 +1378,30 @@ Notes on the shape:
   sees the same order the tool evaluated.
 - `code` and `status` are stable; `message` is human text and is not.
 - **A consumer must treat an unknown `code` as blocking unless its `status` is
-  `passed`.** Later versions add codes, and a consumer that ignores what it
-  does not recognise would silently weaken its own policy.
+  `passed` or `info`.** Later versions add codes, and a consumer that ignores
+  what it does not recognise would silently weaken its own policy.
+- `status: "info"` is the one non-blocking status. It exists so that a check
+  which only *reports* something — a loosely filled `extendedKeyUsage`, the
+  presence of a claimed signing time, a qualified determination — can be
+  emitted without pretending the tool failed to determine anything. Every other
+  non-`passed` status keeps the verdict below `valid`, which is what makes
+  "`unknown` always blocks" true without exception.
 - Absent data is `null`, never an optimistic default. `qualified: null` means
   "not determined", which is different from `false`.
+- `chain[].trust_anchor_origin` is `trust_store` or `trust_list` on the anchor
+  entry and `null` on every other entry, so a consumer can tell an anchor a
+  human dropped into a directory from one an EU trusted list vouches for.
+- `chain[].revocation` carries this certificate's own revocation answer with
+  the source it came from. `status` is one of `good`, `revoked`,
+  `revoked_after_validation_time`, `unknown`, `not_checked`, or
+  `trust_anchor`. The anchor's entry is always `trust_anchor`, because the
+  anchor is never asked about; the whole object is `null` only when no path was
+  built at all.
+- `qualified`, `qualified_signature_device` and `qualified_service` sit on the
+  signature, and `qualified` is mirrored onto
+  `signing_certificate.qualified`. `qualified_service` names the trusted-list
+  service that decided it, so a caller can check the determination against the
+  list themselves; it is `null` when none matched.
 - `references[].resolved_to` is filled in by the resolution stage, so it is
   present even when the run stopped at a policy failure and no digest was ever
   recomputed. In that case every `references[].status` is `skipped` and
@@ -1112,7 +1410,8 @@ Notes on the shape:
   normalised to RFC 3339 UTC (`null` when absent or unparseable). It is read,
   never trusted, and it never becomes a validation time: only `--at`, a
   verified timestamp, and the clock do that. The `signing_time_present` check
-  reports that it was read, always with status `unknown`.
+  reports that it was read, always with status `info`: its presence decides
+  nothing either way.
 - `xades` reports what the qualifying properties said, not what was concluded
   from them: the check codes carry the conclusions.
   `xades.signing_certificate` is `null` when the signature carries no
@@ -1141,8 +1440,24 @@ Notes on the shape:
 
 ### Verify check codes
 
-`status` is one of `passed`, `failed`, `skipped`, or `unknown`. `unknown` means
-the tool could not determine the answer and is never a substitute for `failed`.
+`status` is one of `passed`, `failed`, `skipped`, `unknown`, or `info`.
+
+- `unknown` means the tool could not determine the answer, and is never a
+  substitute for `failed`.
+- **`skipped` means a check the policy requires was not performed**, and only
+  that. It is not a place to file observations. A property this build reads but
+  does not act on, or evidence it declines to re-verify, is `info`: it did not
+  fail to answer a required question, so it must not block. Emitting `skipped`
+  for such a thing caps a signature at `indeterminate` for carrying *more*
+  evidence than the minimum, which is precisely backwards.
+- `info` is the only non-blocking status; everything else that is not `passed`
+  keeps the verdict below `valid`.
+
+The three checks that are still `skipped`, and why each is a required check
+that was not performed: `xades_absent` (no signed statement of which
+certificate signed, so the `SigningCertificate` binding could not be checked),
+`timestamp_not_checked` (a timestamp is present in a form this build cannot
+verify), and `revocation_not_checked` (the caller switched revocation off).
 
 | Code | Status when emitted | Meaning |
 | --- | --- | --- |
@@ -1175,16 +1490,16 @@ the tool could not determine the answer and is never a substitute for `failed`.
 | `signature_value_ok` | `passed` | `ds:SignatureValue` verified over the canonical `ds:SignedInfo`. |
 | `signature_value_invalid` | `failed` | It did not verify, or is not canonical Base64. |
 | `xades_present` | `passed` | `xades:QualifyingProperties` was found for this signature. |
-| `xades_absent` | `skipped` | None was found; this is a bare XMLDSig signature. |
-| `xades_not_validated` | `skipped` | Qualifying properties this build does not validate are present; the message and `xades.unvalidated_properties` name them. |
+| `xades_absent` | `skipped` | None was found; this is a bare XMLDSig signature, so nothing signed says which certificate signed it and the `SigningCertificate` binding could not be checked. Blocking. |
+| `xades_not_validated` | `info` | Unsigned qualifying properties this build does not validate are present; the message and `xades.unvalidated_properties` name them. Informational: they live outside the signature and cannot change what it says, and the ones that carry evidence this build *does* use — `CertificateValues`, `RevocationValues`, `TimeStampValidationData` — are consumed and not counted here. Omitted entirely when nothing is left to name. |
 | `xades_signing_certificate_bound` | `passed` | The signing certificate matches the digest the signed `SigningCertificate` / `SigningCertificateV2` property names. |
 | `xades_signing_certificate_mismatch` | `failed` | It does not: no offered certificate answers to the digest, an issuer and serial contradict it, the declared digest algorithm is outside the allowlist, or the certificate whose key verified the signature is not the digested one. The certificate-substitution check. |
 | `xades_signing_certificate_absent` | `unknown` | The signature carries no such property, so nothing signed says which certificate signed it. |
-| `xades_signature_policy_implied` | `unknown` | An implied signature policy is declared. Reported only; no policy is processed. |
-| `xades_signature_policy_explicit` | `unknown` | An explicit signature policy is declared. Its identifier is reported; no policy document is fetched or applied. |
+| `xades_signature_policy_implied` | `info` | An implied signature policy is declared. Informational: a declared policy describes how the signature was made and says nothing about whether it is sound, so it does not block. No policy is processed. |
+| `xades_signature_policy_explicit` | `info` | An explicit signature policy is declared. Its identifier is reported; no policy document is fetched or applied. Informational for the same reason. |
 | `signing_certificate_available` | `passed` | A usable certificate was found in `ds:KeyInfo`. |
 | `signing_certificate_missing` | `failed` | None was. |
-| `signing_time_present` | `unknown` | Reports whether a claimed `xades:SigningTime` was read. Always `unknown`: the claim is unauthenticated until phase 2 binds it to a timestamp. |
+| `signing_time_present` | `info` | Reports whether a claimed `xades:SigningTime` was read. Informational: the claim is unauthenticated whether it is there or not, so its presence decides nothing. |
 | `cert_malformed` | `failed` | A certificate in the path could not be re-encoded or its signature is not a whole number of bytes. |
 | `cert_path_ok` | `passed` | A path to a configured anchor was built and every rule above holds. |
 | `cert_path_unknown` | `unknown` | No trust anchors were configured. |
@@ -1196,12 +1511,26 @@ the tool could not determine the answer and is never a substitute for `failed`.
 | `cert_signature_invalid` | `failed` | A link is not correctly signed by its issuer. |
 | `cert_algorithm_rejected` | `failed` | A certificate signature algorithm or key is outside the policy. |
 | `cert_key_usage_invalid` | `failed` | A CA does not permit `keyCertSign`; the leaf permits neither `digitalSignature` nor `nonRepudiation`; or the leaf's `extendedKeyUsage` names only unrelated purposes and it does not assert `nonRepudiation`. |
-| `cert_key_usage_advisory` | `unknown` | The signing certificate asserts `nonRepudiation` but its `extendedKeyUsage` names only unrelated purposes. The message names the OIDs found. Blocking: caps the verdict at `indeterminate`. |
+| `cert_key_usage_advisory` | `info` | The signing certificate asserts `nonRepudiation` but its `extendedKeyUsage` names only unrelated purposes. The message names the OIDs found. Informational: ETSI EN 319 412-2 makes `nonRepudiation` the signal, and a loosely filled EKU alongside it is a reporting matter. |
 | `cert_basic_constraints_invalid` | `failed` | An issuing certificate is not marked as a CA. |
 | `cert_name_constraint_violation` | `failed` | A certificate violates a name constraint imposed by a CA above it. |
 | `cert_unsupported_critical_extension` | `failed` | A certificate carries a critical extension this validator does not understand. |
-| `revocation_not_checked` | `skipped` | Revocation is phase 3. Blocking: caps the verdict at `indeterminate`. |
-| `signature_timestamp_present` | `unknown` | The signature carries at least one `xades:SignatureTimeStamp`. A timestamp proves existence, not validity, so this never passes. |
+| `revocation_policy` | `info` | Reports the revocation policy actually applied: `offline` or, with `--no-revocation`, off. Always emitted, so the policy is visible even when no data was found. |
+| `revocation_not_checked` | `skipped` | Emitted **only** when the caller passed `--no-revocation`. Blocking, so switching the check off is documented as producing at most `indeterminate`. |
+| `revocation_ok` | `passed` | Every certificate in the path except the trust anchor has fresh, verified, non-revoked status. Emitted once per chain — the signer's and each timestamp authority's — and the message names which. |
+| `cert_revoked` | `failed` | A certificate in the path was revoked at or before the validation time. `certificateHold` counts. |
+| `cert_revoked_after_validation_time` | `info` / `unknown` | A certificate was revoked *after* the instant being validated, so that revocation did not apply then. `info` when the validation time was **proven** by a fully verified signature timestamp, `unknown` when it was merely asserted by `--at` or the clock. Never `passed`: the certificate really was revoked, and the message gives the time and reason. |
+| `revocation_status_unknown` | `unknown` | No usable revocation data covers a certificate in the path, or no path was built to ask about. |
+| `revocation_data_stale` | `unknown` | The data's `nextUpdate` had passed at the validation time, or it carries none and its `thisUpdate` precedes it. Also the OCSP `unknown` status. |
+| `revocation_data_invalid` | `unknown` | Data was found but could not be used: signed by someone unauthorised, a delta or indirect CRL, an unimplemented `issuingDistributionPoint` form, a critical CRL extension this build does not implement, or an OCSP response whose status is not `successful`. `unknown`, not `failed`: unusable data means the tool could not answer. |
+| `trust_list_loaded` | `info` | A `--trust-list` file was read; the message says how many anchors it contributed. |
+| `trust_list_unverified` | `unknown` | A trusted list was used without `--trust-list-signer`, so its own signature was not checked. Blocking. |
+| `trust_list_signature_ok` | `passed` | The list's enveloped XMLDSig signature verified against the supplied signer certificate and covers the whole document. |
+| `trust_list_signature_invalid` | `failed` | It did not verify, does not cover the whole list, uses an algorithm or transform outside the allowlist, or is absent while a signer was demanded. |
+| `certificate_qualified` | `info` | The chain ends at a trusted-list CA/QC service granted at the validation time, and any post-eIDAS certificate asserts `QcCompliance`. |
+| `certificate_not_qualified` | `info` | The trusted list does not record the anchor's service as granted then, or a post-eIDAS certificate carries no `QcCompliance`. |
+| `certificate_qualified_unknown` | `info` | No trusted list covers the anchor, so qualified status is not determined. Distinct from `certificate_not_qualified`. |
+| `signature_timestamp_present` | `info` | The signature carries at least one `xades:SignatureTimeStamp`. What that is worth is decided by the token's own checks, folded in through `timestamp_verified`. |
 | `signature_timestamp_absent` | `unknown` | It carries none, so nothing proves when it existed. |
 | `timestamp_not_checked` | `skipped` | A timestamp uses a form this build does not process: an `Include`-style data selection, no decodable token, more than one token, or an unimplemented canonicalization algorithm. |
 | `timestamp_token_parsed` | `passed` / `failed` | The token is (or is not) a CMS `SignedData` over an RFC 3161 `TSTInfo` within the size limit. |
@@ -1215,18 +1544,34 @@ the tool could not determine the answer and is never a substitute for `failed`.
 | `timestamp_tsa_path_untrusted` | `failed` | It does not, under the same path rules as a signer chain. |
 | `timestamp_tsa_path_unknown` | `unknown` | No trust anchors were configured. |
 | `timestamp_before_signing_time` | `unknown` | The token's `genTime` precedes the claimed `xades:SigningTime` by more than the declared accuracy. Reported, never a failure: the claim is unauthenticated. |
-| `timestamp_verified` | `passed` / `unknown` | Summarises one token in the signature's own check list. `passed` only when every check on that token passed; `unknown` for every other outcome, including a token that failed. Never `failed`: see [Verdicts](#verdicts). |
-| `archive_timestamp_present` | `skipped` | An `xades:ArchiveTimeStamp` is present and is out of scope for this release. |
-| `dossier_timestamp_not_validated` | `skipped` | Dossier-level `es:TimeStamp` elements are present; validating them is M3. |
+| `timestamp_verified` | `passed` / `unknown` | Summarises one token in the signature's own check list, **excluding** its revocation checks, which are folded into the signature's verdict separately so they are counted once. `passed` only when every other check on that token passed or was informational; `unknown` for every other outcome, including a token that failed. Never `failed`: see [Verdicts](#verdicts). |
+| `archive_timestamp_present` | `info` | An `xades:ArchiveTimeStamp` is present and is not validated; this release makes no claim about long-term (B-LTA) re-validation, which is M3. Informational: an archive timestamp is evidence laid *on top of* a signature, so declining to re-verify it does not make the evidence already checked worth less. Omitted when none is present. |
+| `dossier_timestamp_not_validated` | `info` | Dossier-level `es:TimeStamp` elements are present; validating them is M3. Emitted at the **dossier** level only, and informational: an `es:TimeStamp` is a statement about the container, not about any one signature, so it must not decide whether the signatures inside it are valid. |
 
 ### Verdicts
 
 Per signature: `invalid` when any check is `failed`; otherwise `indeterminate`
-when any check is `unknown` or `skipped`; otherwise `valid`. The dossier
-verdict is the worst of the per-signature verdicts, and `indeterminate` when
-there are no signatures — there is nothing to be valid. The terminology follows
-ETSI EN 319 102-1: `valid` is TOTAL-PASSED, `invalid` is TOTAL-FAILED, and
-`indeterminate` is INDETERMINATE.
+when any check is `unknown` or `skipped`; otherwise `valid`. A check with status
+`info` never blocks. The dossier verdict is the worst of the per-signature
+verdicts — `invalid` worse than `indeterminate` worse than `valid` — and
+`indeterminate` when there are no signatures, because there is nothing to be
+valid. The terminology follows ETSI EN 319 102-1: `valid` is TOTAL-PASSED,
+`invalid` is TOTAL-FAILED, and `indeterminate` is INDETERMINATE.
+
+Reaching `valid` therefore needs, in practice: a structurally sound signature
+whose references and signature value verify under the pinned policy, a signed
+`SigningCertificate` property binding the certificate, a path to a configured
+anchor at the validation time, a fully verified `xades:SignatureTimeStamp`
+(without one, `signature_timestamp_absent` is `unknown` and blocks — nothing
+proves when the signature existed), and fresh non-revoked status for every
+non-anchor certificate on both the signer's and the TSA's chains.
+
+It does **not** need the dossier to carry nothing else. Evidence a signature
+carries beyond that minimum — unsigned qualifying properties this build does
+not validate, an `xades:ArchiveTimeStamp`, a dossier-level `es:TimeStamp` — is
+reported as `info` and does not block, because none of it can make what was
+checked worth less. Nor does a revocation dated after a validation time a
+verified timestamp proves.
 
 **Only checks about the signature itself can make it `invalid`:** the
 reference digests, the signature value, the algorithm policy, the reference
@@ -1245,10 +1590,14 @@ know a timestamp authority's CA is a gap in the store, not a forged dossier.
 The same reasoning makes `cert_path_search_exhausted` `unknown`: the tool
 stopped looking rather than concluded.
 
-Because `revocation_not_checked` is always emitted as a blocking `skipped`
-check, `valid` is unreachable in this release. That is the correct and honest
-outcome for a verifier that does not know whether a certificate was revoked,
-and it is asserted by a test.
+A timestamp authority's own revocation status is the one thing excluded from
+`timestamp_verified`, and only in one direction: an *unobtainable* revocation
+answer does not stop a token from proving when the signature existed, because
+letting it do so would quietly move the validation time back to "now" for a
+reason unrelated to the timestamp. It still blocks the signature's verdict,
+because the token's revocation check is folded into the signature's check list
+in its own right. A TSA certificate that was actually revoked makes the check
+`failed`, which sinks both.
 
 ## Extraction policy
 
@@ -1322,18 +1671,26 @@ and it is asserted by a test.
 
 ## Verification boundary
 
-`verify` ships the M2 phase-2 subset: canonicalization, reference digests, the
+`verify` ships the complete M2 subset: canonicalization, reference digests, the
 signature value, the e-dossier reference-scope rules, the XAdES signed
-`SigningCertificate` binding, RFC 3161 signature timestamps, and
-certificate-path validation against a caller-supplied trust store. Within that
-subset it may report a signature `invalid`, which is a positive cryptographic
-finding.
+`SigningCertificate` binding, RFC 3161 signature timestamps, certificate-path
+validation against a caller-supplied trust store and ETSI TS 119 612 trusted
+lists, and offline revocation checking. Within that subset it may report a
+signature `invalid`, which is a positive cryptographic finding, and it may
+report one `valid`.
 
-**It may never report anything `valid`.** Revocation is not checked and
-qualified status is not determined, so a check that would be needed to
-conclude `valid` is always emitted as `skipped` and the verdict is capped at
-`indeterminate`. `indeterminate` means "nothing failed", not "this is
-trustworthy", and the human output says so on every run.
+**What `valid` means, exactly.** Every check this build makes passed at the
+stated validation time, against the trust material the caller supplied. It does
+**not** mean the dossier is legally valid — that is a legal judgement, and a
+permanent non-goal of this tool. It does not mean the signer is who the
+certificate says, only that a CA the caller chose to trust said so. It does not
+cover anything listed as outside the boundary below. And it is only as good as
+the inputs: an empty trust store yields `indeterminate`, not `valid`, and a
+trusted list whose own signature was not checked yields `indeterminate` too.
+
+`indeterminate` means "nothing failed", not "this is trustworthy". The human
+output states the verdict and the revocation policy it was reached under on
+every run.
 
 The rule for the other four commands is unchanged: `inspect`, `list`,
 `extract`, and `validate-structure` verify nothing, `signatures_verified` and
@@ -1346,8 +1703,9 @@ is valid. A rejection is likewise not proof of forgery: the pinned algorithm
 policy refuses some genuine older dossiers, which is the correct trade and must
 not be misread.
 
-Still outside the boundary until phase 3 and M3 ship: revocation (CRL, OCSP,
-and the dossier's own `RevocationValues`), trusted-list qualified status,
-XAdES level detection, `ArchiveTimeStamp`, dossier-level `es:TimeStamp`
-verification, and signature-policy processing — an explicit policy identifier
-is reported, and the policy it names is neither fetched nor enforced.
+Still outside the boundary until M3 ships: `--online` fetching of CRL
+distribution points and OCSP responders, dossier-level `es:TimeStamp`
+verification, XAdES level detection, `ArchiveTimeStamp`, scheme-level
+trusted-list `Qualifications` extensions, and signature-policy processing — an
+explicit policy identifier is reported, and the policy it names is neither
+fetched nor enforced.

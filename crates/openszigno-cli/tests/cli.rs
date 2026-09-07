@@ -1284,7 +1284,7 @@ fn help_and_version_are_plain_text_successes() {
     assert!(
         String::from_utf8(run(&["--help"]).stdout)
             .unwrap()
-            .contains("does not verify"),
+            .contains("never judges legal authenticity"),
         "the long help must state the verification boundary"
     );
 

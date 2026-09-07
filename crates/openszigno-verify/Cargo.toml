@@ -28,6 +28,7 @@ serde.workspace = true
 sha1.workspace = true
 sha2.workspace = true
 x509-cert.workspace = true
+x509-ocsp = "0.2.1"
 
 [dev-dependencies]
 # `x509-parser` is needed so the test helper can issue a certificate for a key

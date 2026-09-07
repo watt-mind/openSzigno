@@ -9,13 +9,17 @@ validating, and extracting Hungarian Microsec e-Szignó e-dossiers (`.es3`).
 
 > **Security boundary:** `openszigno verify` checks XMLDSig canonicalization,
 > reference digests, signature values, the e-dossier reference-scope rules, the
-> XAdES signed `SigningCertificate` binding, RFC 3161 signature timestamps, and
-> certificate paths against a trust store you supply. It does **not** yet check
-> revocation or qualified status, so **it can never report a signature as
-> valid** — the best verdict it can reach is `indeterminate`, meaning "nothing
-> failed", not "this is trustworthy". It can report a signature `invalid`, and
-> that finding is meaningful. Successfully parsing or extracting a dossier is
-> never evidence that it is authentic, signed, or legally valid.
+> XAdES signed `SigningCertificate` binding, RFC 3161 signature timestamps,
+> certificate paths against trust material you supply, and revocation from data
+> you supply. It can now report a signature `valid`, which means **every check
+> this tool makes passed at the stated validation time** — not that the dossier
+> is legally valid, which is a legal judgement and a permanent non-goal. A
+> `valid` verdict needs all of: a trust store or trusted list, a fully verified
+> signature timestamp, and fresh revocation data for every certificate in the
+> chains; without any one of them the verdict is `indeterminate`, meaning
+> "nothing failed", not "this is trustworthy". Successfully parsing or
+> extracting a dossier is never evidence that it is authentic, signed, or
+> legally valid.
 
 ## Installation
 
@@ -297,7 +301,7 @@ openszigno inspect tests/fixtures/doctype.es3 --json
 | `openszigno list FILE` | Lists document records in source XML order with title, creation date, MIME type, declared source size (`null`/`?` when the dossier omits it), `OBJREF`, transform chain, and whether the document embeds a dossier. | No |
 | `openszigno validate-structure FILE` | Applies the strict structural rules and reports `valid_structure`, `conformance_warnings`, plus `cryptographic_verification_performed: false`. | No |
 | `openszigno extract FILE --output DIR` | Decodes supported payloads into `DIR`, expanding embedded dossiers into `<file>.d` subdirectories, deduplicating repeated titles, never overwriting an existing file. | Yes |
-| `openszigno verify FILE` | Verifies every `ds:Signature`: canonicalization, reference digests, the signature value, the mandated e-dossier reference scope, the XAdES signed `SigningCertificate` binding, RFC 3161 signature timestamps, and the certificate path. Reports a per-signature verdict of `invalid` or `indeterminate`; **never `valid`** in this release. | No |
+| `openszigno verify FILE` | Verifies every `ds:Signature`: canonicalization, reference digests, the signature value, the mandated e-dossier reference scope, the XAdES signed `SigningCertificate` binding, RFC 3161 signature timestamps, the certificate path against your trust store and any ETSI TS 119 612 trusted lists, and revocation from the signature's own `RevocationValues` and your revocation store. Reports a per-signature verdict of `valid`, `invalid`, or `indeterminate`. | No |
 
 Flags:
 
@@ -309,18 +313,37 @@ Flags:
 | `--no-recursive` | `extract` | Write an embedded dossier as a payload file instead of expanding it. |
 | `--max-depth N` | `extract` | Nesting levels of embedded dossiers to expand (default 3); values above the hard cap of 8 are clamped. |
 | `--trust-store DIR` | `verify` | Directory of trust anchors (`anchors/*`, PEM or DER) and optional extra CA certificates (`intermediates/*`). A directory of certificates with no `anchors` subdirectory is read as anchors. Without it, every chain check is `unknown`. |
+| `--trust-list FILE` | `verify` | ETSI TS 119 612 trusted list (XML) to take trust anchors from. Repeatable. Its anchors join the `--trust-store` ones, each reported with its origin, and only these can make a chain `qualified`. Nothing is fetched; see [docs/trust.md](docs/trust.md). |
+| `--lotl FILE` | `verify` | EU list of trusted lists (XML). Its `PointersToOtherTSL` entries name the national lists' signing certificates, so one out-of-band certificate bootstraps every `--trust-list`. The LOTL is verified against `--trust-list-signer` first and contributes no trust anchors of its own. |
+| `--trust-list-signer CERT` | `verify` | Certificate, PEM or DER, that must have signed the `--lotl` and, absent one, every `--trust-list`. Obtain it out of band — for the EU list of trusted lists, from the Official Journal. Without any signer the lists are read but reported `trust_list_unverified`, which caps the verdict at `indeterminate`. |
+| `--revocation-store DIR` | `verify` | Directory of CRLs (`crls/`) and OCSP responses (`ocsp/`), DER or PEM, checked in addition to the signature's own `xades:RevocationValues`. A flat directory works too; each file is classified by what it contains. Nothing is ever fetched. |
+| `--no-revocation` | `verify` | Do not check revocation at all. Emits `revocation_not_checked`, which is blocking, so this produces **at most** `indeterminate`. |
 | `--at TIME` | `verify` | Validation time as an RFC 3339 timestamp. It overrides everything: without it, a signature whose timestamp verified completely is validated at that token's `genTime`, and otherwise at the current time. Use it to ask "was this chain valid on that day" and to get reproducible results. |
 | `--allow-legacy-algorithms` | `verify` | Admit SHA-1 digests and RSA-SHA1 signature methods **for diagnosis only**: they emit `algorithm_legacy_allowed` instead of a passed check, the verdict stays capped at `indeterminate`, and no failed check can become a passed one. MD5, HMAC, DSA, and RSA keys below 2048 bits stay refused. |
 | `-h`, `--help` | all commands | Print help as plain text. |
 | `-V`, `--version` | top level | Print the version as plain text. |
 
-`verify` performs no network or filesystem access of its own: reference
-resolution is strictly same-document, and the trust store is the only external
-material a run consults. Its algorithm policy is pinned — SHA-256/384/512
-digests, RSA (PKCS#1 v1.5 and PSS) at 2048 bits or more, ECDSA P-256/P-384,
-Canonical XML 1.0 and Exclusive C14N 1.0 — and weak algorithms are refused
-rather than warned about. The full check-code table, the trust-store layout,
-and the result shape are in
+`verify` performs no network access of its own, in any mode, and the
+`openszigno-verify` crate structurally cannot: reference resolution is strictly
+same-document, and the trust store, the trusted lists, and the revocation store
+are the only external material a run consults. Its algorithm policy is pinned —
+SHA-256/384/512 digests, RSA (PKCS#1 v1.5 and PSS) at 2048 bits or more, ECDSA
+P-256/P-384, Canonical XML 1.0 and Exclusive C14N 1.0 — and weak algorithms are
+refused rather than warned about.
+
+A worked run that reaches `valid`:
+
+```bash
+openszigno verify dossier.es3 --json \
+  --trust-store ./trust \
+  --revocation-store ./revocation \
+  --at 2020-06-02T00:00:00Z
+echo $?   # 0 when the overall verdict is valid
+```
+
+[docs/trust.md](docs/trust.md) describes how to obtain and pin the trust
+anchors, trusted lists, CRLs and OCSP responses. The full check-code table and
+the result shape are in
 [docs/architecture.md](docs/architecture.md#the-verify-command); the standing
 rule is in
 [Verification boundary](docs/architecture.md#verification-boundary).
@@ -329,7 +352,7 @@ rule is in
 
 | Status | Meaning |
 | --- | --- |
-| `0` | The operation completed. Documents may have been skipped with explicit warnings. |
+| `0` | The operation completed. Documents may have been skipped with explicit warnings. For `verify`, the overall verdict is `valid`: every signature is `valid` and every check on each of them passed. |
 | `2` | Command-line usage error. |
 | `3` | Input or output error, including a stdout that cannot be written. |
 | `4` | Invalid, unsupported, or unsafe dossier structure. A structural failure during `verify` also exits 4. |

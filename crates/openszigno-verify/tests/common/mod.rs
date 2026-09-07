@@ -27,6 +27,7 @@ pub const ESZIGNO_NS: &str = "https://www.microsec.hu/ds/e-szigno30#";
 pub const DS_NS: &str = "http://www.w3.org/2000/09/xmldsig#";
 pub const XADES_NS: &str = "http://uri.etsi.org/01903/v1.3.2#";
 pub const XADES_NS_122: &str = "http://uri.etsi.org/01903/v1.2.2#";
+pub const XADES_NS_141: &str = "http://uri.etsi.org/01903/v1.4.1#";
 pub const SIGNED_PROPERTIES_TYPE_122: &str = "http://uri.etsi.org/01903/v1.2.2#SignedProperties";
 
 pub const C14N_EXC: &str = "http://www.w3.org/2001/10/xml-exc-c14n#";
@@ -320,6 +321,17 @@ pub struct SigSpec {
     pub archive_timestamp: bool,
     /// An unsigned property this build does not validate, by element name.
     pub extra_unsigned_property: Option<String>,
+    /// DER CRLs to encapsulate in `xades:RevocationValues/xades:CRLValues`.
+    pub revocation_crls: Vec<Vec<u8>>,
+    /// DER OCSP responses for `xades:RevocationValues/xades:OCSPValues`.
+    pub revocation_ocsp: Vec<Vec<u8>>,
+    /// Wrap the `RevocationValues` (and any `validation_data_certificates`) in
+    /// an `xades141:TimeStampValidationData`, in the XAdES 1.4.1 namespace,
+    /// which is where real long-term Microsec dossiers put almost all of their
+    /// embedded OCSP responses.
+    pub revocation_in_validation_data: bool,
+    /// Certificates to encapsulate inside the `TimeStampValidationData`.
+    pub validation_data_certificates: Vec<Vec<u8>>,
     /// An `Id` on `ds:SignatureValue`, so an `xades:Include` can name it.
     pub signature_value_id: Option<String>,
 }
@@ -461,6 +473,10 @@ pub fn document_signature(certificates: Vec<Vec<u8>>) -> SigSpec {
         timestamp: None,
         archive_timestamp: false,
         extra_unsigned_property: None,
+        revocation_crls: Vec::new(),
+        revocation_ocsp: Vec::new(),
+        revocation_in_validation_data: false,
+        validation_data_certificates: Vec::new(),
         signature_value_id: None,
     }
 }
@@ -489,6 +505,10 @@ pub fn dossier_signature(certificates: Vec<Vec<u8>>) -> SigSpec {
         timestamp: None,
         archive_timestamp: false,
         extra_unsigned_property: None,
+        revocation_crls: Vec::new(),
+        revocation_ocsp: Vec::new(),
+        revocation_in_validation_data: false,
+        validation_data_certificates: Vec::new(),
         signature_value_id: None,
     }
 }
@@ -962,6 +982,52 @@ fn render_signature(spec: &SigSpec, tag: &str, namespace: &str) -> String {
             "<xades:ArchiveTimeStamp><xades:EncapsulatedTimeStamp>AA==</xades:EncapsulatedTimeStamp></xades:ArchiveTimeStamp>",
         );
     }
+    let validation_data = spec.revocation_in_validation_data;
+    if validation_data {
+        // XAdES 1.4.1 keeps this in its own namespace while the values inside
+        // stay in the 1.3.2 one, which is exactly the mix real dossiers use and
+        // the reason the harvester matches the inner elements by name alone.
+        unsigned.push_str(&format!(
+            "<xades141:TimeStampValidationData xmlns:xades141=\"{XADES_NS_141}\">"
+        ));
+        if !spec.validation_data_certificates.is_empty() {
+            unsigned.push_str("<xades:CertificateValues>");
+            for certificate in &spec.validation_data_certificates {
+                unsigned.push_str(&format!(
+                    "<xades:EncapsulatedX509Certificate>{}</xades:EncapsulatedX509Certificate>",
+                    BASE64.encode(certificate)
+                ));
+            }
+            unsigned.push_str("</xades:CertificateValues>");
+        }
+    }
+    if !spec.revocation_crls.is_empty() || !spec.revocation_ocsp.is_empty() {
+        unsigned.push_str("<xades:RevocationValues>");
+        if !spec.revocation_crls.is_empty() {
+            unsigned.push_str("<xades:CRLValues>");
+            for crl in &spec.revocation_crls {
+                unsigned.push_str(&format!(
+                    "<xades:EncapsulatedCRLValue>{}</xades:EncapsulatedCRLValue>",
+                    BASE64.encode(crl)
+                ));
+            }
+            unsigned.push_str("</xades:CRLValues>");
+        }
+        if !spec.revocation_ocsp.is_empty() {
+            unsigned.push_str("<xades:OCSPValues>");
+            for response in &spec.revocation_ocsp {
+                unsigned.push_str(&format!(
+                    "<xades:EncapsulatedOCSPValue>{}</xades:EncapsulatedOCSPValue>",
+                    BASE64.encode(response)
+                ));
+            }
+            unsigned.push_str("</xades:OCSPValues>");
+        }
+        unsigned.push_str("</xades:RevocationValues>");
+    }
+    if validation_data {
+        unsigned.push_str("</xades141:TimeStampValidationData>");
+    }
     if let Some(name) = &spec.extra_unsigned_property {
         unsigned.push_str(&format!("<xades:{name}/>"));
     }
@@ -1202,4 +1268,722 @@ pub fn tamper(text: &str, needle: &str) -> String {
         &text[..position],
         &text[position + 1..]
     )
+}
+
+// ---------------------------------------------------------------------------
+// Synthetic revocation material
+// ---------------------------------------------------------------------------
+//
+// Hand-built on `x509-cert`'s CRL types and `x509-ocsp`'s response types, the
+// same crates the verifier reads them with. That is deliberate: a fixture built
+// with an independent encoder would test the encoder, and a fixture built with
+// the verifier's own *logic* would test nothing. Only the ASN.1 shapes are
+// shared; every rule under test is applied by the crate and asserted here.
+
+/// One entry a CRL revokes.
+pub struct RevokedSpec {
+    pub serial: Vec<u8>,
+    pub revocation_time: String,
+    /// An RFC 5280 `CRLReason` value, or `None` for no reason extension.
+    pub reason: Option<u32>,
+    /// Plant a `certificateIssuer` entry extension, which makes the entry an
+    /// indirect-CRL entry the verifier must refuse.
+    pub certificate_issuer: bool,
+}
+
+impl RevokedSpec {
+    pub fn new(certificate: &[u8], revocation_time: &str) -> Self {
+        let parsed = x509_cert::Certificate::from_der(certificate).expect("the certificate parses");
+        Self {
+            serial: parsed.tbs_certificate.serial_number.as_bytes().to_vec(),
+            revocation_time: revocation_time.to_owned(),
+            reason: None,
+            certificate_issuer: false,
+        }
+    }
+
+    pub fn with_reason(mut self, reason: u32) -> Self {
+        self.reason = Some(reason);
+        self
+    }
+}
+
+/// How one synthetic CRL should look.
+pub struct CrlSpec {
+    /// The CA whose subject name becomes the CRL's `issuer`.
+    pub issuer_der: Vec<u8>,
+    /// The key that signs it, which is normally the CA's own.
+    pub signer_key: TestKey,
+    pub this_update: String,
+    pub next_update: Option<String>,
+    pub revoked: Vec<RevokedSpec>,
+    /// An `issuingDistributionPoint`, as (`onlyContainsUserCerts`,
+    /// `onlyContainsCaCerts`, `indirectCrl`, distribution-point URI).
+    pub issuing_distribution_point: Option<(bool, bool, bool, Option<String>)>,
+    /// Mark it a delta CRL, which the verifier must refuse.
+    pub delta: bool,
+    /// Plant a critical extension whose semantics the verifier does not
+    /// implement.
+    pub unknown_critical: bool,
+    /// Corrupt the signature after it is made.
+    pub tamper_signature: bool,
+}
+
+impl CrlSpec {
+    pub fn new(issuer_der: Vec<u8>, signer_key: TestKey) -> Self {
+        Self {
+            issuer_der,
+            signer_key,
+            this_update: "2020-05-01T00:00:00Z".to_owned(),
+            next_update: Some("2020-07-01T00:00:00Z".to_owned()),
+            revoked: Vec::new(),
+            issuing_distribution_point: None,
+            delta: false,
+            unknown_critical: false,
+            tamper_signature: false,
+        }
+    }
+
+    pub fn revoking(mut self, entry: RevokedSpec) -> Self {
+        self.revoked.push(entry);
+        self
+    }
+}
+
+fn asn1_time(text: &str) -> x509_cert::time::Time {
+    let seconds = openszigno_verify::parse_rfc3339(text).expect("the time parses");
+    x509_cert::time::Time::GeneralTime(
+        der::asn1::GeneralizedTime::from_unix_duration(std::time::Duration::from_secs(
+            u64::try_from(seconds).expect("the time is after the epoch"),
+        ))
+        .expect("the time encodes"),
+    )
+}
+
+fn extension(oid: &str, critical: bool, value: Vec<u8>) -> x509_cert::ext::Extension {
+    x509_cert::ext::Extension {
+        extn_id: const_oid::ObjectIdentifier::new_unwrap(oid),
+        critical,
+        extn_value: der::asn1::OctetString::new(value).expect("the extension value encodes"),
+    }
+}
+
+/// The `sha256WithRSAEncryption` identifier every synthetic signer uses.
+fn sha256_rsa() -> x509_cert::spki::AlgorithmIdentifierOwned {
+    x509_cert::spki::AlgorithmIdentifierOwned {
+        oid: const_oid::ObjectIdentifier::new_unwrap("1.2.840.113549.1.1.11"),
+        parameters: Some(der::asn1::Any::null()),
+    }
+}
+
+fn sign_rsa_sha256(key: &TestKey, message: &[u8]) -> Vec<u8> {
+    use rsa::signature::{SignatureEncoding as _, Signer as _};
+    match &key.signing {
+        SigningKey::Rsa(private) => rsa::pkcs1v15::SigningKey::<Sha256>::new((**private).clone())
+            .sign(message)
+            .to_vec(),
+        _ => panic!("the synthetic revocation authorities sign with RSA"),
+    }
+}
+
+/// Build one DER-encoded CRL.
+pub fn build_crl(spec: &CrlSpec) -> Vec<u8> {
+    use der::Encode as _;
+
+    let issuer = x509_cert::Certificate::from_der(&spec.issuer_der).expect("the CA parses");
+    let mut extensions: Vec<x509_cert::ext::Extension> = Vec::new();
+    // A CRL number is not checked by this build but is what a real CA emits, so
+    // the fixture carries one rather than being unrealistically bare.
+    extensions.push(extension(
+        "2.5.29.20",
+        false,
+        der::asn1::Uint::new(&[0x07])
+            .expect("the CRL number encodes")
+            .to_der()
+            .expect("the CRL number encodes"),
+    ));
+    if let Some((user_certs, ca_certs, indirect, point)) = &spec.issuing_distribution_point {
+        let names = point.as_ref().map(|uri| {
+            x509_cert::ext::pkix::name::DistributionPointName::FullName(vec![
+                x509_cert::ext::pkix::name::GeneralName::UniformResourceIdentifier(
+                    der::asn1::Ia5String::new(uri.as_str()).expect("the URI encodes"),
+                ),
+            ])
+        });
+        let idp = x509_cert::ext::pkix::crl::IssuingDistributionPoint {
+            distribution_point: names,
+            only_contains_user_certs: *user_certs,
+            only_contains_ca_certs: *ca_certs,
+            only_some_reasons: None,
+            indirect_crl: *indirect,
+            only_contains_attribute_certs: false,
+        };
+        extensions.push(extension(
+            "2.5.29.28",
+            true,
+            idp.to_der().expect("the IDP encodes"),
+        ));
+    }
+    if spec.delta {
+        extensions.push(extension(
+            "2.5.29.27",
+            true,
+            der::asn1::Uint::new(&[0x01])
+                .expect("the base CRL number encodes")
+                .to_der()
+                .expect("the base CRL number encodes"),
+        ));
+    }
+    if spec.unknown_critical {
+        // A critical extension with no meaning to this build, which must make
+        // the whole CRL unusable rather than partly understood.
+        extensions.push(extension("1.3.6.1.4.1.99999.7", true, vec![0x05, 0x00]));
+    }
+
+    let revoked: Vec<x509_cert::crl::RevokedCert> = spec
+        .revoked
+        .iter()
+        .map(|entry| {
+            let mut entry_extensions: Vec<x509_cert::ext::Extension> = Vec::new();
+            if let Some(reason) = entry.reason {
+                entry_extensions.push(extension(
+                    "2.5.29.21",
+                    false,
+                    der::Encode::to_der(
+                        &der::asn1::Uint::new(
+                            &[u8::try_from(reason).expect("a small reason code")],
+                        )
+                        .expect("the reason encodes"),
+                    )
+                    .map(|bytes| {
+                        // CRLReason is ENUMERATED, not INTEGER: retag it.
+                        let mut retagged = bytes;
+                        retagged[0] = 0x0a;
+                        retagged
+                    })
+                    .expect("the reason encodes"),
+                ));
+            }
+            if entry.certificate_issuer {
+                entry_extensions.push(extension("2.5.29.29", true, vec![0x30, 0x00]));
+            }
+            x509_cert::crl::RevokedCert {
+                serial_number: x509_cert::serial_number::SerialNumber::new(&entry.serial)
+                    .expect("the serial encodes"),
+                revocation_date: asn1_time(&entry.revocation_time),
+                crl_entry_extensions: (!entry_extensions.is_empty()).then_some(entry_extensions),
+            }
+        })
+        .collect();
+
+    let tbs = x509_cert::crl::TbsCertList {
+        version: x509_cert::Version::V2,
+        signature: sha256_rsa(),
+        issuer: issuer.tbs_certificate.subject.clone(),
+        this_update: asn1_time(&spec.this_update),
+        next_update: spec.next_update.as_deref().map(asn1_time),
+        revoked_certificates: (!revoked.is_empty()).then_some(revoked),
+        crl_extensions: Some(extensions),
+    };
+    let message = tbs.to_der().expect("the tbsCertList encodes");
+    let mut signature = sign_rsa_sha256(&spec.signer_key, &message);
+    if spec.tamper_signature {
+        signature[0] ^= 0xff;
+    }
+    x509_cert::crl::CertificateList {
+        tbs_cert_list: tbs,
+        signature_algorithm: sha256_rsa(),
+        signature: der::asn1::BitString::from_bytes(&signature).expect("the signature encodes"),
+    }
+    .to_der()
+    .expect("the CRL encodes")
+}
+
+/// What an OCSP response says about the certificate it is asked about.
+pub enum OcspStatus {
+    Good,
+    /// Revoked at this RFC 3339 time, with an optional reason code.
+    Revoked(String, Option<u32>),
+    Unknown,
+}
+
+/// How one synthetic OCSP response should look.
+pub struct OcspSpec {
+    pub issuer_der: Vec<u8>,
+    pub subject_der: Vec<u8>,
+    /// The key that signs the response.
+    pub responder_key: TestKey,
+    /// The responder's own certificate, or `None` when the CA answers for
+    /// itself.
+    pub responder_der: Option<Vec<u8>>,
+    /// Whether the responder certificate travels with the response. A
+    /// delegated responder whose certificate is missing cannot be authorised.
+    pub include_responder_certificate: bool,
+    pub status: OcspStatus,
+    pub produced_at: String,
+    pub this_update: String,
+    pub next_update: Option<String>,
+    /// Name the responder by the SHA-1 hash of its key rather than by name.
+    pub by_key: bool,
+    /// A non-`successful` `OCSPResponseStatus`, which carries no answer at all.
+    pub response_status: Option<u8>,
+    /// Point the `CertID` at a different serial, so it is about another
+    /// certificate.
+    pub wrong_serial: bool,
+    /// Use SHA-256 in the `CertID` instead of RFC 6960's default SHA-1.
+    pub sha256_cert_id: bool,
+    pub tamper_signature: bool,
+}
+
+impl OcspSpec {
+    pub fn new(issuer_der: Vec<u8>, subject_der: Vec<u8>, responder_key: TestKey) -> Self {
+        Self {
+            issuer_der,
+            subject_der,
+            responder_key,
+            responder_der: None,
+            include_responder_certificate: true,
+            status: OcspStatus::Good,
+            produced_at: "2020-05-15T00:00:00Z".to_owned(),
+            this_update: "2020-05-15T00:00:00Z".to_owned(),
+            next_update: Some("2020-07-01T00:00:00Z".to_owned()),
+            by_key: false,
+            response_status: None,
+            wrong_serial: false,
+            sha256_cert_id: false,
+            tamper_signature: false,
+        }
+    }
+}
+
+fn ocsp_time(text: &str) -> x509_ocsp::OcspGeneralizedTime {
+    let seconds = openszigno_verify::parse_rfc3339(text).expect("the time parses");
+    x509_ocsp::OcspGeneralizedTime(
+        der::asn1::GeneralizedTime::from_unix_duration(std::time::Duration::from_secs(
+            u64::try_from(seconds).expect("the time is after the epoch"),
+        ))
+        .expect("the time encodes"),
+    )
+}
+
+/// Build one DER-encoded `OCSPResponse`.
+pub fn build_ocsp(spec: &OcspSpec) -> Vec<u8> {
+    use der::{Encode as _, asn1::Null};
+
+    let issuer = x509_cert::Certificate::from_der(&spec.issuer_der).expect("the CA parses");
+    let subject = x509_cert::Certificate::from_der(&spec.subject_der).expect("the subject parses");
+    let responder = spec
+        .responder_der
+        .as_ref()
+        .map(|der| x509_cert::Certificate::from_der(der).expect("the responder parses"))
+        .unwrap_or_else(|| issuer.clone());
+
+    let name_der = issuer
+        .tbs_certificate
+        .subject
+        .to_der()
+        .expect("the issuer name encodes");
+    let key_bytes = issuer
+        .tbs_certificate
+        .subject_public_key_info
+        .subject_public_key
+        .as_bytes()
+        .expect("the issuer key is whole bytes");
+    let (hash_oid, name_hash, key_hash) = if spec.sha256_cert_id {
+        (
+            "2.16.840.1.101.3.4.2.1",
+            Sha256::digest(&name_der).to_vec(),
+            Sha256::digest(key_bytes).to_vec(),
+        )
+    } else {
+        (
+            "1.3.14.3.2.26",
+            sha1::Sha1::digest(&name_der).to_vec(),
+            sha1::Sha1::digest(key_bytes).to_vec(),
+        )
+    };
+    let mut serial = subject.tbs_certificate.serial_number.as_bytes().to_vec();
+    if spec.wrong_serial {
+        serial[0] ^= 0x7f;
+    }
+
+    let cert_id = x509_ocsp::CertId {
+        hash_algorithm: x509_cert::spki::AlgorithmIdentifierOwned {
+            oid: const_oid::ObjectIdentifier::new_unwrap(hash_oid),
+            parameters: Some(der::asn1::Any::null()),
+        },
+        issuer_name_hash: der::asn1::OctetString::new(name_hash).expect("the hash encodes"),
+        issuer_key_hash: der::asn1::OctetString::new(key_hash).expect("the hash encodes"),
+        serial_number: x509_cert::serial_number::SerialNumber::new(&serial)
+            .expect("the serial encodes"),
+    };
+    let cert_status = match &spec.status {
+        OcspStatus::Good => x509_ocsp::CertStatus::Good(Null),
+        OcspStatus::Unknown => x509_ocsp::CertStatus::Unknown(Null),
+        OcspStatus::Revoked(time, reason) => {
+            x509_ocsp::CertStatus::Revoked(x509_ocsp::RevokedInfo {
+                revocation_time: ocsp_time(time),
+                revocation_reason: reason.map(|reason| match reason {
+                    1 => x509_cert::ext::pkix::CrlReason::KeyCompromise,
+                    4 => x509_cert::ext::pkix::CrlReason::Superseded,
+                    6 => x509_cert::ext::pkix::CrlReason::CertificateHold,
+                    _ => x509_cert::ext::pkix::CrlReason::Unspecified,
+                }),
+            })
+        }
+    };
+
+    let responder_id = if spec.by_key {
+        let key = responder
+            .tbs_certificate
+            .subject_public_key_info
+            .subject_public_key
+            .as_bytes()
+            .expect("the responder key is whole bytes");
+        x509_ocsp::ResponderId::ByKey(
+            der::asn1::OctetString::new(sha1::Sha1::digest(key).to_vec())
+                .expect("the key hash encodes"),
+        )
+    } else {
+        x509_ocsp::ResponderId::ByName(responder.tbs_certificate.subject.clone())
+    };
+
+    let response_data = x509_ocsp::ResponseData {
+        version: x509_ocsp::Version::V1,
+        responder_id,
+        produced_at: ocsp_time(&spec.produced_at),
+        responses: vec![x509_ocsp::SingleResponse {
+            cert_id,
+            cert_status,
+            this_update: ocsp_time(&spec.this_update),
+            next_update: spec.next_update.as_deref().map(ocsp_time),
+            single_extensions: None,
+        }],
+        response_extensions: None,
+    };
+    let message = response_data.to_der().expect("the ResponseData encodes");
+    let mut signature = sign_rsa_sha256(&spec.responder_key, &message);
+    if spec.tamper_signature {
+        signature[0] ^= 0xff;
+    }
+    let basic = x509_ocsp::BasicOcspResponse {
+        tbs_response_data: response_data,
+        signature_algorithm: sha256_rsa(),
+        signature: der::asn1::BitString::from_bytes(&signature).expect("the signature encodes"),
+        certs: spec
+            .include_responder_certificate
+            .then(|| spec.responder_der.as_ref().map(|_| vec![responder.clone()]))
+            .flatten(),
+    };
+    let response = match spec.response_status {
+        None => x509_ocsp::OcspResponse {
+            response_status: x509_ocsp::OcspResponseStatus::Successful,
+            response_bytes: Some(x509_ocsp::ResponseBytes {
+                response_type: const_oid::db::rfc6960::ID_PKIX_OCSP_BASIC,
+                response: der::asn1::OctetString::new(
+                    basic.to_der().expect("the BasicOCSPResponse encodes"),
+                )
+                .expect("the response encodes"),
+            }),
+        },
+        Some(_) => x509_ocsp::OcspResponse::try_later(),
+    };
+    response.to_der().expect("the OCSPResponse encodes")
+}
+
+// ---------------------------------------------------------------------------
+// A synthetic ETSI TS 119 612 trusted list
+// ---------------------------------------------------------------------------
+//
+// Deliberately minimal and entirely generated. The real EU and Hungarian lists
+// in `refs/trust` are read only as documentation of the schema; no test here
+// touches them, so the suite has no dependency on a file that changes daily and
+// no risk of asserting something about a real trust service provider.
+
+pub const TSL_NS: &str = "http://uri.etsi.org/02231/v2#";
+pub const SVCTYPE_CA_QC: &str = "http://uri.etsi.org/TrstSvc/Svctype/CA/QC";
+pub const SVCTYPE_TSA_QTST: &str = "http://uri.etsi.org/TrstSvc/Svctype/TSA/QTST";
+pub const STATUS_GRANTED: &str = "http://uri.etsi.org/TrstSvc/TrustedList/Svcstatus/granted";
+pub const STATUS_WITHDRAWN: &str = "http://uri.etsi.org/TrstSvc/TrustedList/Svcstatus/withdrawn";
+pub const STATUS_UNDER_SUPERVISION: &str =
+    "http://uri.etsi.org/TrstSvc/TrustedList/Svcstatus/undersupervision";
+
+/// One `TSPService` to write into a synthetic list.
+pub struct TlService {
+    pub service_type: String,
+    pub name: String,
+    /// The DER certificates of the service digital identity.
+    pub certificates: Vec<Vec<u8>>,
+    pub status: String,
+    pub status_starting_time: String,
+    /// Earlier `ServiceHistoryInstance` entries, as (status, starting time).
+    pub history: Vec<(String, String)>,
+    /// Emit a `DigitalId` that names a subject rather than supplying a
+    /// certificate, which must contribute no anchor.
+    pub subject_name_only: bool,
+}
+
+impl TlService {
+    pub fn ca_qc(name: &str, certificate: Vec<u8>) -> Self {
+        Self {
+            service_type: SVCTYPE_CA_QC.to_owned(),
+            name: name.to_owned(),
+            certificates: vec![certificate],
+            status: STATUS_GRANTED.to_owned(),
+            status_starting_time: "2016-07-01T00:00:00Z".to_owned(),
+            history: Vec::new(),
+            subject_name_only: false,
+        }
+    }
+}
+
+/// How one synthetic trusted list should look.
+pub struct TrustListSpec {
+    pub territory: String,
+    pub sequence_number: u32,
+    pub issue_date: String,
+    pub next_update: String,
+    pub services: Vec<TlService>,
+    /// Sign the list with this key and certificate, which a test then passes as
+    /// `--trust-list-signer`.
+    pub signer: Option<(TestKey, Vec<u8>)>,
+    /// Certificates to name in `PointersToOtherTSL`, which is how the EU list
+    /// of trusted lists says who signs each national list.
+    pub pointers: Vec<Vec<u8>>,
+    /// Corrupt one byte of the list after signing it.
+    pub tamper: bool,
+}
+
+impl TrustListSpec {
+    pub fn new(services: Vec<TlService>) -> Self {
+        Self {
+            territory: "HU".to_owned(),
+            sequence_number: 7,
+            issue_date: "2020-01-01T00:00:00Z".to_owned(),
+            next_update: "2021-01-01T00:00:00Z".to_owned(),
+            services,
+            signer: None,
+            pointers: Vec::new(),
+            tamper: false,
+        }
+    }
+}
+
+/// Render, and if a signer was given sign, one synthetic trusted list.
+pub fn build_trust_list(spec: &TrustListSpec) -> String {
+    let mut out = String::from("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
+    out.push_str(&format!(
+        "<tsl:TrustServiceStatusList xmlns:tsl=\"{TSL_NS}\" xmlns:ds=\"{DS_NS}\">"
+    ));
+    out.push_str("<tsl:SchemeInformation>");
+    out.push_str("<tsl:TSLVersionIdentifier>6</tsl:TSLVersionIdentifier>");
+    out.push_str(&format!(
+        "<tsl:TSLSequenceNumber>{}</tsl:TSLSequenceNumber>",
+        spec.sequence_number
+    ));
+    out.push_str(&format!(
+        "<tsl:SchemeTerritory>{}</tsl:SchemeTerritory>",
+        spec.territory
+    ));
+    out.push_str(&format!(
+        "<tsl:ListIssueDateTime>{}</tsl:ListIssueDateTime>",
+        spec.issue_date
+    ));
+    out.push_str(&format!(
+        "<tsl:NextUpdate><tsl:dateTime>{}</tsl:dateTime></tsl:NextUpdate>",
+        spec.next_update
+    ));
+    if !spec.pointers.is_empty() {
+        out.push_str("<tsl:PointersToOtherTSL>");
+        for certificate in &spec.pointers {
+            out.push_str(
+                "<tsl:OtherTSLPointer><tsl:ServiceDigitalIdentities><tsl:ServiceDigitalIdentity><tsl:DigitalId>",
+            );
+            out.push_str(&format!(
+                "<tsl:X509Certificate>{}</tsl:X509Certificate>",
+                BASE64.encode(certificate)
+            ));
+            out.push_str(
+                "</tsl:DigitalId></tsl:ServiceDigitalIdentity></tsl:ServiceDigitalIdentities></tsl:OtherTSLPointer>",
+            );
+        }
+        out.push_str("</tsl:PointersToOtherTSL>");
+    }
+    out.push_str("</tsl:SchemeInformation>");
+    out.push_str("<tsl:TrustServiceProviderList><tsl:TrustServiceProvider><tsl:TSPServices>");
+    for service in &spec.services {
+        out.push_str("<tsl:TSPService><tsl:ServiceInformation>");
+        out.push_str(&format!(
+            "<tsl:ServiceTypeIdentifier>{}</tsl:ServiceTypeIdentifier>",
+            service.service_type
+        ));
+        out.push_str(&format!(
+            "<tsl:ServiceName><tsl:Name xml:lang=\"en\">{}</tsl:Name></tsl:ServiceName>",
+            service.name
+        ));
+        out.push_str("<tsl:ServiceDigitalIdentity>");
+        if service.subject_name_only {
+            out.push_str(
+                "<tsl:DigitalId><tsl:X509SubjectName>CN=Named Only,C=HU</tsl:X509SubjectName></tsl:DigitalId>",
+            );
+        }
+        for certificate in &service.certificates {
+            out.push_str(&format!(
+                "<tsl:DigitalId><tsl:X509Certificate>{}</tsl:X509Certificate></tsl:DigitalId>",
+                BASE64.encode(certificate)
+            ));
+        }
+        out.push_str("</tsl:ServiceDigitalIdentity>");
+        out.push_str(&format!(
+            "<tsl:ServiceStatus>{}</tsl:ServiceStatus>",
+            service.status
+        ));
+        out.push_str(&format!(
+            "<tsl:StatusStartingTime>{}</tsl:StatusStartingTime>",
+            service.status_starting_time
+        ));
+        out.push_str("</tsl:ServiceInformation>");
+        if !service.history.is_empty() {
+            out.push_str("<tsl:ServiceHistory>");
+            for (status, starting) in &service.history {
+                out.push_str("<tsl:ServiceHistoryInstance>");
+                out.push_str(&format!(
+                    "<tsl:ServiceTypeIdentifier>{}</tsl:ServiceTypeIdentifier>",
+                    service.service_type
+                ));
+                out.push_str(&format!(
+                    "<tsl:ServiceName><tsl:Name xml:lang=\"en\">{}</tsl:Name></tsl:ServiceName>",
+                    service.name
+                ));
+                out.push_str("<tsl:ServiceDigitalIdentity>");
+                for certificate in &service.certificates {
+                    out.push_str(&format!(
+                        "<tsl:DigitalId><tsl:X509Certificate>{}</tsl:X509Certificate></tsl:DigitalId>",
+                        BASE64.encode(certificate)
+                    ));
+                }
+                out.push_str("</tsl:ServiceDigitalIdentity>");
+                out.push_str(&format!("<tsl:ServiceStatus>{status}</tsl:ServiceStatus>"));
+                out.push_str(&format!(
+                    "<tsl:StatusStartingTime>{starting}</tsl:StatusStartingTime>"
+                ));
+                out.push_str("</tsl:ServiceHistoryInstance>");
+            }
+            out.push_str("</tsl:ServiceHistory>");
+        }
+        out.push_str("</tsl:TSPService>");
+    }
+    out.push_str("</tsl:TSPServices></tsl:TrustServiceProvider></tsl:TrustServiceProviderList>");
+
+    if spec.signer.is_some() {
+        out.push_str("<ds:Signature Id=\"tl-signature\"><ds:SignedInfo>");
+        out.push_str(&format!(
+            "<ds:CanonicalizationMethod Algorithm=\"{C14N_EXC}\"/>"
+        ));
+        out.push_str(&format!(
+            "<ds:SignatureMethod Algorithm=\"{RSA_SHA256_URI}\"/>"
+        ));
+        out.push_str("<ds:Reference URI=\"\"><ds:Transforms>");
+        out.push_str(&format!("<ds:Transform Algorithm=\"{ENVELOPED_URI}\"/>"));
+        out.push_str(&format!("<ds:Transform Algorithm=\"{C14N_EXC}\"/>"));
+        out.push_str("</ds:Transforms>");
+        out.push_str(&format!(
+            "<ds:DigestMethod Algorithm=\"{SHA256_URI}\"/><ds:DigestValue>@@TLDIGEST@@</ds:DigestValue>"
+        ));
+        out.push_str("</ds:Reference></ds:SignedInfo>");
+        out.push_str("<ds:SignatureValue>@@TLSIG@@</ds:SignatureValue>");
+        out.push_str("</ds:Signature>");
+    }
+    out.push_str("</tsl:TrustServiceStatusList>");
+
+    let Some((key, _)) = &spec.signer else {
+        return out;
+    };
+    out = out.replace("@@TLDIGEST@@", &trust_list_digest(&out));
+    let value = trust_list_signature(&out, key);
+    out = out.replace("@@TLSIG@@", &value);
+    if spec.tamper {
+        // Change a byte the signature covers, which must make it fail.
+        out = out.replace("<tsl:SchemeTerritory>HU<", "<tsl:SchemeTerritory>SK<");
+    }
+    out
+}
+
+fn trust_list_digest(xml: &str) -> String {
+    let source = XmlSource::decode(xml.as_bytes(), &Limits::default()).expect("decodes");
+    let tree = source.parse_tree(&Limits::default()).expect("parses");
+    let signature = tree
+        .descendants()
+        .find(|node| node.attribute("Id") == Some("tl-signature"))
+        .expect("the signature element exists");
+    let mut set = NodeSet::document(tree.root()).without_comments();
+    set.exclude(signature);
+    let octets = RoxmltreeC14n
+        .canonicalize(
+            source.text(),
+            &set,
+            C14nAlgorithm::Exclusive { comments: false },
+            &[],
+        )
+        .expect("canonicalizes");
+    BASE64.encode(Sha256::digest(&octets))
+}
+
+fn trust_list_signature(xml: &str, key: &TestKey) -> String {
+    let source = XmlSource::decode(xml.as_bytes(), &Limits::default()).expect("decodes");
+    let tree = source.parse_tree(&Limits::default()).expect("parses");
+    let signature = tree
+        .descendants()
+        .find(|node| node.attribute("Id") == Some("tl-signature"))
+        .expect("the signature element exists");
+    let signed_info = signature
+        .children()
+        .find(|node| node.is_element() && node.tag_name().name() == "SignedInfo")
+        .expect("ds:SignedInfo exists");
+    let canonical = RoxmltreeC14n
+        .canonicalize(
+            source.text(),
+            &NodeSet::subtree(signed_info).without_comments(),
+            C14nAlgorithm::Exclusive { comments: false },
+            &[],
+        )
+        .expect("canonicalizes");
+    BASE64.encode(sign_rsa_sha256(key, &canonical))
+}
+
+/// A hand-encoded `qcStatements` extension (RFC 3739 section 3.2.6) asserting
+/// the given statement OIDs with no `statementInfo`.
+pub fn qc_statements_extension(oids: &[&str]) -> rcgen::CustomExtension {
+    use der::Encode as _;
+    let statements: Vec<der::Any> = oids
+        .iter()
+        .map(|oid| {
+            let identifier = const_oid::ObjectIdentifier::new_unwrap(oid);
+            let inner = identifier.to_der().expect("the OID encodes");
+            der::Any::new(der::Tag::Sequence, inner).expect("the statement encodes")
+        })
+        .collect();
+    let encoded = statements.to_der().expect("the statement sequence encodes");
+    rcgen::CustomExtension::from_oid_content(&[1, 3, 6, 1, 5, 5, 7, 1, 3], encoded)
+}
+
+/// A hand-encoded `cRLDistributionPoints` extension naming one URI, so a
+/// partitioned CRL's `issuingDistributionPoint` has something to match.
+pub fn crl_distribution_point_extension(uri: &str) -> rcgen::CustomExtension {
+    use der::Encode as _;
+    let point = x509_cert::ext::pkix::crl::dp::DistributionPoint {
+        distribution_point: Some(x509_cert::ext::pkix::name::DistributionPointName::FullName(
+            vec![
+                x509_cert::ext::pkix::name::GeneralName::UniformResourceIdentifier(
+                    der::asn1::Ia5String::new(uri).expect("the URI encodes"),
+                ),
+            ],
+        )),
+        reasons: None,
+        crl_issuer: None,
+    };
+    let encoded = vec![point]
+        .to_der()
+        .expect("the distribution points encode");
+    rcgen::CustomExtension::from_oid_content(&[2, 5, 29, 31], encoded)
 }

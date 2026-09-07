@@ -157,10 +157,12 @@ fn a_correct_token_verifies_end_to_end() {
     );
     assert_check(&report, CheckCode::TimestampTsaPathOk, CheckStatus::Passed);
     assert_check(&report, CheckCode::TimestampVerified, CheckStatus::Passed);
+    // Informational: what a present timestamp is worth is decided by its own
+    // checks, which are folded in through `timestamp_verified`.
     assert_check(
         &report,
         CheckCode::SignatureTimestampPresent,
-        CheckStatus::Unknown,
+        CheckStatus::Info,
     );
 
     let timestamp = &report.signatures[0].timestamps[0];

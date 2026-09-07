@@ -178,6 +178,10 @@ pub struct TokenInput<'a> {
     pub extra_certificates: &'a [ParsedCertificate],
     pub limits: &'a VerifyLimits,
     pub allow_legacy_algorithms: bool,
+    /// The revocation material offered to the TSA's own chain. A timestamp
+    /// signed by a revoked TSA certificate proves nothing.
+    pub revocation: crate::revocation::RevocationData<'a>,
+    pub revocation_policy: crate::trust::RevocationPolicy,
     /// The `xades:SigningTime` the signature claims, if any, for the ordering
     /// check.
     pub claimed_signing_time: Option<UnixTime>,
@@ -376,6 +380,32 @@ pub fn verify_token(input: &TokenInput<'_>) -> TokenOutcome {
         checks.push(Check::new(code, status, path.message));
         checks.extend(path.advisories);
 
+        // --- The TSA chain's revocation -------------------------------------
+        // Checked at `genTime`, the same instant the chain itself is validated
+        // at: the question is whether the authority was entitled to speak when
+        // it spoke.
+        let mut chain = path.chain;
+        if !path.path.is_empty() {
+            let outcome = crate::revocation::check_path(&crate::revocation::PathRevocationInput {
+                path: &path.path,
+                candidates: &candidates,
+                data: &input.revocation,
+                time: gen_time,
+                // The instant a TSA's own chain is validated at is the
+                // `genTime` the token asserts, so it cannot also be the proof
+                // that dismisses a revocation dated after it. A TSA
+                // certificate revoked after its own genTime stays `unknown`.
+                time_is_proven: false,
+                policy: input.revocation_policy,
+                role: crate::revocation::ChainRole::TimestampAuthority,
+                limits: input.limits,
+            });
+            for (entry, status) in chain.iter_mut().zip(outcome.per_certificate) {
+                entry.revocation = Some(status);
+            }
+            checks.push(outcome.check);
+        }
+
         // --- Ordering against the claimed signing time ----------------------
         if let Some(claimed) = input.claimed_signing_time {
             let slack = i64::try_from(accuracy_seconds.unwrap_or(0)).unwrap_or(i64::MAX);
@@ -387,9 +417,7 @@ pub fn verify_token(input: &TokenInput<'_>) -> TokenOutcome {
             }
         }
 
-        let verified = checks
-            .iter()
-            .all(|check| check.status == CheckStatus::Passed);
+        let verified = token_verified(&checks);
         return TokenOutcome {
             report: TimestampReport {
                 kind: input.kind,
@@ -398,7 +426,7 @@ pub fn verify_token(input: &TokenInput<'_>) -> TokenOutcome {
                 serial_hex: Some(hex(tst_info.serial_number.as_bytes())),
                 imprint_algorithm: imprint_algorithm.map(Digest::as_str),
                 tsa_certificate: Some(tsa.summary()),
-                chain: path.chain,
+                chain,
                 verified,
                 checks,
             },
@@ -485,10 +513,40 @@ fn outer_tag(der: &[u8]) -> String {
 /// information, not evidence of forgery. The token keeps its own `failed`
 /// checks and `verified: false`, and the validation time falls back to `--at`
 /// or the clock.
+/// Whether a token may move the validation time.
+///
+/// Stricter than `passed` in one direction and looser in another, on purpose:
+/// a `failed` check anywhere sinks the token, but a revocation answer the tool
+/// could not obtain does not. An unobtainable revocation status still blocks
+/// the *signature's* verdict through [`summary_check`]; what it must not do is
+/// silently move the validation time back to "now", which would make an
+/// expired signing certificate look expired for a second, unrelated reason.
+fn token_verified(checks: &[Check]) -> bool {
+    checks.iter().all(|check| match check.status {
+        CheckStatus::Passed | CheckStatus::Info => true,
+        CheckStatus::Failed => false,
+        CheckStatus::Unknown | CheckStatus::Skipped => check.code.is_revocation(),
+    })
+}
+
+/// The token's own revocation check, so the caller can fold it into the
+/// signature's verdict exactly once.
+pub fn revocation_check(checks: &[Check]) -> Option<&Check> {
+    checks.iter().find(|check| check.code.is_revocation())
+}
+
 pub fn summary_check(checks: &[Check]) -> Check {
+    // Revocation is excluded here and folded in separately: a TSA certificate
+    // whose revocation status could not be obtained still binds the signature
+    // to a time, and saying otherwise would quietly move the validation time
+    // back to "now" for a reason that has nothing to do with the timestamp.
+    let checks: Vec<&Check> = checks
+        .iter()
+        .filter(|check| !check.code.is_revocation())
+        .collect();
     if checks
         .iter()
-        .all(|check| check.status == CheckStatus::Passed)
+        .all(|check| matches!(check.status, CheckStatus::Passed | CheckStatus::Info))
     {
         return Check::passed(
             CheckCode::TimestampVerified,
@@ -865,6 +923,8 @@ mod tests {
             extra_certificates: &[],
             limits: &limits,
             allow_legacy_algorithms: false,
+            revocation: crate::revocation::RevocationData::default(),
+            revocation_policy: crate::trust::RevocationPolicy::Offline,
             claimed_signing_time: None,
         })
     }

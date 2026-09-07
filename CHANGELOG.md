@@ -10,6 +10,144 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
 
 ## [Unreleased]
 
+### Added (M2 phase 3: revocation and EU trusted lists)
+
+- **`verify` can now report a signature `valid`, and exits `0` when it does.**
+  Reaching it needs all of: a structurally sound signature whose references and
+  signature value verify under the pinned policy, a signed
+  `SigningCertificate` binding, a path to a configured anchor at the validation
+  time, a fully verified `xades:SignatureTimeStamp`, and fresh non-revoked
+  status for every non-anchor certificate on both the signer's and each
+  timestamp authority's chain. `valid` means every check this build makes
+  passed at the stated validation time; it is not a legal opinion. See
+  `SECURITY.md` and `docs/architecture.md`.
+- Offline revocation checking (stage E). Data is taken from the signature's own
+  `xades:RevocationValues` (`CRLValues`/`EncapsulatedCRLValue` and
+  `OCSPValues`/`EncapsulatedOCSPValue`, in every recognised XAdES namespace)
+  and from `--revocation-store DIR`, in that order, with OCSP asked before CRLs
+  within each tier. Embedded data is untrusted input: every CRL and every OCSP
+  response is signature-checked against an authorised issuer before it is
+  believed.
+  - CRLs per RFC 5280 section 6.3: issuer match, signature by the issuing CA or
+    by a delegate that CA issued which asserts `cRLSign`, `thisUpdate` and
+    `nextUpdate` against the validation time with **no grace period**, and
+    scope via `issuingDistributionPoint`. Delta CRLs, indirect CRLs, scopes
+    restricted to reasons or attribute certificates, partitioned CRLs the
+    certificate does not name, entries carrying `certificateIssuer`, and any
+    other critical CRL extension all fail closed. `certificateHold` counts as
+    revoked.
+  - OCSP per RFC 6960: response status, responder identity `byName` or `byKey`,
+    authorisation as the issuing CA or a delegate carrying `id-kp-OCSPSigning`,
+    signature under the pinned allowlist, `certID` matching, and freshness. The
+    nonce is deliberately ignored, because offline validation replays a
+    response produced for someone else's request. SHA-1 is accepted in the
+    `certID` and nowhere else, documented in `docs/architecture.md`.
+  - A revocation dated *after* the validation time yields the distinct
+    `cert_revoked_after_validation_time` (`unknown`), not `cert_revoked`.
+  - New codes: `revocation_policy` (`info`), `revocation_ok` (`passed`),
+    `cert_revoked` (`failed`), `cert_revoked_after_validation_time`,
+    `revocation_status_unknown`, `revocation_data_stale`,
+    `revocation_data_invalid` (all `unknown`). `revocation_not_checked` now
+    means only "the caller passed `--no-revocation`".
+- ETSI TS 119 612 trusted lists via `--trust-list FILE` (repeatable). Every
+  `X509Certificate` in the service digital identity of a granted CA/QC or
+  TSA/QTST service becomes a trust anchor carrying the service's status
+  timeline, and the status **in force at the validation time** decides whether
+  a path ending there is trusted. `--trust-list-signer CERT` verifies the
+  list's own enveloped XMLDSig signature with the same core, backend and
+  allowlists a dossier gets; without it `trust_list_unverified` (`unknown`)
+  blocks a `valid` verdict. Nothing is fetched. New codes:
+  `trust_list_loaded`, `trust_list_unverified`, `trust_list_signature_ok`,
+  `trust_list_signature_invalid`, `certificate_qualified`,
+  `certificate_not_qualified`, `certificate_qualified_unknown`.
+- `--lotl FILE` reads the EU list of trusted lists and takes the national
+  lists' signing certificates from its `PointersToOtherTSL` entries, so one
+  out-of-band certificate bootstraps the verification of every `--trust-list`.
+  The LOTL is verified against `--trust-list-signer` first, and only then are
+  its pointers trusted; its own `trust_list_unverified` check still blocks when
+  it could not be verified. The LOTL contributes no trust anchors of its own.
+- Qualified status is determined **over the whole validated chain**, not over
+  its anchor: a chain is qualified when some certificate in it is, or was
+  issued by, the service digital identity of a granted CA/QC service. Real
+  trusted lists name the issuing CAs, which are intermediates, while the root
+  is usually a certificate the operator pinned into `--trust-store`, so an
+  anchor-only rule answers "not determined" for every real dossier. The signer's
+  `QCStatements` may then contradict the list: a post-eIDAS certificate whose
+  extension is present but omits `QcCompliance`, or will not parse, yields
+  `false`; one carrying no such extension denies nothing and rests on the list.
+  `qualified_service` names the service that matched. `null`, never `false`,
+  when no trusted list was consulted.
+- New flags: `--trust-list FILE`, `--lotl FILE`, `--trust-list-signer CERT`,
+  `--revocation-store DIR`, `--no-revocation`. New error codes
+  `trust_list_invalid` and `revocation_store_invalid` (exit 3).
+- New JSON fields: `policy.trust_lists[]` (territory, sequence number, issue
+  date, next update, anchor count, whether the list's signature was verified);
+  `signatures[].qualified` and `signatures[].qualified_signature_device`;
+  `signatures[].qualified_service`; `chain[].trust_anchor_origin`
+  (`trust_store` or `trust_list`, preferring `trust_list` when a certificate is
+  both); and `chain[].revocation` with `status`, `code`, `source` (`embedded_crl`,
+  `embedded_ocsp`, `store_crl`, `store_ocsp`), `revocation_time`, `reason`,
+  `this_update`, `next_update`, and `produced_at`. `schema_version` stays `1`:
+  these are additions, and no existing field's contract changed.
+- `docs/trust.md`: how to obtain, pin and lay out trust anchors, trusted lists,
+  CRLs and OCSP responses, how qualified status is decided, and what makes
+  revocation data unusable.
+
+### Changed (M2 phase 3)
+
+- **New check status `info`**, for checks that report rather than decide. It is
+  the only non-blocking status, which makes "`unknown` always blocks" true
+  without exception. Consumers must treat an unrecognised code as blocking
+  unless its status is `passed` or `info`. Moved from `unknown` or `skipped` to
+  `info`: `signing_time_present`, `cert_key_usage_advisory`,
+  `signature_timestamp_present`, `xades_signature_policy_implied`,
+  `xades_signature_policy_explicit`, `xades_not_validated`,
+  `archive_timestamp_present` and `dossier_timestamp_not_validated`.
+- **`skipped` now means only "a check the policy requires was not performed"**,
+  and nothing else is filed under it. A property this build reads but does not
+  act on, and evidence it declines to re-verify, are `info`: they did not fail
+  to answer a required question. Blocking on them capped a signature at
+  `indeterminate` for carrying *more* evidence than the minimum, which is
+  precisely backwards — an unsigned qualifying property cannot change what a
+  signature says, an archive timestamp is laid on top of one, and a
+  dossier-level `es:TimeStamp` is a statement about the container rather than
+  about any signature in it. The three remaining `skipped` emitters are
+  `xades_absent`, `timestamp_not_checked` and `revocation_not_checked`.
+  `xades_not_validated` and `archive_timestamp_present` are omitted entirely
+  when there is nothing to report.
+- `cert_revoked_after_validation_time` is `info` when the validation time was
+  **proven** by a fully verified `xades:SignatureTimeStamp`, and `unknown` when
+  it was merely asserted by `--at` or the clock. This is the ETSI EN 319 102-1
+  best-signature-time rule: a signature that demonstrably existed at an instant
+  is not undone by a certificate being withdrawn afterwards, whereas a caller
+  can pass any `--at` they like. Never `passed` either way; the time and reason
+  are always reported, and the chain entry's own status reads
+  `revoked_after_validation_time`. A timestamp authority's chain is always
+  treated as asserted, because the instant it is validated at is the `genTime`
+  the token itself claims.
+- Revocation summary messages now name **which chain** they are about — the
+  signer's or a timestamp authority's — since a signature emits one per chain
+  under the same code.
+- Embedded validation data is now harvested from
+  `xades141:TimeStampValidationData` as well as from a plain
+  `xades:RevocationValues` / `xades:CertificateValues`, for both CRLs, OCSP
+  responses and certificates. Real long-term Microsec dossiers file almost all
+  of their embedded OCSP responses in the former, so the previous reader found
+  nothing in most real material.
+- The revocation coverage message now names *which* certificate lacks data, by
+  role and by the public CA names around it, and repeats that certificate's CRL
+  distribution point when it publishes one. The end-entity certificate's own
+  subject is still never repeated.
+- `timestamp_verified` now summarises a token's checks **excluding** its
+  revocation checks, which are folded into the signature's verdict separately
+  so they are counted once. An unobtainable revocation answer for a TSA no
+  longer stops its `genTime` from becoming the validation time; a TSA
+  certificate that was actually revoked still sinks the signature.
+- `TrustSource::anchors` now yields `TrustAnchor` values carrying their origin
+  and any trusted-list service record, and `RevocationSource` gained `crls`
+  and `ocsp_responses`. Both are breaking changes to the `openszigno-verify`
+  public API.
+
 ### Added (M2 phase 2: XAdES signed properties and RFC 3161 timestamps)
 
 - `crates/openszigno-verify/tests/vectors.rs` and
@@ -146,8 +284,9 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
 - The Conventional Commits scope allowlist gains `verify`, in
   `CONTRIBUTING.md` and `scripts/commit-msg.sh`.
 
-`valid` remains unreachable: `revocation_not_checked` is still emitted as a
-blocking `skipped` check on every signature, and a test asserts it.
+`valid` remained unreachable at that point: `revocation_not_checked` was still
+emitted as a blocking `skipped` check on every signature, and a test asserted
+it. Phase 3 lifted that.
 
 ### Changed
 

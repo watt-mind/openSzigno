@@ -627,12 +627,16 @@ fn finish(
     // The claimed signing time is read and reported, never believed: it is a
     // claim until a verified timestamp token orders it, and it never becomes a
     // validation time.
+    // Informational on purpose: a claimed signing time is unauthenticated
+    // whether it is there or not, so its presence decides nothing. What does
+    // decide is the validation time, which only `--at`, a verified timestamp,
+    // and the clock can set.
     match &header.signing_time {
-        Some(_) => checks.push(Check::unknown(
+        Some(_) => checks.push(Check::info(
             CheckCode::SigningTimePresent,
             "a claimed xades:SigningTime was read; it is unauthenticated and is never used as a validation time",
         )),
-        None => checks.push(Check::unknown(
+        None => checks.push(Check::info(
             CheckCode::SigningTimePresent,
             "no usable xades:SigningTime was found",
         )),
@@ -649,6 +653,9 @@ fn finish(
             signing_time: header.signing_time,
             signing_certificate_index: signer_index,
             signing_certificate: signer.as_ref().map(ParsedCertificate::summary),
+            qualified: None,
+            qualified_signature_device: None,
+            qualified_service: None,
             chain: Vec::new(),
             references,
             xades: stage_c.report,
@@ -679,39 +686,63 @@ fn stage_c_presence(properties: &XadesProperties<'_, '_>) -> StageC {
             "XAdES qualifying properties are present",
         ));
     } else {
+        // Blocking, and the one XAdES `skipped` that stays so: with no
+        // qualifying properties there is no *signed* statement of which
+        // certificate signed, so the `SigningCertificate` binding the policy
+        // requires was not performed. That is what `skipped` means.
         checks.push(Check::skipped(
             CheckCode::XadesAbsent,
-            "no XAdES qualifying properties were found for this signature",
+            "no XAdES qualifying properties were found for this signature, so nothing signed says which certificate signed it",
         ));
     }
 
     // A signature policy is reported by identifier only: no policy document is
     // fetched, parsed, or applied, so neither form can contribute a `passed`.
+    // Informational: a declared policy is a statement about how the signature
+    // was made, not a question this build failed to answer. Blocking on it
+    // would cap every policy-bearing signature at `indeterminate` for a
+    // property that says nothing about whether the signature is sound.
     match properties.signature_policy {
-        Some(SignaturePolicy::Implied) => checks.push(Check::unknown(
+        Some(SignaturePolicy::Implied) => checks.push(Check::info(
             CheckCode::XadesSignaturePolicyImplied,
             "the signature declares an implied signature policy; no policy is processed",
         )),
-        Some(SignaturePolicy::Explicit) => checks.push(Check::unknown(
+        Some(SignaturePolicy::Explicit) => checks.push(Check::info(
             CheckCode::XadesSignaturePolicyExplicit,
             "the signature declares an explicit signature policy; its identifier is reported and no policy is processed",
         )),
         None => {}
     }
 
+    // Informational, and emitted only when there is something to name.
+    //
+    // Everything counted here lives under `xades:UnsignedProperties`, which is
+    // not covered by the signature and cannot change what the signature says.
+    // ETSI EN 319 102-1 decides validity from the signed properties, the
+    // timestamps, and revocation; the remaining unsigned properties are
+    // evidence containers, and the ones that carry evidence this build uses —
+    // `CertificateValues`, `RevocationValues`, `TimeStampValidationData` — are
+    // already consumed and are not counted here. Blocking on the rest would
+    // cap a signature at `indeterminate` for carrying *more* evidence than the
+    // minimum, which is precisely backwards.
     if !properties.unprocessed_properties.is_empty() {
-        checks.push(Check::skipped(
+        checks.push(Check::info(
             CheckCode::XadesNotValidated,
             format!(
-                "qualifying properties this build does not validate are present: {}",
+                "unsigned qualifying properties this build does not validate are present and are named rather than ignored: {}",
                 properties.unprocessed_properties.join(", ")
             ),
         ));
     }
     if properties.archive_timestamps > 0 {
-        checks.push(Check::skipped(
+        // Informational: an archive timestamp is additional long-term evidence
+        // laid on top of a signature. Not validating it means this build makes
+        // no claim about the signature's validity *beyond* the point its other
+        // evidence reaches; it does not make the evidence already checked worth
+        // less. LTA re-validation is M3.
+        checks.push(Check::info(
             CheckCode::ArchiveTimestampPresent,
-            "an xades:ArchiveTimeStamp is present; archive timestamps are out of scope for this release",
+            "an xades:ArchiveTimeStamp is present and is not validated; this release makes no claim about long-term (B-LTA) re-validation",
         ));
     }
 
@@ -1391,24 +1422,35 @@ fn key_info_certificates(signature: Node<'_, '_>) -> Vec<ParsedCertificate> {
 ///
 /// Real dossiers put only the signer in `ds:KeyInfo` and carry the
 /// intermediates — and usually the root — in
-/// `xades:CertificateValues/xades:EncapsulatedX509Certificate`. These are
-/// **untrusted path candidates**: a self-signed root found here is still not an
-/// anchor, and only the trust store can make one.
+/// `xades:CertificateValues/xades:EncapsulatedX509Certificate`, and long-term
+/// material repeats them inside `xades141:TimeStampValidationData`. Both
+/// placements are harvested, and inside either container the element is matched
+/// by name alone, because real dossiers mix the 1.3.2 and 1.4.1 namespaces
+/// within one block.
+///
+/// These are **untrusted path candidates**: a self-signed root found here is
+/// still not an anchor, and only the trust store or a trusted list can make
+/// one.
 fn encapsulated_certificates(signature: Node<'_, '_>, limit: usize) -> Vec<ParsedCertificate> {
-    signature
-        .descendants()
-        .filter(|node| {
-            node.is_element()
-                && node.tag_name().name() == "EncapsulatedX509Certificate"
-                && node
-                    .tag_name()
-                    .namespace()
-                    .is_some_and(|namespace| XADES_NAMESPACES.contains(&namespace))
-        })
-        .filter_map(|node| decode_base64(&text_of(node)))
-        .filter_map(|der| ParsedCertificate::from_der(&der, CertificateSource::CertificateValues))
-        .take(limit)
-        .collect()
+    let mut certificates = Vec::new();
+    for container in xades::validation_data_containers(signature) {
+        for node in container.descendants().filter(|node| {
+            node.is_element() && node.tag_name().name() == "EncapsulatedX509Certificate"
+        }) {
+            if certificates.len() >= limit {
+                return certificates;
+            }
+            if let Some(certificate) = decode_base64(&text_of(node)).and_then(|der| {
+                ParsedCertificate::from_der(&der, CertificateSource::CertificateValues)
+            }) && !certificates
+                .iter()
+                .any(|existing: &ParsedCertificate| existing.der == certificate.der)
+            {
+                certificates.push(certificate);
+            }
+        }
+    }
+    certificates
 }
 
 /// Choose the signing certificate: the candidate whose public key actually

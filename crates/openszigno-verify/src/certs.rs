@@ -37,6 +37,26 @@ const OID_ECDSA_SHA256: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840
 const OID_ECDSA_SHA384: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.10045.4.3.3");
 
 const OID_EXT_KEY_USAGE: ObjectIdentifier = ObjectIdentifier::new_unwrap("2.5.29.37");
+/// `id-pe-qcStatements`, RFC 3739 section 3.2.6.
+const OID_QC_STATEMENTS: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.3.6.1.5.5.7.1.3");
+/// `id-etsi-qcs-QcCompliance`, ETSI EN 319 412-5 section 4.2.1.
+pub const OID_QC_COMPLIANCE: ObjectIdentifier = ObjectIdentifier::new_unwrap("0.4.0.1862.1.1");
+/// `id-etsi-qcs-QcSSCD`, ETSI EN 319 412-5 section 4.2.2 (QSCD since eIDAS).
+pub const OID_QC_SSCD: ObjectIdentifier = ObjectIdentifier::new_unwrap("0.4.0.1862.1.4");
+/// The largest number of QCStatements this build will read from one
+/// certificate before treating the extension as hostile.
+const MAX_QC_STATEMENTS: usize = 64;
+
+/// One `QCStatement`, RFC 3739 section 3.2.6. Only the identifier is read; the
+/// optional `statementInfo` is deliberately not interpreted, because every
+/// statement type has its own body and guessing at one would be worse than
+/// reporting the claim.
+#[derive(Clone, Debug, der::Sequence)]
+struct QcStatement {
+    statement_id: ObjectIdentifier,
+    #[asn1(optional = "true")]
+    statement_info: Option<der::Any>,
+}
 const OID_ANY_EXTENDED_KEY_USAGE: ObjectIdentifier = ObjectIdentifier::new_unwrap("2.5.29.37.0");
 /// `id-kp-timeStamping`, RFC 3161 section 2.3.
 pub const OID_KP_TIME_STAMPING: ObjectIdentifier =
@@ -115,6 +135,10 @@ pub enum CertificateSource {
     TrustStore,
     /// The `certificates` set of an RFC 3161 timestamp token.
     TimestampToken,
+    /// A delegated responder certificate carried inside an OCSP response.
+    OcspResponse,
+    /// A service digital identity read from an ETSI TS 119 612 trusted list.
+    TrustList,
 }
 
 /// What a built path is being validated *for*.
@@ -141,6 +165,12 @@ pub struct ChainEntry {
     pub not_after: String,
     pub is_trust_anchor: bool,
     pub source: CertificateSource,
+    /// For the anchor, where the caller's trust in it came from: the
+    /// `--trust-store` directory or a `--trust-list` file. `null` on every
+    /// other entry.
+    pub trust_anchor_origin: Option<crate::trust::TrustAnchorOrigin>,
+    /// This certificate's revocation answer. `null` until stage E has run.
+    pub revocation: Option<crate::revocation::CertificateRevocation>,
 }
 
 /// A parsed certificate plus the DER it came from and where it was found.
@@ -193,6 +223,8 @@ impl ParsedCertificate {
             not_after: format_rfc3339(unix_time(tbs.validity.not_after)),
             is_trust_anchor,
             source: self.source,
+            trust_anchor_origin: None,
+            revocation: None,
         }
     }
 
@@ -272,6 +304,41 @@ impl ParsedCertificate {
             })
     }
 
+    /// The `keyUsage` extension, distinguishing absent from malformed.
+    pub(crate) fn key_usage(&self) -> Result<Option<KeyUsage>, ()> {
+        self.extension::<KeyUsage>()
+    }
+
+    /// The ETSI EN 319 412-5 / RFC 3739 `QCStatements` this certificate
+    /// asserts, as the OIDs of the statements it carries.
+    ///
+    /// A statement is a **claim by the issuer**, never a determination: it
+    /// says what the CA asserts, and only a trusted list can say whether the
+    /// CA was entitled to assert it. `Err` means the extension is present but
+    /// malformed, which is not the same as absent.
+    pub(crate) fn qc_statement_oids(&self) -> Result<Option<Vec<ObjectIdentifier>>, ()> {
+        let Some(extensions) = self.certificate.tbs_certificate.extensions.as_ref() else {
+            return Ok(None);
+        };
+        let Some(extension) = extensions
+            .iter()
+            .find(|extension| extension.extn_id == OID_QC_STATEMENTS)
+        else {
+            return Ok(None);
+        };
+        let statements =
+            Vec::<QcStatement>::from_der(extension.extn_value.as_bytes()).map_err(|_| ())?;
+        if statements.len() > MAX_QC_STATEMENTS {
+            return Err(());
+        }
+        Ok(Some(
+            statements
+                .into_iter()
+                .map(|statement| statement.statement_id)
+                .collect(),
+        ))
+    }
+
     /// The extended key usages, if the extension is present.
     pub(crate) fn extended_key_usages(&self) -> Result<Option<Vec<ObjectIdentifier>>, ()> {
         let Some(extensions) = self.certificate.tbs_certificate.extensions.as_ref() else {
@@ -334,6 +401,10 @@ pub struct PathOutcome {
     pub code: CheckCode,
     pub message: String,
     pub chain: Vec<ChainEntry>,
+    /// The certificates the reported chain is made of, leaf first and anchor
+    /// last, so that stage E can ask about each link. Empty unless a path was
+    /// actually built and validated.
+    pub path: Vec<ParsedCertificate>,
     /// Non-blocking observations about the path the caller must still report:
     /// checks that are `unknown` rather than `failed`, so they cap the verdict
     /// without condemning the signature.
@@ -366,6 +437,7 @@ pub fn validate_path(
             message: "no trust anchors were configured, so the chain could not be checked"
                 .to_owned(),
             chain: leaf_only,
+            path: Vec::new(),
             advisories: Vec::new(),
         };
     }
@@ -399,6 +471,7 @@ pub fn validate_path(
                     "path building gave up after {MAX_PATH_EXPANSIONS} expansions over {considered} candidate certificates"
                 ),
                 chain: leaf_only,
+                path: Vec::new(),
                 advisories: Vec::new(),
             };
         }
@@ -415,6 +488,7 @@ pub fn validate_path(
                 "no path from the signing certificate to a configured trust anchor was found after considering {considered} candidate certificates{named}"
             ),
             chain: leaf_only,
+            path: Vec::new(),
             advisories: Vec::new(),
         };
     }
@@ -440,6 +514,7 @@ pub fn validate_path(
                         certificates.len()
                     ),
                     chain: entries,
+                    path: certificates.iter().map(|entry| (*entry).clone()).collect(),
                     advisories,
                 };
             }
@@ -449,6 +524,7 @@ pub fn validate_path(
                         code,
                         message,
                         chain: entries,
+                        path: Vec::new(),
                         advisories: Vec::new(),
                     });
                 }
@@ -459,6 +535,7 @@ pub fn validate_path(
         code: CheckCode::CertPathUntrusted,
         message: "no acceptable path to a configured trust anchor was found".to_owned(),
         chain: leaf_only,
+        path: Vec::new(),
         advisories: Vec::new(),
     })
 }
@@ -627,7 +704,11 @@ fn check_path(
             .is_some_and(|usage| usage.non_repudiation());
         if !permitted {
             if purpose == PathPurpose::Signing && non_repudiation {
-                advisories.push(Check::unknown(
+                // Informational: ETSI EN 319 412-2 makes `nonRepudiation`
+                // the signal, and a loosely filled EKU alongside it is a
+                // reporting matter, not a determination the tool failed to
+                // make.
+                advisories.push(Check::info(
                     CheckCode::CertKeyUsageAdvisory,
                     format!(
                         "the signing certificate asserts nonRepudiation but its extendedKeyUsage names only: {}",
@@ -738,23 +819,54 @@ fn check_path(
     Ok(advisories)
 }
 
+/// Map an X.509 `AlgorithmIdentifier` OID onto the pinned allowlist.
+///
+/// SHA-1 is deliberately absent: `--allow-legacy-algorithms` admits SHA-1 for
+/// XMLDSig diagnosis, never for a certificate, CRL, or OCSP signature.
+pub fn signature_scheme_of(oid: ObjectIdentifier) -> Option<SignatureScheme> {
+    match oid {
+        OID_SHA256_RSA => Some(SignatureScheme::RsaPkcs1(PolicyDigest::Sha256)),
+        OID_SHA384_RSA => Some(SignatureScheme::RsaPkcs1(PolicyDigest::Sha384)),
+        OID_SHA512_RSA => Some(SignatureScheme::RsaPkcs1(PolicyDigest::Sha512)),
+        OID_ECDSA_SHA256 => Some(SignatureScheme::Ecdsa(PolicyDigest::Sha256)),
+        OID_ECDSA_SHA384 => Some(SignatureScheme::Ecdsa(PolicyDigest::Sha384)),
+        _ => None,
+    }
+}
+
+/// Verify a DER-encoded structure's signature with a certificate's key, under
+/// the pinned allowlist.
+///
+/// This is what a CRL, an OCSP response, and a trusted list all need: the same
+/// rules as a certificate signature, over a different `tbs` blob.
+pub fn verify_der_signature(
+    certificate: &Certificate,
+    algorithm: ObjectIdentifier,
+    message: &[u8],
+    signature: &[u8],
+) -> Result<(), VerifyError> {
+    let scheme = signature_scheme_of(algorithm).ok_or(VerifyError::UnsupportedKey)?;
+    verify_with_spki(certificate, scheme, message, signature, true)
+}
+
+/// Whether `issuer` actually signed `subject`, under the allowlist.
+///
+/// Used where a name match alone would let anyone mint an authorised-looking
+/// CRL signer or OCSP responder.
+pub fn verify_issued_by(subject: &ParsedCertificate, issuer: &ParsedCertificate) -> bool {
+    verify_certificate_signature(subject, issuer).is_ok()
+}
+
 fn verify_certificate_signature(
     subject: &ParsedCertificate,
     issuer: &ParsedCertificate,
 ) -> Result<(), (CheckCode, String)> {
-    let scheme = match subject.certificate.signature_algorithm.oid {
-        OID_SHA256_RSA => SignatureScheme::RsaPkcs1(PolicyDigest::Sha256),
-        OID_SHA384_RSA => SignatureScheme::RsaPkcs1(PolicyDigest::Sha384),
-        OID_SHA512_RSA => SignatureScheme::RsaPkcs1(PolicyDigest::Sha512),
-        OID_ECDSA_SHA256 => SignatureScheme::Ecdsa(PolicyDigest::Sha256),
-        OID_ECDSA_SHA384 => SignatureScheme::Ecdsa(PolicyDigest::Sha384),
-        _ => {
-            return Err((
-                CheckCode::CertAlgorithmRejected,
-                "a certificate in the path is signed with an algorithm outside the allowlist"
-                    .to_owned(),
-            ));
-        }
+    let Some(scheme) = signature_scheme_of(subject.certificate.signature_algorithm.oid) else {
+        return Err((
+            CheckCode::CertAlgorithmRejected,
+            "a certificate in the path is signed with an algorithm outside the allowlist"
+                .to_owned(),
+        ));
     };
     let message = subject.certificate.tbs_certificate.to_der().map_err(|_| {
         (
@@ -1256,7 +1368,7 @@ fn hex(bytes: &[u8]) -> String {
     text
 }
 
-fn unix_time(time: x509_cert::time::Time) -> UnixTime {
+pub(crate) fn unix_time(time: x509_cert::time::Time) -> UnixTime {
     time.to_unix_duration().as_secs() as i64
 }
 

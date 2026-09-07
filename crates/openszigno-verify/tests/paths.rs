@@ -556,12 +556,11 @@ fn an_unrelated_eku_with_nonrepudiation_is_advisory() {
                 vec![extended_key_usage_extension(&[oid], critical)],
             );
             assert_check(&report, CheckCode::CertPathOk, CheckStatus::Passed);
-            assert_check(
-                &report,
-                CheckCode::CertKeyUsageAdvisory,
-                CheckStatus::Unknown,
-            );
-            // The caveat is blocking, so it can only lower a verdict.
+            // Informational: a loosely filled EKU alongside nonRepudiation is
+            // reported, not treated as a question the tool failed to answer.
+            assert_check(&report, CheckCode::CertKeyUsageAdvisory, CheckStatus::Info);
+            // Revocation still has no data here, so the verdict stays below
+            // valid for that reason rather than for the advisory's.
             assert_eq!(report.verdict, openszigno_verify::Verdict::Indeterminate);
         }
     }
@@ -761,7 +760,7 @@ fn the_claimed_signing_time_is_read_but_not_trusted() {
             Some("2020-01-01T00:00:00Z"),
             "namespace {namespace}"
         );
-        assert_check(&report, CheckCode::SigningTimePresent, CheckStatus::Unknown);
+        assert_check(&report, CheckCode::SigningTimePresent, CheckStatus::Info);
         // The validation time is what the caller asked for, never the claim.
         assert_eq!(report.verification_time.effective, "2020-06-01T00:00:00Z");
     }
@@ -782,7 +781,7 @@ fn an_absent_signing_time_is_reported_as_absent() {
     let xml = build(&spec, &[("doc", &chain.signer_key)]);
     let report = run(&xml, vec![chain.root_der], Vec::new());
     assert!(report.signatures[0].signing_time.is_none());
-    assert_check(&report, CheckCode::SigningTimePresent, CheckStatus::Unknown);
+    assert_check(&report, CheckCode::SigningTimePresent, CheckStatus::Info);
 }
 
 // ---------------------------------------------------------------------------
