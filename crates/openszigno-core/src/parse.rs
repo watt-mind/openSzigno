@@ -52,6 +52,10 @@ pub(crate) fn parse(bytes: &[u8], options: &ParseOptions) -> Result<Dossier, Err
     }
 
     let mut documents = Vec::with_capacity(document_nodes.len());
+    // Which `es:Document` produced which parsed document, so the signature
+    // inventory can name the index a caller sees rather than a source
+    // position; documents without a profile are skipped and have no index.
+    let mut document_nodes_by_index = Vec::with_capacity(document_nodes.len());
     for (position, node) in document_nodes.into_iter().enumerate() {
         // Every Document must carry a DocumentProfile. One that does not (an
         // empty ds:Object placeholder, in practice) is reported and skipped
@@ -73,6 +77,7 @@ pub(crate) fn parse(bytes: &[u8], options: &ParseOptions) -> Result<Dossier, Err
             ));
         }
         let index = documents.len();
+        document_nodes_by_index.push((node, index));
         documents.push(parse_document(
             node,
             profile,
@@ -82,6 +87,9 @@ pub(crate) fn parse(bytes: &[u8], options: &ParseOptions) -> Result<Dossier, Err
             &mut warnings,
         )?);
     }
+
+    let (signatures, timestamps) =
+        crate::inventory::build(root, namespace, &document_nodes_by_index, &mut warnings);
 
     Ok(Dossier {
         title: required_child_text(dossier_profile, namespace, "Title")?,
@@ -98,6 +106,8 @@ pub(crate) fn parse(bytes: &[u8], options: &ParseOptions) -> Result<Dossier, Err
             .descendants()
             .filter(|node| is_element(*node, namespace, "TimeStamp"))
             .count(),
+        signatures,
+        timestamps,
         warnings,
     })
 }
