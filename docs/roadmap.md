@@ -239,6 +239,17 @@ Aggregate results of `verify` phase 1 over the maintainers' private corpus
   outside the two-root store (NetLock, KGYHSZ, and the pre-2009 Microsec
   root), which the trusted-list work in phase 3 will cover.
 
+With phase 2 (XAdES signed properties and RFC 3161 signature timestamps),
+the same corpus with the two Microsec roots as anchors and the legacy
+algorithm flag gives, in aggregate: `SigningCertificate` bound for all 62
+signatures; 59 signatures carry a signature timestamp and 56 of those verify
+fully, so the validation time comes from a trusted timestamp for 56
+signatures; 52 signer chains validate at that time; and 49 of the 62
+signatures pass every implemented check and are blocked only by
+`revocation_not_checked`, which phase 3 addresses. The remaining ones chain to
+CAs outside the two-root store, use 1024-bit RSA, or carry advisory extended
+key usages.
+
 ## Engineering items
 
 These are not format milestones; they can land in any order.
