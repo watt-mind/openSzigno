@@ -98,6 +98,11 @@ check_codes! {
     SignatureCountWithinLimits => "signature_count_within_limits",
     SignatureLimitExceeded => "signature_limit_exceeded",
 
+    // Document coverage: which modelled documents a signature actually covers.
+    DocumentsAllCovered => "documents_all_covered",
+    DocumentsUncovered => "documents_uncovered",
+    DocumentsCoverageUndetermined => "documents_coverage_undetermined",
+
     // Stage A: structure and policy.
     SigStructure => "sig_structure",
     SigStructureInvalid => "sig_structure_invalid",
