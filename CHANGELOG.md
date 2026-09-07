@@ -123,6 +123,13 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
   `docs/architecture.md`: `valid` when every signature is `valid`, `invalid`
   when any signature is — or when a container timestamp's imprint or token
   contradicts the container — and `indeterminate` otherwise.
+- The `--online` OCSP `POST` now sets `Content-Length` explicitly. `ureq` sent
+  a sized, unchunked body already — the request is passed as a slice — but a
+  request whose end the peer has to infer is the shape that behaves
+  differently on different platforms, and a responder that does not implement
+  chunked requests answers one with a `400`. The test suite now asserts at the
+  server that exactly one `Content-Length` arrives, that nothing is chunked,
+  and that the whole body is read before the answer.
 - Under `--online`, a fetched OCSP response no longer stops the CRL from being
   fetched. Obtaining a response is not the same as being answered by one, so
   coverage is re-tested with what was just fetched before the CRL is skipped.

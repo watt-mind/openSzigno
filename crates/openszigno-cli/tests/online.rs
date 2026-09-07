@@ -19,8 +19,8 @@ use std::io::{Read as _, Write as _};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use common::{
@@ -52,14 +52,38 @@ enum Reply {
     Silence,
 }
 
+/// What the server saw, so a test can assert on the request as well as on the
+/// answer. The OCSP `POST` is the only request in this suite with a body, and
+/// it is the one that behaved differently on Windows, so it is worth being
+/// able to say exactly what arrived.
+#[derive(Clone, Debug)]
+struct Seen {
+    method: String,
+    path: String,
+    /// How many `Content-Length` headers the request carried. Two would mean
+    /// the client set one that the transport also set, which is malformed.
+    content_length_headers: usize,
+    /// The value of that header.
+    declared_length: Option<usize>,
+    /// How many body bytes actually arrived.
+    body_length: usize,
+    /// Whether the request announced a chunked body.
+    chunked: bool,
+}
+
 struct Server {
     address: SocketAddr,
     stop: Arc<AtomicBool>,
+    seen: Arc<Mutex<Vec<Seen>>>,
 }
 
 impl Server {
     fn url(&self, path: &str) -> String {
         format!("http://{}{path}", self.address)
+    }
+
+    fn seen(&self) -> Vec<Seen> {
+        self.seen.lock().expect("the log is not poisoned").clone()
     }
 }
 
@@ -71,72 +95,174 @@ impl Drop for Server {
     }
 }
 
-fn handle(stream: &mut TcpStream, routes: &[(&'static str, Reply)]) {
+/// Serve one connection.
+///
+/// The sequencing here is not incidental. A server that answers before it has
+/// read the whole request body leaves unread bytes in the receive buffer, and
+/// closing a socket in that state makes Windows send an RST rather than a FIN
+/// — which the client sees as a connection reset partway through reading the
+/// response, not as an HTTP answer. On Linux and macOS the same code appears
+/// to work, so the bug only shows up on one target and only for the request
+/// that has a body: the OCSP `POST`.
+///
+/// So: read the headers, read exactly `Content-Length` bytes of body, answer
+/// with an explicit length and `Connection: close`, flush, drain whatever else
+/// arrived, and only then shut the write side down.
+fn handle(stream: &mut TcpStream, routes: &[(&'static str, Reply)], seen: &Mutex<Vec<Seen>>) {
     stream
         .set_read_timeout(Some(Duration::from_secs(5)))
         .expect("the read timeout is set");
-    let mut request = Vec::new();
+    stream
+        .set_write_timeout(Some(Duration::from_secs(30)))
+        .expect("the write timeout is set");
+
+    // --- the request head ---------------------------------------------------
+    let mut request: Vec<u8> = Vec::new();
     let mut buffer = [0_u8; 1024];
-    // Read just the request head; the OCSP body is not inspected, because what
-    // this suite is testing is the transport, not the responder.
-    while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+    let head_end = loop {
+        if let Some(index) = request.windows(4).position(|window| window == b"\r\n\r\n") {
+            break index + 4;
+        }
         match stream.read(&mut buffer) {
             Ok(0) | Err(_) => return,
             Ok(read) => request.extend_from_slice(&buffer[..read]),
         }
-    }
-    let head = String::from_utf8_lossy(&request).to_string();
-    let path = head
-        .split_whitespace()
-        .nth(1)
-        .unwrap_or_default()
-        .to_owned();
-    let Some((_, reply)) = routes.iter().find(|(route, _)| *route == path) else {
-        let _ = stream.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n");
-        return;
     };
-    match reply {
-        Reply::Body(body) => {
-            let _ = stream.write_all(
-                format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                    body.len()
-                )
-                .as_bytes(),
-            );
-            let _ = stream.write_all(body);
+    let head = String::from_utf8_lossy(&request[..head_end]).to_string();
+    let mut start = head.split_whitespace();
+    let method = start.next().unwrap_or_default().to_owned();
+    let path = start.next().unwrap_or_default().to_owned();
+
+    // A client that asks permission before sending a body gets it. ureq does
+    // not use `Expect: 100-continue` today, but a server that ignored one
+    // would deadlock rather than fail, which is a worse way to find out.
+    if header(&head, "expect").is_some_and(|value| value.eq_ignore_ascii_case("100-continue")) {
+        let _ = stream.write_all(b"HTTP/1.1 100 Continue\r\n\r\n");
+        let _ = stream.flush();
+    }
+
+    // --- the request body, in full ------------------------------------------
+    let declared = header(&head, "content-length")
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .unwrap_or(0);
+    let mut body = request[head_end..].to_vec();
+    while body.len() < declared {
+        match stream.read(&mut buffer) {
+            Ok(0) | Err(_) => break,
+            Ok(read) => body.extend_from_slice(&buffer[..read]),
+        }
+    }
+    seen.lock().expect("the log is not poisoned").push(Seen {
+        method,
+        path: path.clone(),
+        content_length_headers: header_count(&head, "content-length"),
+        declared_length: header(&head, "content-length")
+            .and_then(|value| value.trim().parse::<usize>().ok()),
+        body_length: body.len(),
+        chunked: header(&head, "transfer-encoding")
+            .is_some_and(|value| value.to_ascii_lowercase().contains("chunked")),
+    });
+
+    // --- the response --------------------------------------------------------
+    let reply = routes
+        .iter()
+        .find(|(route, _)| *route == path)
+        .map(|(_, reply)| reply.clone())
+        .unwrap_or(Reply::Status(404));
+    match &reply {
+        Reply::Body(payload) => {
+            let ok = respond(
+                stream,
+                200,
+                &[("content-type", "application/octet-stream")],
+                payload.len(),
+            ) && stream.write_all(payload).is_ok();
+            let _ = ok;
         }
         Reply::Bulk(size) => {
-            let _ = stream.write_all(
-                format!("HTTP/1.1 200 OK\r\nContent-Length: {size}\r\nConnection: close\r\n\r\n")
-                    .as_bytes(),
-            );
-            let chunk = vec![0_u8; 64 * 1024];
-            let mut written = 0;
-            while written < *size {
-                let take = chunk.len().min(size - written);
-                if stream.write_all(&chunk[..take]).is_err() {
-                    return;
+            if respond(stream, 200, &[], *size) {
+                let chunk = vec![0_u8; 64 * 1024];
+                let mut written = 0;
+                while written < *size {
+                    let take = chunk.len().min(size - written);
+                    // The client stops reading at its size cap, so a failed
+                    // write here is the expected end of this exchange.
+                    if stream.write_all(&chunk[..take]).is_err() {
+                        break;
+                    }
+                    written += take;
                 }
-                written += take;
             }
         }
         Reply::Redirect(target) => {
-            let _ = stream.write_all(
-                format!(
-                    "HTTP/1.1 302 Found\r\nLocation: {target}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-                )
-                .as_bytes(),
-            );
+            let _ = respond(stream, 302, &[("location", target.as_str())], 0);
         }
         Reply::Status(status) => {
-            let _ = stream.write_all(
-                format!("HTTP/1.1 {status} Nope\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
-                    .as_bytes(),
-            );
+            let _ = respond(stream, *status, &[], 0);
         }
-        Reply::Silence => std::thread::sleep(Duration::from_secs(40)),
+        Reply::Silence => {
+            // The request has been read in full, so the client is not blocked
+            // writing; it is waiting for an answer that never comes, which is
+            // what the timeout test needs.
+            std::thread::sleep(Duration::from_secs(40));
+            return;
+        }
     }
+    let _ = stream.flush();
+
+    // Anything still in flight is read off before the socket is closed, so the
+    // close is a FIN rather than an RST.
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(200)));
+    let mut drained = 0_usize;
+    while drained < 64 * 1024 {
+        match stream.read(&mut buffer) {
+            Ok(0) | Err(_) => break,
+            Ok(read) => drained += read,
+        }
+    }
+    let _ = stream.shutdown(std::net::Shutdown::Write);
+}
+
+/// Write a status line and headers, always with an explicit `Content-Length`
+/// and `Connection: close` so the client never has to guess where the response
+/// ends or whether the connection may be reused.
+fn respond(stream: &mut TcpStream, status: u16, headers: &[(&str, &str)], length: usize) -> bool {
+    let mut head = format!("HTTP/1.1 {status} {}\r\n", reason(status));
+    for (name, value) in headers {
+        head.push_str(&format!("{name}: {value}\r\n"));
+    }
+    head.push_str(&format!(
+        "Content-Length: {length}\r\nConnection: close\r\n\r\n"
+    ));
+    stream.write_all(head.as_bytes()).is_ok()
+}
+
+const fn reason(status: u16) -> &'static str {
+    match status {
+        200 => "OK",
+        302 => "Found",
+        404 => "Not Found",
+        503 => "Service Unavailable",
+        _ => "Nope",
+    }
+}
+
+/// How many times a header appears in a request head.
+fn header_count(head: &str, name: &str) -> usize {
+    head.lines()
+        .skip(1)
+        .filter_map(|line| line.split_once(':'))
+        .filter(|(key, _)| key.trim().eq_ignore_ascii_case(name))
+        .count()
+}
+
+/// One header value out of a request head, matched case-insensitively.
+fn header<'a>(head: &'a str, name: &str) -> Option<&'a str> {
+    head.lines()
+        .skip(1)
+        .filter_map(|line| line.split_once(':'))
+        .find(|(key, _)| key.trim().eq_ignore_ascii_case(name))
+        .map(|(_, value)| value.trim())
 }
 
 // ---------------------------------------------------------------------------
@@ -437,6 +563,51 @@ fn nothing_is_fetched_for_a_certificate_the_offline_store_already_covers() {
     );
 }
 
+/// The shape of the OCSP request itself, asserted at the server.
+///
+/// This is the regression guard for a Windows-only CI failure. The request
+/// carries a body, and a body whose end the peer has to infer — a chunked
+/// request, or one the server answers before reading — is exactly the shape
+/// that behaves differently on different platforms: closing a socket with
+/// unread received data makes Windows send an RST, which the client sees as a
+/// transport error rather than as an HTTP answer. So the request must arrive
+/// whole, with one `Content-Length` and no chunking, and the server must read
+/// all of it before replying.
+#[test]
+fn the_ocsp_request_arrives_whole_with_a_declared_length() {
+    let (_pki, dossier_path, store, fixture) = with_urls(None, Some("/ocsp"), |pki| {
+        vec![("/ocsp", Reply::Body(good_ocsp(pki)))]
+    });
+
+    let report = verify_online(&dossier_path, &store, &[]);
+    assert_eq!(end_entity_source(&report).as_deref(), Some("online_ocsp"));
+
+    let seen = fixture.server.seen();
+    let request = seen
+        .iter()
+        .find(|request| request.path == "/ocsp")
+        .expect("the responder was asked");
+    assert_eq!(request.method, "POST");
+    assert!(!request.chunked, "the request must not be chunked");
+    assert_eq!(
+        request.content_length_headers, 1,
+        "exactly one Content-Length: {request:?}"
+    );
+    assert_eq!(
+        request.declared_length,
+        Some(request.body_length),
+        "the whole body arrived and was read before the answer: {request:?}"
+    );
+    assert!(request.body_length > 0, "{request:?}");
+    // A CRL fetch carries no body at all, and must not claim one.
+    assert!(
+        seen.iter()
+            .filter(|request| request.method == "GET")
+            .all(|request| request.body_length == 0),
+        "{seen:?}"
+    );
+}
+
 /// The case the corpus hit, end to end: the responder answers, its answer
 /// cannot be authorised, and the CRL two tiers down has to be fetched anyway.
 ///
@@ -493,7 +664,8 @@ fn a_body_over_the_size_cap_is_refused() {
 fn a_redirect_to_another_host_is_refused() {
     // The redirect target is a different port on the same address, which the
     // policy counts as another host: the certificate named one endpoint.
-    let other = serve_on(free_address(), vec![("/ca.crl", Reply::Status(500))]);
+    let (listener, address) = reserved();
+    let other = serve_on(listener, address, vec![("/ca.crl", Reply::Status(500))]);
     let elsewhere = other.url("/ca.crl");
     let (_pki, dossier_path, store, _fixture) = with_urls(Some("/ca.crl"), None, move |_| {
         vec![("/ca.crl", Reply::Redirect(elsewhere.clone()))]
@@ -703,7 +875,7 @@ fn the_online_flags_require_online() {
 /// long as the test needs it.
 struct Fixture {
     _directory: tempfile::TempDir,
-    _server: Server,
+    server: Server,
 }
 
 /// Build a PKI whose signer names `crl_path` and `ocsp_path` on a freshly
@@ -718,11 +890,11 @@ fn with_urls(
     ocsp_path: Option<&'static str>,
     routes: impl FnOnce(&Pki) -> Vec<(&'static str, Reply)>,
 ) -> (Pki, PathBuf, PathBuf, Fixture) {
-    let address = free_address();
+    let (listener, address) = reserved();
     let url = |path: &str| format!("http://{address}{path}");
     let pki = pki(crl_path.map(&url).as_deref(), ocsp_path.map(url).as_deref());
     let routes = routes(&pki);
-    let server = serve_on(address, routes);
+    let server = serve_on(listener, address, routes);
 
     let directory = scratch();
     let (dossier_path, store) = write_all(directory.path(), &dossier(&pki), &pki.root_der);
@@ -732,33 +904,51 @@ fn with_urls(
         store,
         Fixture {
             _directory: directory,
-            _server: server,
+            server,
         },
     )
 }
 
-/// A loopback address nothing is listening on yet.
-fn free_address() -> SocketAddr {
+/// A bound listener and the address it holds.
+///
+/// The listener is kept rather than closed and rebound: a certificate has to
+/// name the port before the routes exist, and dropping the socket in between
+/// would leave a window in which something else could take it — a flake that
+/// would only ever appear on a busy CI machine.
+fn reserved() -> (TcpListener, SocketAddr) {
     let listener = TcpListener::bind("127.0.0.1:0").expect("a loopback port is available");
     let address = listener.local_addr().expect("the port is known");
-    drop(listener);
-    address
+    (listener, address)
 }
 
-/// Bind the address, now that a certificate names it.
-fn serve_on(address: SocketAddr, routes: Vec<(&'static str, Reply)>) -> Server {
-    let listener = TcpListener::bind(address).expect("the loopback port is still free");
+/// Start serving on a listener that is already bound.
+fn serve_on(
+    listener: TcpListener,
+    address: SocketAddr,
+    routes: Vec<(&'static str, Reply)>,
+) -> Server {
     let stop = Arc::new(AtomicBool::new(false));
+    let seen: Arc<Mutex<Vec<Seen>>> = Arc::new(Mutex::new(Vec::new()));
     let flag = Arc::clone(&stop);
+    let log = Arc::clone(&seen);
     std::thread::spawn(move || {
+        // The accept loop lives as long as the `Server`, which every test
+        // holds for its whole body: a listener closed while the client is
+        // still talking is the other way to turn a fetch into a transport
+        // error rather than into an HTTP answer.
         for stream in listener.incoming() {
             if flag.load(Ordering::SeqCst) {
                 break;
             }
             let Ok(mut stream) = stream else { continue };
             let routes = routes.clone();
-            std::thread::spawn(move || handle(&mut stream, &routes));
+            let log = Arc::clone(&log);
+            std::thread::spawn(move || handle(&mut stream, &routes, &log));
         }
     });
-    Server { address, stop }
+    Server {
+        address,
+        stop,
+        seen,
+    }
 }

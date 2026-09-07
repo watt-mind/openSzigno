@@ -267,11 +267,20 @@ impl Fetcher {
         let mut current = url.to_owned();
         for _ in 0..=MAX_REDIRECTS {
             let response = match body {
+                // The body is passed as a slice, which `ureq` sends with a
+                // known length: an explicit `Content-Length` and no chunked
+                // transfer encoding. That matters beyond tidiness — a
+                // responder that does not implement chunked requests answers a
+                // chunked `POST` with a `400`, and a request whose end the
+                // peer has to infer is the shape that behaves differently on
+                // different platforms. RFC 6960 Appendix A.1 describes exactly
+                // this: a `POST` of the DER request with its content type.
                 Some(bytes) => self
                     .agent
                     .post(&current)
                     .header("content-type", "application/ocsp-request")
                     .header("accept", "application/ocsp-response")
+                    .header("content-length", bytes.len().to_string())
                     .send(bytes),
                 None => self.agent.get(&current).call(),
             };
