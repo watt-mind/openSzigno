@@ -10,6 +10,10 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.2.0] - 2026-09-07
+
 ### Added (M2 phase 1: `verify` for XMLDSig signatures)
 
 - New crate `openszigno-verify`: canonicalization, the XMLDSig core, the pinned
@@ -162,9 +166,10 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
   produces, the required secrets, and how to rehearse a release with a
   prerelease tag.
 - crates.io metadata (`readme`, `homepage`, `documentation`, `keywords`,
-  `categories`) on both crates, and `publish-crates.yml`, which publishes
-  `openszigno-core` and `openszigno-cli` when a release is published and
-  skips itself with a notice when `CARGO_REGISTRY_TOKEN` is absent.
+  `categories`) on all three crates, and `publish-crates.yml`, which
+  publishes `openszigno-core`, `openszigno-verify`, and `openszigno-cli` in
+  that order and skips itself with a notice when `CARGO_REGISTRY_TOKEN` is
+  absent.
 
 ### Changed
 
@@ -175,6 +180,18 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
   directory of the same name. A pull request runs only the planning job,
   and a custom job smoke-tests the built musl binary on a synthetic
   fixture before anything is uploaded.
+- The crates.io and container publishes now run inside the dist release
+  workflow as custom publish jobs (`./publish-crates` and `./container`),
+  called as reusable workflows, with `workflow_dispatch` kept for a manual
+  rerun after a failed publish.
+
+### Fixed
+
+- The crates.io and container publishes never ran for 0.1.0. GitHub reads a
+  `release`-event workflow from the tagged commit, which predated both
+  workflows, and dist undrafts the release with `GITHUB_TOKEN`, whose events
+  do not trigger any other workflow. Both publishes moved into the release
+  workflow itself.
 
 ## [0.1.0] - 2026-09-07
 
@@ -365,4 +382,5 @@ This release performs no cryptographic verification of any kind.
   material is counted for reporting only.
 
 [0.1.0]: https://github.com/watt-mind/openSzigno/releases/tag/v0.1.0
-[Unreleased]: https://github.com/watt-mind/openSzigno/compare/v0.1.0...develop
+[0.2.0]: https://github.com/watt-mind/openSzigno/compare/v0.1.0...v0.2.0
+[Unreleased]: https://github.com/watt-mind/openSzigno/compare/v0.2.0...develop

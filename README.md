@@ -17,6 +17,116 @@ validating, and extracting Hungarian Microsec e-Szignó e-dossiers (`.es3`).
 > parsing or extracting a dossier is never evidence that it is authentic,
 > signed, or legally valid.
 
+## Installation
+
+Every channel below ships the same binary, `openszigno`. Prebuilt archives
+are built for five targets and carry a SHA-256 checksum file; the container
+image is built for `linux/amd64` and `linux/arm64`. Homebrew, crates.io, and
+the container image are available from 0.2.0 onward; 0.1.0 shipped only as
+GitHub release archives and installer scripts.
+
+| Channel | Best for |
+| --- | --- |
+| Homebrew | macOS and Linuxbrew users |
+| Shell installer | Linux and macOS, no Rust toolchain |
+| PowerShell installer | Windows, no Rust toolchain |
+| `cargo binstall` | Rust users who want the prebuilt binary |
+| `cargo install` | Rust users who want to build from source |
+| Container image | CI and sandboxed pipelines |
+| GitHub Releases | Anything else, including air-gapped copies |
+
+### Homebrew (macOS and Linuxbrew)
+
+```sh
+brew install watt-mind/tap/openszigno
+```
+
+### Shell installer (macOS and Linux)
+
+```sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/watt-mind/openSzigno/releases/download/v0.2.0/openszigno-cli-installer.sh | sh
+```
+
+### PowerShell installer (Windows)
+
+```powershell
+powershell -ExecutionPolicy Bypass -c "irm https://github.com/watt-mind/openSzigno/releases/download/v0.2.0/openszigno-cli-installer.ps1 | iex"
+```
+
+Both installers place the binary in the Cargo home directory
+(`~/.cargo/bin` by default) and print what they changed.
+
+### cargo binstall
+
+Downloads the prebuilt archive for your platform instead of compiling it.
+
+```sh
+cargo binstall openszigno-cli
+```
+
+### cargo install
+
+Compiles from source and needs Rust 1.88 or newer.
+
+```sh
+cargo install openszigno-cli --locked
+```
+
+### Docker
+
+The image is `FROM scratch`: it holds the statically linked binary and
+nothing else, and it runs as the numeric user `65532`. Mount the directory
+holding the dossier and refer to the file by its path inside the container.
+
+```sh
+docker run --rm -v "$PWD:/work" ghcr.io/watt-mind/openszigno:0.2.0 inspect /work/file.es3 --json
+```
+
+Tags are the release tag (`v0.2.0`), the bare version (`0.2.0`), and
+`latest` for the newest final release.
+
+### Manual download
+
+Every release attaches an archive per target plus `sha256.sum` and a
+`.sha256` file next to each archive, on the
+[GitHub Releases](https://github.com/watt-mind/openSzigno/releases) page.
+Archives are named `openszigno-cli-<target>.tar.gz`, or `.zip` on Windows,
+and unpack to a directory of the same name containing the binary, the
+`README.md`, the `CHANGELOG.md`, and the `LICENSE`.
+
+```sh
+curl -LO https://github.com/watt-mind/openSzigno/releases/download/v0.2.0/openszigno-cli-x86_64-unknown-linux-musl.tar.gz
+curl -LO https://github.com/watt-mind/openSzigno/releases/download/v0.2.0/openszigno-cli-x86_64-unknown-linux-musl.tar.gz.sha256
+tar -xzf openszigno-cli-x86_64-unknown-linux-musl.tar.gz
+```
+
+### Verify the download
+
+Check the archive against the `.sha256` file that sits beside it, or against
+the combined `sha256.sum`, before unpacking it.
+
+```sh
+sha256sum --check openszigno-cli-x86_64-unknown-linux-musl.tar.gz.sha256
+```
+
+### From source
+
+```sh
+git clone https://github.com/watt-mind/openSzigno.git
+cd openSzigno
+cargo build --release --locked
+./target/release/openszigno --help
+```
+
+To install that build into `~/.cargo/bin`:
+
+```sh
+cargo install --path crates/openszigno-cli --locked
+```
+
+How releases are produced is described in
+[docs/releasing.md](docs/releasing.md).
+
 ## Why and for whom
 
 openSzigno exists because `.es3` dossiers are XML containers that arrive from
@@ -36,99 +146,6 @@ trusting the input.
   and compression ratio, and aggregate extraction size. Extraction never
   overwrites an existing file and never follows a symlink out of the output
   directory.
-
-## Install
-
-Every channel below ships the same binary, `openszigno`. Prebuilt archives
-are built for five targets and carry a SHA-256 checksum file; the container
-image is built for `linux/amd64` and `linux/arm64`.
-
-| Channel | Best for | Command |
-| --- | --- | --- |
-| Shell installer | Linux and macOS, no Rust toolchain | `curl ... \| sh`, below |
-| PowerShell installer | Windows, no Rust toolchain | `irm ... \| iex`, below |
-| Homebrew | macOS and Linuxbrew users | `brew install watt-mind/tap/openszigno` |
-| `cargo binstall` | Rust users who want the prebuilt binary | `cargo binstall openszigno-cli` |
-| `cargo install` | Rust users who want to build from source | `cargo install openszigno-cli --locked` |
-| Container image | CI and sandboxed pipelines | `docker run ghcr.io/watt-mind/openszigno:0.1.0` |
-| GitHub Releases | Anything else, including air-gapped copies | Download and verify the archive |
-
-### Shell installer (Linux and macOS)
-
-```sh
-curl --proto '=https' --tlsv1.2 -LsSf \
-  https://github.com/watt-mind/openSzigno/releases/download/v0.1.0/openszigno-cli-installer.sh | sh
-```
-
-### PowerShell installer (Windows)
-
-```powershell
-powershell -ExecutionPolicy Bypass -c "irm https://github.com/watt-mind/openSzigno/releases/download/v0.1.0/openszigno-cli-installer.ps1 | iex"
-```
-
-Both installers place the binary in the Cargo home directory
-(`~/.cargo/bin` by default) and print what they changed.
-
-### Homebrew
-
-```sh
-brew install watt-mind/tap/openszigno
-```
-
-### With Cargo
-
-`cargo binstall` downloads the prebuilt archive for your platform;
-`cargo install` compiles from source and needs Rust 1.88 or newer.
-
-```sh
-cargo binstall openszigno-cli
-cargo install openszigno-cli --locked
-```
-
-### Container image
-
-The image is `FROM scratch`: it holds the statically linked binary and
-nothing else, and it runs as the numeric user `65532`. Mount the directory
-holding the dossier and refer to the file by its path inside the container.
-
-```sh
-docker run --rm -v "$PWD:/work" ghcr.io/watt-mind/openszigno:0.1.0 \
-  inspect /work/file.es3 --json
-```
-
-Tags are the release tag (`v0.1.0`), the bare version (`0.1.0`), and
-`latest` for the newest final release.
-
-### From source
-
-```sh
-git clone https://github.com/watt-mind/openSzigno.git
-cd openSzigno
-cargo build --release --locked
-./target/release/openszigno --help
-```
-
-To install that build into `~/.cargo/bin`:
-
-```sh
-cargo install --path crates/openszigno-cli --locked
-```
-
-### Prebuilt archives
-
-Every release attaches an archive per target plus `sha256.sum` and a
-`.sha256` file next to each archive, on the
-[GitHub Releases](https://github.com/watt-mind/openSzigno/releases) page.
-Archives are named `openszigno-cli-<target>.tar.gz`, or `.zip` on Windows,
-and unpack to a directory of the same name containing the binary, the
-`README.md`, the `CHANGELOG.md`, and the `LICENSE`.
-
-```sh
-sha256sum --check openszigno-cli-x86_64-unknown-linux-musl.tar.gz.sha256
-```
-
-How releases are produced is described in
-[docs/releasing.md](docs/releasing.md).
 
 ## Quick start
 
