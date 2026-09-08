@@ -398,8 +398,9 @@ landed:
   `document_skipped_no_matching_recipient`,
   `document_skipped_unsupported_cipher`, and
   `document_skipped_legacy_cipher`, each naming the algorithm OID where there
-  is one. `decrypt_failed` carries the fixed message `decryption failed` so
-  that the tool cannot be used as a padding oracle.
+  is one. `decrypt_failed` carries the fixed message `decryption failed`, and
+  the RSA key transport rejects implicitly rather than reporting a padding
+  failure at all, so that the tool cannot be used as a padding oracle.
 
 Residuals deliberately left out of M4:
 
@@ -430,21 +431,24 @@ Residuals deliberately left out of M4:
   skipped. Nothing in the specification or the reference CLI suggests it is
   produced; the reference CLI's cipher list is OpenSSL `enc` names, which are
   CBC-era.
-- **Timing.** The RSA private-key operation runs through `rsa` 0.9, whose
-  Marvin/Bleichenbacher exposure is RUSTSEC-2023-0071. That advisory is
-  accepted in `deny.toml` on the grounds that the tool never held a private
-  key; M4 makes it hold one for the length of one `extract` run. The exposure
-  is a chosen-ciphertext one against PKCS#1 v1.5 key transport, not a
-  bystander timing one: it needs an attacker who submits many crafted dossiers
-  to the same key and can tell success from failure across those attempts,
-  which is a remote exposure for a *service* wrapped around
-  `extract --decrypt-key`, not for one operator decrypting their own dossier.
-  Decryption is blinded, which closes the timing signal from the modular
-  exponentiation only; the success/failure boolean the attack is built on
-  stays. See
-  [SECURITY.md](../SECURITY.md#rsa-key-transport-decryption-chosen-ciphertext-and-timing-limits)
-  for the full statement. The note in `deny.toml` was updated and the ignore
-  should be revisited when `rsa` 0.10 is stable.
+- **Exponentiation timing.** The Bleichenbacher/Marvin oracle
+  (RUSTSEC-2023-0071) itself is closed: PKCS#1 v1.5 key transport is rejected
+  implicitly, with a constant-time unpad and a synthetic content-encryption
+  key on failure, so neither control flow, nor the error surface, nor the
+  coarse timing of a run distinguishes a conforming block from a
+  non-conforming one. See
+  [SECURITY.md](../SECURITY.md#rsa-key-transport-decryption-implicit-rejection)
+  and
+  [architecture.md](architecture.md#rsa-key-transport-implicit-rejection).
+  What remains is finer grained: `rsa` 0.9's modular exponentiation is not
+  constant-time, and its big-integer to byte-string conversion has a length
+  that follows the plaintext's leading zero bytes. Blinding masks the first.
+  **Adopting `rsa` 0.10 when it is stable retires this residual**, since its
+  crypto-bigint backend is constant-time throughout; today it is a release
+  candidate whose `pkcs1`, `signature`, `spki`, and `pkcs8` requirements
+  conflict with the `der 0.7`/`x509-cert 0.2`/`cms 0.2` versions this
+  workspace is on. The `deny.toml` ignore covers only that residual and
+  should be dropped with the upgrade.
 
 ## Field observations from the private corpus
 

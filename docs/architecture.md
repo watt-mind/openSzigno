@@ -2872,48 +2872,62 @@ several people, and `extract` should give a caller the ones they can read.
 | No `RecipientInfo` names the certificate | `document_skipped_no_matching_recipient` warning, exit 0. |
 | Unsupported key transport or content cipher | `document_skipped_unsupported_cipher` warning naming the OID, exit 0. |
 | DES-EDE3-CBC without the flag | `document_skipped_legacy_cipher` warning naming the OID, exit 0. |
-| Key unwrap or padding failed | `decrypt_failed` error, exit 5. |
+| Content decryption failed, including a key transport that did not unwrap | `decrypt_failed` error, exit 5. |
 | Not well-formed CMS | `invalid_cms` error, exit 5. |
 | Key, certificate, or passphrase unusable | `invalid_decryption_key`, `invalid_decryption_certificate`, `decryption_certificate_required`, or `decryption_key_mismatch`, exit 4, before the dossier is decoded. |
 
 `decrypt_failed` carries the fixed message `decryption failed` and nothing
 else. Distinguishing a failed RSA unwrap from a bad content-key length from a
 bad PKCS#7 padding is exactly the distinction a padding oracle is built out of,
-so the tool does not make it — not even in the human output.
+so the tool does not make it, not even in the human output. The RSA half does
+not raise it at all; see
+[RSA key transport: implicit rejection](#rsa-key-transport-implicit-rejection).
 
-### RSA key transport: chosen-ciphertext exposure
+### RSA key transport: implicit rejection
 
-The RSA ciphertext `unwrap_key` (`openszigno-core::decrypt::cms`) decrypts —
-the `RecipientInfo`'s encrypted content-encryption key — comes from the
-dossier being processed, not from the operator. For PKCS#1 v1.5 key
-transport that matters: whether decryption is fast or slow, and whether it
-succeeds or fails, both depend on the ciphertext, which is exactly the setup
-a Bleichenbacher/Marvin-style chosen-ciphertext attack (RUSTSEC-2023-0071)
-needs. An attacker able to submit many crafted dossiers to the same
-`--decrypt-key` and observe timing or success/failure across calls can, in
-principle, recover the content-encryption key without ever holding the RSA
-private key.
+The RSA ciphertext `openszigno-core::decrypt` decrypts, the
+`RecipientInfo`'s encrypted content-encryption key, comes from the dossier
+being processed, not from the operator. For PKCS#1 v1.5 key transport that
+matters: if whether the padding checked out is observable, an attacker able
+to submit many crafted dossiers to the same `--decrypt-key` recovers the
+content-encryption key without ever holding the RSA private key. That is the
+Bleichenbacher/Marvin attack, RUSTSEC-2023-0071.
 
-`unwrap_key` calls `RsaPrivateKey::decrypt_blinded` (blinded with an
-`OsRng`-seeded factor) rather than plain `decrypt`. That removes the timing
-signal the private-key modular exponentiation itself would otherwise leak. It
-does **not** remove the success/failure signal, because that comes from the
-PKCS#1 v1.5 unpadding step, not the exponentiation, and `rsa` 0.9 — the
-version this workspace is pinned to — has no constant-time or oracle-free
-decrypt for this padding scheme. See the `RUSTSEC-2023-0071` entry in
-`deny.toml` for the full write-up, including why `rsa` 0.10 (which fixes
-this) is not yet adoptable without pulling pre-release dependency versions
-into `Cargo.lock`.
+openSzigno therefore rejects **implicitly**, in `decrypt/keytrans.rs`, the way
+OpenSSL 3.2+ (`RSA_PKCS1_IMPLICIT_REJECTION`) and Go's `crypto/rsa` do and RFC
+5246 section 7.4.7.1 prescribes:
 
-**Practically**, this is a low-severity residual for openSzigno used the way
-it is documented to be used: run once per dossier from a terminal or a
-pipeline stage, exiting after that one attempt. A single local run gives an
-attacker at most one observation, nowhere near enough to mount the attack.
-The risk model changes if openSzigno is wrapped by a service that decrypts
-many attacker-submitted dossiers against one long-lived key and exposes, even
-indirectly, whether each decryption succeeded — see
-[SECURITY.md](../SECURITY.md#rsa-key-transport-decryption-chosen-ciphertext-and-timing-limits)
-for what such a service should do about it.
+| Step | What happens |
+| --- | --- |
+| Private operation | Runs once, blinded with an `OsRng`-seeded factor, through `rsa::hazmat::rsa_decrypt_and_check`, which returns the raw plaintext block instead of unpadding it. |
+| Unpadding | Done here, in constant time: the leading `0x00 0x02`, a padding run of at least eight non-zero bytes, the `0x00` separator, and a payload of exactly the announced content cipher's key length all fold into one flag, with no early return and no branch on a plaintext byte. |
+| Failure | The block is replaced by a synthetic key of the same length, derived with HMAC-SHA-256 from a per-key secret over the ciphertext and chosen in constant time. |
+| After | Content decryption runs unconditionally. A substituted key fails at the content cipher's PKCS#7 padding, as `decrypt_failed`, exactly as a tampered content ciphertext does. |
+
+The content cipher is resolved before the unwrap, because its key length is
+what the unpadding checks against; a wrapped key of any other length is
+rejected through the same path rather than by a separate length check. The
+synthetic key is deterministic per `(private key, ciphertext)` and
+unpredictable to whoever supplied the ciphertext, so replaying a dossier gives
+an attacker no new information and no substitution can be precomputed.
+RSAES-OAEP takes the same shape: it is not the padding this attack is about,
+but an OAEP failure is likewise answered with the synthetic key rather than a
+distinguishable error.
+
+**What is left** is a timing residual rather than an oracle: `rsa` 0.9's
+modular exponentiation is not constant-time, and its big-integer to
+byte-string conversion has a length that follows the plaintext's leading zero
+bytes. Blinding masks the exponentiation; `rsa` 0.10's crypto-bigint backend
+would remove the residual, and has no stable release yet. See the
+`RUSTSEC-2023-0071` entry in `deny.toml` for the full write-up, and
+[SECURITY.md](../SECURITY.md#rsa-key-transport-decryption-implicit-rejection)
+for the operator-facing statement.
+
+One visible consequence: a dossier whose wrapped key is unusable is decrypted
+under a synthetic key, so on the rare occasion that the resulting garbage
+carries valid PKCS#7 padding, `extract` writes that garbage rather than
+failing. Decryption asserts nothing about authenticity either way; see
+[Verification boundary](#verification-boundary).
 
 ## Verification boundary
 

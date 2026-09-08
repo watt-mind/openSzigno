@@ -6,48 +6,56 @@ version = 2
 yanked = "deny"
 ignore = [
   # RUSTSEC-2023-0071 (Marvin attack): PKCS#1 v1.5 decryption's timing and
-  # error behavior depend on the ciphertext, which lets a remote attacker who
-  # can submit many chosen ciphertexts and measure response time or observe
+  # error behavior depend on the ciphertext, which lets an attacker who can
+  # submit many chosen ciphertexts and measure response time or observe
   # success/failure recover the plaintext (a Bleichenbacher-style oracle). No
   # fixed release of `rsa` 0.9 exists; `rsa` 0.10 fixes it but is still a
   # release candidate (see below).
   #
   # `verify` never performs a private-key operation; only `extract --decrypt-key`
-  # does, in `openszigno-core::decrypt::cms::unwrap_key`. There the RSA
-  # ciphertext being decrypted is the CMS `RecipientInfo`'s encrypted
-  # content-encryption key, which comes from the dossier under analysis, i.e.
-  # attacker-controlled input, not from the operator. This tool is invoked
-  # once per dossier and exits, so a *local* run gives an attacker no more
-  # than one measurement, which is not enough to mount the attack. The
-  # exposure is real when something wraps this CLI as a service that decrypts
-  # many attacker-submitted dossiers with the same key and lets an attacker
-  # observe per-call timing or the decrypt-succeeded/failed outcome across
-  # calls (see `SECURITY.md` and the decryption section of
-  # `docs/architecture.md`); direct, purely local use by an operator decrypting
-  # their own dossiers is not exposed to it.
+  # does, in `openszigno-core::decrypt`. There the RSA ciphertext being
+  # decrypted is the CMS `RecipientInfo`'s encrypted content-encryption key,
+  # which comes from the dossier under analysis, i.e. attacker-controlled
+  # input, not from the operator.
   #
-  # Mitigation taken now: `unwrap_key` calls `RsaPrivateKey::decrypt_blinded`
-  # (an `OsRng`-seeded blinding factor) instead of plain `decrypt`, closing
-  # the timing channel on the modular exponentiation itself. This does *not*
-  # close the Bleichenbacher-style oracle the advisory is actually about:
-  # whether PKCS#1 v1.5 unpadding accepts or rejects the recovered plaintext
-  # is still visible to a caller (as `decrypt_failed()` vs. success), and `rsa`
-  # 0.9 exposes no constant-time, oracle-free alternative for this padding
-  # scheme (its own doc comment says as much, pointing at a
-  # `decrypt_session_key` helper that does not exist in this version). Closing
-  # that requires either `rsa` 0.10 (see below) or restructuring the caller to
-  # never let decrypt success/failure or its timing distinguish observably,
-  # which is out of scope for this change.
+  # Mitigation taken: **implicit rejection**, in `decrypt/keytrans.rs`, the
+  # same defence OpenSSL 3.2+ ships as `RSA_PKCS1_IMPLICIT_REJECTION`, Go's
+  # `crypto/rsa` applies unconditionally, and RFC 5246 section 7.4.7.1
+  # prescribes for the identical problem in TLS. The blinded private
+  # operation runs once through `rsa::hazmat::rsa_decrypt_and_check`; the
+  # resulting block is unpadded here, in constant time with `subtle`, against
+  # the key length the announced content cipher requires; and an unusable
+  # block is replaced, via `conditional_select`, by a deterministic synthetic
+  # key derived with HMAC-SHA-256 from a per-key secret over the ciphertext.
+  # Decryption then continues into the content cipher unconditionally.
+  #
+  # What that removes: the padding oracle itself. There is no early return
+  # between the RSA operation and the symmetric decryption, no error that
+  # says a key unwrap failed, and no coarse timing difference between a
+  # conforming and a non-conforming block, because both run the whole content
+  # cipher. A failed unwrap reaches the caller as the same `decrypt_failed`
+  # a tampered content ciphertext produces, and the substitute key is stable
+  # per `(private key, ciphertext)` and unpredictable to whoever submitted the
+  # ciphertext, so resubmission and precomputation reveal nothing either.
+  #
+  # What remains: the private exponentiation in `rsa` 0.9 is not
+  # constant-time, and neither is that version's big-integer to byte-string
+  # conversion, whose output length follows the plaintext's leading zero
+  # bytes. Blinding (an `OsRng`-seeded factor, kept) masks the exponentiation
+  # by randomising the value it operates on; only `rsa` 0.10's crypto-bigint
+  # backend removes it outright. This is a fine-grained timing residual, not
+  # a control-flow or error-surface oracle, and it is what the ignore below
+  # now covers.
   #
   # `rsa` 0.10 was evaluated as the real fix and is not adoptable yet: as of
-  # this writing the latest release is 0.10.0-rc.18, and its dependency graph
-  # requires `pkcs1 ^0.8.0-rc.4` and `signature ^3.0.0-rc.10` (both
-  # pre-release) plus `spki ^0.8`/`pkcs8 ^0.11`, which are incompatible with
-  # the `der 0.7`/`pkcs8 0.10`/`x509-cert 0.2`/`cms 0.2` versions this
-  # workspace is on. Adopting it now would pull pre-release crate versions
-  # into `Cargo.lock`. Revisit once `rsa` 0.10 is a stable release and
-  # `x509-cert`/`cms` have compatible releases too.
-  { id = "RUSTSEC-2023-0071", reason = "no signing; extract --decrypt-key's RSA decrypt is blinded against exponentiation timing, but the dossier-controlled ciphertext still exposes a Bleichenbacher-style oracle to anything that lets an attacker submit many dossiers and observe outcome or timing across calls -- see the comment above and SECURITY.md" },
+  # this writing the latest release is 0.10.0-rc.18 (2026-04-27) with no
+  # stable release, and its dependency graph requires `pkcs1 ^0.8.0-rc.4` and
+  # `signature ^3.0.0-rc.10` (both pre-release) plus `spki ^0.8`/`pkcs8
+  # ^0.11`, which are incompatible with the `der 0.7`/`pkcs8 0.10`/`x509-cert
+  # 0.2`/`cms 0.2` versions this workspace is on. Adopting it now would pull
+  # pre-release crate versions into `Cargo.lock`. Revisit once `rsa` 0.10 is
+  # a stable release and `x509-cert`/`cms` have compatible releases too.
+  { id = "RUSTSEC-2023-0071", reason = "no signing; extract --decrypt-key rejects PKCS#1 v1.5 implicitly (constant-time unpad, synthetic key on failure, no early return before the content cipher), which removes the control-flow, error-surface and coarse-timing oracle; what remains is rsa 0.9's non-constant-time private exponentiation, masked by blinding and fixed only by rsa 0.10 -- see the comment above and SECURITY.md" },
 ]
 
 [licenses]

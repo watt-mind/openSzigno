@@ -77,56 +77,74 @@ not change any command's verdict.
 - **Failures say nothing useful to an attacker.** A failed decryption is the
   fixed message `decryption failed`, which does not distinguish a failed RSA
   unwrap from a bad content-key length from bad padding — that distinction is
-  what a padding oracle is built out of. A wrong passphrase and a malformed key
-  are likewise the same answer.
+  what a padding oracle is built out of. The RSA half does not even raise it:
+  it rejects implicitly, so a bad wrapped key fails as the content cipher, not
+  as itself. A wrong passphrase and a malformed key are likewise the same
+  answer.
 
 openSzigno never creates, signs, timestamps, or encrypts anything, so it holds
 a private key only for the duration of one `extract` run.
 
-### RSA key-transport decryption: chosen-ciphertext and timing limits
+### RSA key-transport decryption: implicit rejection
 
 `extract --decrypt-key` unwraps the CMS `RecipientInfo`'s encrypted
 content-encryption key with the operator's RSA private key. The RSA
 *ciphertext* being decrypted there is not something the operator chose: it is
-bytes read straight out of the untrusted `.es3` dossier. That makes this a
-textbook setup for a Bleichenbacher/Marvin-style chosen-ciphertext attack
-(RUSTSEC-2023-0071) against PKCS#1 v1.5 key transport — an attacker who can
-submit many crafted dossiers to the same key and observe how long decryption
-takes, or merely whether it succeeded or failed, can in principle recover the
-plaintext content-encryption key one dossier at a time.
+bytes read straight out of the untrusted `.es3` dossier. That is the textbook
+setup for a Bleichenbacher/Marvin-style chosen-ciphertext attack
+(RUSTSEC-2023-0071) against PKCS#1 v1.5 key transport, where an attacker who
+can submit many crafted dossiers to the same key and learn, per dossier,
+whether the padding checked out recovers the plaintext one dossier at a time.
 
-Two things bound this in openSzigno itself:
+openSzigno never gives that answer. It rejects **implicitly**, the mitigation
+OpenSSL 3.2+ ships as `RSA_PKCS1_IMPLICIT_REJECTION`, Go's `crypto/rsa`
+applies unconditionally, and RFC 5246 section 7.4.7.1 prescribes for the same
+problem in TLS. In `openszigno-core`'s `decrypt/keytrans.rs`:
 
-- Decryption is **blinded** (`RsaPrivateKey::decrypt_blinded` with an
-  `OsRng`-seeded factor), which removes the timing signal that would otherwise
-  leak from the private-key modular exponentiation.
-- Every failure — a bad RSA unwrap, a bad content-key length, bad padding — is
-  reported as the same fixed `decryption failed`, so the *message* never tells
-  an attacker which step failed.
+- the blinded RSA private operation runs **once** and yields the raw plaintext
+  block, which openSzigno unpads itself rather than letting the `rsa` crate
+  report a padding error;
+- every PKCS#1 v1.5 type 2 check (the leading `0x00 0x02`, a padding run of at
+  least eight non-zero bytes, the `0x00` separator, and a payload of exactly
+  the length the announced content cipher's key needs) accumulates into a
+  single constant-time flag, with no early return and no branch on a plaintext
+  byte;
+- a block that fails any of those is replaced by a **synthetic**
+  content-encryption key of the right length, derived with HMAC-SHA-256 from a
+  per-key secret over the ciphertext and selected in constant time, so both
+  outcomes execute the same instructions;
+- decryption then continues into the content cipher unconditionally, and a
+  substituted key surfaces as the same `decryption failed` a tampered content
+  ciphertext produces.
 
-What is **not** bounded by either of those: whether decryption succeeded or
-failed at all is still an observable two-way signal (an extracted file appears
-versus `decryption failed` is returned), and that boolean is the oracle a
-Bleichenbacher-style attack is built from — blinding the exponentiation does
-not close it, because the padding check that produces the signal is not a
-timing artifact of the exponentiation. `rsa` 0.9, the version this project is
-pinned to, has no constant-time or oracle-free PKCS#1 v1.5 decrypt API; see
-`deny.toml`'s `RUSTSEC-2023-0071` entry for the full analysis, including why
-`rsa` 0.10 is not yet adoptable.
+The substitute is deterministic for one `(private key, ciphertext)` pair and
+unpredictable to whoever submitted the ciphertext, so resubmitting a dossier
+tells an attacker nothing a single submission did not, and no substitution can
+be recognised by precomputation. A test asserts that a tampered wrapped key and
+a tampered content body reach the caller as the same code and the same message,
+across every supported cipher and both key-transport algorithms.
 
-**This means a single local `extract --decrypt-key` run, by an operator
-decrypting their own dossier, is not meaningfully exposed**: the attacker
-would need to control the dossier *and* observe the outcome of many decryption
-attempts against the same key, which one interactive run does not offer.
-**The exposure becomes real once openSzigno is wrapped by a service** that
-decrypts many attacker-submitted dossiers against a long-lived key and lets an
-attacker distinguish success from failure across calls — directly, or through
-a timing difference elsewhere in that service's own request handling. Anyone
-building such a service on top of `extract --decrypt-key` should treat the
-decrypt outcome as sensitive: batch or delay it, do not return it to the
-submitter directly, and consider RSA-OAEP-only recipients if the sender side
-can be controlled, since OAEP is not the vulnerable padding here. See also
-[docs/architecture.md](docs/architecture.md#decryption).
+**What this removes**: the padding oracle carried by control flow, by the error
+surface, and by the coarse timing difference between stopping at the unpadding
+step and running the whole content cipher.
+
+**What remains**: `rsa` 0.9's modular exponentiation is not constant-time, and
+neither is its big-integer to byte-string conversion, whose length follows the
+plaintext's leading zero bytes. Decryption stays blinded with an `OsRng`-seeded
+factor, which masks the exponentiation by randomising the value it operates on;
+removing the residual outright needs `rsa` 0.10 and its constant-time
+crypto-bigint backend, which has no stable release yet. This is a fine-grained
+timing residual on a local, one-shot CLI, not an oracle a caller can read off
+the result. See `deny.toml`'s `RUSTSEC-2023-0071` entry for the full analysis
+and [docs/architecture.md](docs/architecture.md#decryption).
+
+One consequence is worth stating plainly: because a bad key transport is no
+longer distinguishable, a dossier whose wrapped key is unusable is decrypted
+under a synthetic key, and on the rare occasion that the resulting garbage
+happens to carry valid PKCS#7 padding, openSzigno writes that garbage instead
+of failing. Decryption asserts nothing about authenticity in any case, which is
+the point made under "Decryption is not verification either" above; verify a
+signature if you need to know that content is genuine.
 
 ## Network exposure
 
