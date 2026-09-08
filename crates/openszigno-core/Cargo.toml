@@ -12,6 +12,9 @@ documentation = "https://docs.rs/openszigno-core"
 keywords = ["e-szigno", "es3", "dossier", "xml", "microsec"]
 categories = ["parser-implementations", "encoding"]
 
+[lints]
+workspace = true
+
 [dependencies]
 aes.workspace = true
 base64.workspace = true

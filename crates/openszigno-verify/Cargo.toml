@@ -12,6 +12,9 @@ documentation = "https://docs.rs/openszigno-verify"
 keywords = ["e-szigno", "es3", "xmldsig", "signature", "microsec"]
 categories = ["cryptography", "parser-implementations"]
 
+[lints]
+workspace = true
+
 [dependencies]
 base64.workspace = true
 cms = "0.2"
