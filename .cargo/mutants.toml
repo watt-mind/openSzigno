@@ -1,0 +1,36 @@
+# Configuration for `cargo mutants` (LAB-267: nightly mutation testing).
+#
+# Scope: `openszigno-core` and `openszigno-verify` only. `openszigno-cli` is
+# a thin process wrapper over those two libraries (argument parsing, JSON
+# envelope rendering, filesystem I/O); its behaviour is already exercised end
+# to end by `crates/openszigno-cli/tests/*.rs`, and mutating it would mostly
+# generate `main`/wiring-shaped mutants that are expensive to build and test
+# without telling us anything the two library crates' mutation score does
+# not already tell us. Revisit if the CLI grows logic of its own.
+#
+# `cargo mutants` already skips `#[cfg(test)]` code, `Debug` impls, and
+# functions marked `#[mutants::skip]`, so none of that needs restating here.
+
+# CI runs with `--timeout-multiplier` on the command line (see
+# .github/workflows/mutants.yml); this is the default for local runs that
+# omit the flag. cargo-mutants times a mutant against the baseline (unmutated)
+# test time and kills it once it exceeds this multiple, which is how an
+# infinite-loop mutant is caught rather than hung forever.
+timeout_multiplier = 2
+
+# Trivially uncatchable patterns only, each with its own justification.
+# This is not a place to silence a survivor found by running the tool; a
+# survivor is a prompt to improve a test, not to add an exclusion.
+exclude_re = [
+    # `C14nError`'s `Display` impl maps two variants to two fixed human-
+    # readable sentences with no other behaviour. Catching a mutation of
+    # its exact wording would require a test that asserts on that literal
+    # string, which CONTRIBUTING.md's documentation rule already argues
+    # against doing to error text in general (`docs/testing.md` and
+    # `CONTRIBUTING.md` both favour asserting on stable codes over prose).
+    # The variants it formats are otherwise fully covered by their own
+    # `PartialEq`/`Eq` derives and by every test that triggers each error.
+    # Matched against the mutant name cargo-mutants prints with --list, e.g.
+    # "replace <impl std::fmt::Display for C14nError>::fmt -> ...".
+    '<impl std::fmt::Display for C14nError>::fmt',
+]
