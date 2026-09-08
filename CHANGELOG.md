@@ -54,7 +54,8 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
   ZIP the plaintext (`zip -> encrypt -> base64`); an `--embed` dossier stays
   in the clear. `create` output is not deterministic with `--encrypt-for`,
   because a content key must be unpredictable. Each `create` document now
-  reports `encrypted` in the JSON envelope, and the new codes are the errors
+  reports `encrypted` in the JSON envelope, the human summary marks such a
+  document `| encrypted`, and the new codes are the errors
   `invalid_recipient_certificate`, `unsupported_recipient_key`,
   `no_recipients`, and `encrypt_failed` (exit 4) and the warning
   `recipient_certificate_expired`. Additive: `schema_version` stays `1`.
