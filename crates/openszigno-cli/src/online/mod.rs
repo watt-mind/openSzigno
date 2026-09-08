@@ -23,10 +23,15 @@
 //!   point and an AIA OCSP responder are fields a CA wrote into a certificate
 //!   that a trust anchor signed. No URL is ever taken from the dossier's XML,
 //!   from a redirect to another host, or from the environment.
-//! - **A destination policy on top of that.** `http` and `https` only, no
-//!   userinfo, and no loopback, private, link-local or unique-local address —
-//!   by literal *or* by what the name resolves to — unless
-//!   `--online-allow-private` is given. See [`destination`].
+//! - **A destination policy on top of that, bound to the socket.** `http` and
+//!   `https` only, no userinfo, and no loopback, private, link-local or
+//!   unique-local address — by literal *or* by what the name resolves to —
+//!   unless `--online-allow-private` is given. See [`destination`]. The
+//!   addresses the policy approved are then the only ones the request may be
+//!   sent to: they are pinned for `ureq` through [`pinned`], for the first URL
+//!   and for every redirect target, so the check and the connection cannot
+//!   disagree. The name is untouched, so TLS still verifies the certificate
+//!   against the host the URL named.
 //! - **Strict, small bounds.** Five seconds to connect, twenty in total, at
 //!   most three redirects and never to another host,
 //!   [`MAX_REVOCATION_ITEM_BYTES`] for a CRL and 64 KiB for an OCSP response.
@@ -53,9 +58,11 @@
 //!   apart from "the CA served something that is not a CRL".
 
 mod destination;
+mod pinned;
 
 use std::collections::BTreeSet;
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Duration;
 
 use openszigno_verify::certs::{CertificateSource, ParsedCertificate, dedup};
@@ -65,6 +72,7 @@ use openszigno_verify::revocation::{
 use openszigno_verify::{Check, CheckCode, MAX_REVOCATION_ITEM_BYTES, VerifyLimits};
 
 use destination::{Refusal, host_of, permitted, resolve, scheme_of};
+use pinned::{PinnedResolver, SharedResolver};
 
 use crate::extract::output_dir::{OpenError, OutputDir};
 
@@ -168,6 +176,10 @@ pub struct GapRequest<'a> {
 /// same way.
 pub struct Fetcher {
     agent: ureq::Agent,
+    /// The resolver the agent connects through. Every hop writes the addresses
+    /// the destination policy just approved into it, so the socket goes where
+    /// the policy looked and nowhere else.
+    resolver: Arc<PinnedResolver>,
     /// `--online-allow-private`: whether loopback and private destinations may
     /// be contacted. It exists for two real cases — an internal CA that
     /// publishes on the operator's own network, and this project's own test
@@ -187,6 +199,7 @@ impl Fetcher {
             ),
             None => None,
         };
+        let proxied = proxy.is_some();
         let config = ureq::Agent::config_builder()
             .timeout_connect(Some(CONNECT_TIMEOUT))
             .timeout_global(Some(TOTAL_TIMEOUT))
@@ -197,8 +210,20 @@ impl Fetcher {
             .http_status_as_error(false)
             .user_agent("openszigno")
             .build();
+        // The agent is built from parts for one reason: the resolver. The
+        // default one looks a name up when it connects, which would be a second
+        // lookup that need not agree with the one the destination policy made,
+        // and a hostile zone only has to disagree once. This one answers from
+        // what the policy approved and refuses everything else. See [`pinned`].
+        let resolver = Arc::new(PinnedResolver::new(proxied));
+        let agent = ureq::Agent::with_parts(
+            config,
+            ureq::unversioned::transport::DefaultConnector::new(),
+            SharedResolver(Arc::clone(&resolver)),
+        );
         Ok(Self {
-            agent: config.new_agent(),
+            agent,
+            resolver,
             allow_private,
         })
     }
@@ -357,10 +382,17 @@ impl Fetcher {
             // contacted, the redirect targets included: a redirect stays on
             // the host the certificate named, but "the same name" and "the
             // same address" are not the same statement.
-            permitted(&current, self.allow_private).map_err(|refusal| match refusal {
-                Refusal::Refused(reason) => FailureClass::DestinationRefused(reason),
-                Refusal::Unresolvable => FailureClass::Transport,
-            })?;
+            let vetted =
+                permitted(&current, self.allow_private).map_err(|refusal| match refusal {
+                    Refusal::Refused(reason) => FailureClass::DestinationRefused(reason),
+                    Refusal::Unresolvable => FailureClass::Transport,
+                })?;
+            // The approval is made binding here: these addresses, and only
+            // these, are what the agent may open a socket to for this hop. The
+            // URL is passed on unchanged, so the `Host` header and the TLS
+            // host-name verification still use the name the certificate
+            // published.
+            self.resolver.pin(&vetted);
             let response = match body {
                 // The body is passed as a slice, which `ureq` sends with a
                 // known length: an explicit `Content-Length` and no chunked

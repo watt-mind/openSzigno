@@ -23,19 +23,27 @@
 //!   that could point the verifier at `http://169.254.169.254/` or at a
 //!   service on the operator's own subnet would have turned a signature check
 //!   into a port scanner and an SSRF primitive.
-//! - **The resolved address is checked too.** A public name that resolves to
-//!   `127.0.0.1` — DNS rebinding, or simply a hostile zone — is refused on the
-//!   address, not on the name. Every hop is checked: the URL out of the
-//!   certificate and each redirect target the fetcher follows go through this
-//!   module before a socket is opened. The lookup happens here and the
-//!   connection is made by `ureq`, which resolves again, so this is a
-//!   mitigation and not a proof; it is one of the reasons the flag exists at
-//!   all.
+//! - **The resolved address is checked too, and then connected to.** A public
+//!   name that resolves to `127.0.0.1` — DNS rebinding, or simply a hostile
+//!   zone — is refused on the address, not on the name. Every hop is checked:
+//!   the URL out of the certificate and each redirect target the fetcher
+//!   follows go through this module before a socket is opened. The lookup
+//!   happens here **and its result is what is dialled**: [`permitted`] hands
+//!   back the addresses it approved, and the fetcher pins them for `ureq`
+//!   through [`super::pinned`], so there is no second lookup that could
+//!   disagree with the first. A zone that answered with a public address and
+//!   then with a private one used to have a window between the check and the
+//!   socket; it no longer does.
+//!
+//! Pinning is an address decision only. The URL, and therefore the `Host`
+//! header, the TLS SNI value and the certificate host-name verification, are
+//! untouched: the peer still has to prove it is the name the certificate
+//! published.
 //!
 //! Everything in this module is about *reaching* bytes. Nothing here decides
 //! whether the bytes are believed: that is the verifier's, offline.
 
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, ToSocketAddrs as _};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, ToSocketAddrs as _};
 
 /// Why a destination was not contacted.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -67,13 +75,29 @@ const METADATA_V4: Ipv4Addr = Ipv4Addr::new(169, 254, 169, 254);
 /// range already refused.
 const METADATA_V6: Ipv6Addr = Ipv6Addr::new(0xfd00, 0x0ec2, 0, 0, 0, 0, 0, 0x0254);
 
-/// Whether one URL may be contacted.
+/// One endpoint the policy approved, and the addresses it approved for it.
+///
+/// This is what makes the check binding rather than advisory: the fetcher pins
+/// exactly these addresses for exactly this `(host, port)` before it issues the
+/// request, so the socket goes where the policy looked. `host` is lower-cased
+/// and carries no brackets around an IPv6 literal, which is the shape
+/// [`super::pinned`] keys on.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct Vetted {
+    pub(super) host: String,
+    pub(super) port: u16,
+    pub(super) addresses: Vec<SocketAddr>,
+}
+
+/// Whether one URL may be contacted, and on which addresses.
 ///
 /// `allow_private` is `--online-allow-private`, which waives the address and
 /// name rules and nothing else: a non-HTTP scheme and a URL with userinfo stay
 /// refused whatever the flag says, because neither is a network-reachability
-/// question.
-pub(super) fn permitted(url: &str, allow_private: bool) -> Result<(), Refusal> {
+/// question. The flag does not waive *resolution*: an address is still needed
+/// to connect to, so a host that resolves to nothing is `Unresolvable` with the
+/// flag exactly as without it.
+pub(super) fn permitted(url: &str, allow_private: bool) -> Result<Vetted, Refusal> {
     let scheme = scheme_of(url).ok_or(Refusal::Refused(REFUSED_SCHEME))?;
     if !matches!(scheme, "http" | "https") {
         return Err(Refusal::Refused(REFUSED_SCHEME));
@@ -83,37 +107,47 @@ pub(super) fn permitted(url: &str, allow_private: bool) -> Result<(), Refusal> {
         return Err(Refusal::Refused(REFUSED_USERINFO));
     }
     let (host, port) = split_authority(&authority).ok_or(Refusal::Refused(REFUSED_NO_HOST))?;
-    if allow_private {
-        return Ok(());
-    }
-    if host.eq_ignore_ascii_case("localhost") || host.to_ascii_lowercase().ends_with(".localhost") {
+    let port = port.unwrap_or(if scheme == "https" { 443 } else { 80 });
+    let host = host.to_ascii_lowercase();
+    if !allow_private && (host == "localhost" || host.ends_with(".localhost")) {
         return Err(Refusal::Refused(REFUSED_LOCALHOST));
     }
-    if let Some(address) = literal_address(host) {
-        return match verdict(address) {
-            Verdict::Metadata => Err(Refusal::Refused(REFUSED_METADATA_LITERAL)),
-            Verdict::Restricted => Err(Refusal::Refused(REFUSED_LITERAL)),
-            Verdict::Permitted => Ok(()),
-        };
+    if let Some(address) = literal_address(&host) {
+        if !allow_private {
+            match verdict(address) {
+                Verdict::Metadata => return Err(Refusal::Refused(REFUSED_METADATA_LITERAL)),
+                Verdict::Restricted => return Err(Refusal::Refused(REFUSED_LITERAL)),
+                Verdict::Permitted => {}
+            }
+        }
+        return Ok(Vetted {
+            host,
+            port,
+            addresses: vec![SocketAddr::new(address, port)],
+        });
     }
-    let port = port.unwrap_or(if scheme == "https" { 443 } else { 80 });
-    let resolved = (host, port)
+    let resolved = (host.as_str(), port)
         .to_socket_addrs()
         .map_err(|_| Refusal::Unresolvable)?;
-    let mut any = false;
+    let mut addresses = Vec::new();
     for address in resolved {
-        any = true;
-        match verdict(address.ip()) {
-            Verdict::Metadata => return Err(Refusal::Refused(REFUSED_METADATA_RESOLVED)),
-            Verdict::Restricted => return Err(Refusal::Refused(REFUSED_RESOLVED)),
-            Verdict::Permitted => {}
+        if !allow_private {
+            match verdict(address.ip()) {
+                Verdict::Metadata => return Err(Refusal::Refused(REFUSED_METADATA_RESOLVED)),
+                Verdict::Restricted => return Err(Refusal::Refused(REFUSED_RESOLVED)),
+                Verdict::Permitted => {}
+            }
         }
+        addresses.push(address);
     }
-    if any {
-        Ok(())
-    } else {
-        Err(Refusal::Unresolvable)
+    if addresses.is_empty() {
+        return Err(Refusal::Unresolvable);
     }
+    Ok(Vetted {
+        host,
+        port,
+        addresses,
+    })
 }
 
 /// Split an authority into its host and optional port, understanding the
@@ -348,14 +382,66 @@ mod tests {
             );
             // With the flag the same URL is a destination like any other; the
             // loopback tests in tests/online.rs depend on exactly this.
-            assert_eq!(permitted(url, true), Ok(()), "{url} with the flag");
+            assert!(permitted(url, true).is_ok(), "{url} with the flag");
         }
     }
 
     #[test]
     fn a_public_literal_is_permitted() {
-        assert_eq!(permitted("http://93.184.216.34/ca.crl", false), Ok(()));
-        assert_eq!(permitted("http://[2001:db8::1]/ca.crl", false), Ok(()));
+        assert!(permitted("http://93.184.216.34/ca.crl", false).is_ok());
+        assert!(permitted("http://[2001:db8::1]/ca.crl", false).is_ok());
+    }
+
+    /// A literal is vetted without a lookup, and what comes back is the exact
+    /// endpoint the fetcher will pin: the address the URL named, on the port it
+    /// named or the scheme's default.
+    #[test]
+    fn a_vetted_literal_carries_the_address_that_will_be_dialled() {
+        let vetted = permitted("http://93.184.216.34/ca.crl", false).expect("permitted");
+        assert_eq!(vetted.host, "93.184.216.34");
+        assert_eq!(vetted.port, 80);
+        assert_eq!(
+            vetted.addresses,
+            vec![
+                "93.184.216.34:80"
+                    .parse::<SocketAddr>()
+                    .expect("an address")
+            ]
+        );
+
+        let vetted = permitted("https://[2001:DB8::1]:8443/ca.crl", false).expect("permitted");
+        // The bracket-free, lower-case form is the one the resolver keys on.
+        assert_eq!(vetted.host, "2001:db8::1");
+        assert_eq!(vetted.port, 8443);
+        assert_eq!(
+            vetted.addresses,
+            vec![
+                "[2001:db8::1]:8443"
+                    .parse::<SocketAddr>()
+                    .expect("an address")
+            ]
+        );
+
+        // The scheme decides the port when the URL does not name one.
+        assert_eq!(
+            permitted("https://93.184.216.34/ca.crl", false)
+                .expect("permitted")
+                .port,
+            443
+        );
+    }
+
+    /// Loopback with the flag is the test suite's own case, and it has to come
+    /// back with an address to connect to, not merely with permission.
+    #[test]
+    fn loopback_with_the_flag_is_vetted_down_to_the_address() {
+        let vetted = permitted("http://127.0.0.1:8080/ca.crl", true).expect("permitted");
+        assert_eq!(vetted.host, "127.0.0.1");
+        assert_eq!(vetted.port, 8080);
+        assert_eq!(
+            vetted.addresses,
+            vec!["127.0.0.1:8080".parse::<SocketAddr>().expect("an address")]
+        );
     }
 
     /// The metadata addresses are refused, and the refusal says which they
@@ -373,7 +459,7 @@ mod tests {
                 Err(Refusal::Refused(REFUSED_METADATA_LITERAL)),
                 "{url}"
             );
-            assert_eq!(permitted(url, true), Ok(()), "{url} with the flag");
+            assert!(permitted(url, true).is_ok(), "{url} with the flag");
         }
     }
 
