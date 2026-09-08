@@ -65,6 +65,9 @@ fn dossier(count: usize) -> Vec<u8> {
             media_type: None,
             bytes: format!("document {index}\n").into_bytes(),
             compress: false,
+            // Signing an encrypted payload is signing its ciphertext, which
+            // is a different question; these fixtures are in the clear.
+            encrypt: false,
         })
         .collect();
     openszigno_author::build(
@@ -72,6 +75,7 @@ fn dossier(count: usize) -> Vec<u8> {
             title: "Synthetic signing fixture".to_owned(),
             created: "2026-01-01T00:00:00Z".to_owned(),
             documents,
+            encryption: None,
         },
         &Limits::default(),
     )

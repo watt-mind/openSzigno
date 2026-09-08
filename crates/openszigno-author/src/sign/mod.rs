@@ -20,10 +20,10 @@
 //! | Module | What it owns |
 //! | :--- | :--- |
 //! | this one | The driver: what to sign, where the element goes, and the three passes that fill it in. |
-//! | [`dsig`] | `ds:SignedInfo`, its references, and the canonicalized octets each one digests. |
-//! | [`xades`] | `xades:QualifyingProperties`: the signed properties, and the evidence in the unsigned half. |
-//! | [`signer`] | The [`Signer`] trait and [`SoftwareSigner`], the local-key implementation. |
-//! | [`tsa`] | RFC 3161 requests and responses, as bytes in and bytes out. |
+//! | `dsig` | `ds:SignedInfo`, its references, and the canonicalized octets each one digests. |
+//! | `xades` | `xades:QualifyingProperties`: the signed properties, and the evidence in the unsigned half. |
+//! | `signer` | The [`Signer`] trait and [`SoftwareSigner`], the local-key implementation. |
+//! | `tsa` | RFC 3161 requests and responses, as bytes in and bytes out. |
 //!
 //! # How a signature is filled in
 //!
