@@ -100,8 +100,12 @@ crates/openszigno-cli/src/
   trust.rs            # --trust-store, --trust-list, and --lotl loading
   revocation_store.rs # --revocation-store loading
   online/             # --online fetching, the only code that opens a socket
-    mod.rs            #   the trust gate, the gap search, the transport, the cache
+    mod.rs            #   the transport, its bounds and failure classes, and
+                      #     the --online-cache writer
+    gaps.rs           #   what to fetch and for whom: the trust gate, coverage
+                      #     at each path's own validation time, the URL order
     destination.rs    #   which URLs and addresses may be contacted at all
+    pinned.rs         #   connecting only to the addresses the policy approved
 ```
 
 Two boundaries are load-bearing rather than tidiness. Every command reaches
