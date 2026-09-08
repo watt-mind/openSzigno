@@ -7,10 +7,11 @@ dossier is authentic, and it never means it is legally valid.**
 
 `openszigno verify` checks XMLDSig canonicalization, reference digests,
 signature values, the e-dossier reference-scope rules, the XAdES signed
-`SigningCertificate` binding, RFC 3161 signature timestamps, certificate paths
-against trust material you supply, and revocation from revocation data you
-supply. A verdict of `invalid` is a real cryptographic finding and should be
-taken seriously.
+`SigningCertificate` binding, RFC 3161 signature and container timestamps,
+certificate paths against trust material you supply, and revocation from
+revocation data you supply or that the opt-in `--online` fetched for a
+certificate on a path to one of your anchors. A verdict of `invalid` is a real
+cryptographic finding and should be taken seriously.
 
 A verdict of `valid` is a narrower statement than it sounds. It says: at the
 validation time reported alongside it, this signature verified, its certificate
@@ -296,7 +297,10 @@ you would one found by hand.
   distinguishable failure that turns openSzigno into a padding oracle for a
   key the operator supplied.
 - Any output that states or implies that a signature, timestamp, certificate,
-  or dossier is valid.
+  or dossier is valid when the checks that would establish it did not all
+  pass: a `valid` verdict reached with a required check unperformed, a
+  `passed` check whose underlying test did not run, or human or JSON wording
+  that reads as a legal determination.
 - Contamination of stdout in `--json` mode, or an exit status that
   contradicts the documented category.
 
