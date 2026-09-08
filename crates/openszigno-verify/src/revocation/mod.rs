@@ -49,9 +49,9 @@
 //! demanding one would make every archived response unusable. Freshness and
 //! the `certID` binding carry the weight instead.
 //!
-//! The module is split by what each part validates: [`crl`] holds CRL
-//! validation and lookup, [`ocsp`] holds OCSP response validation and the
-//! responder-authorisation models, and [`tiers`] holds the source priority,
+//! The module is split by what each part validates: `crl` holds CRL
+//! validation and lookup, `ocsp` holds OCSP response validation and the
+//! responder-authorisation models, and `tiers` holds the source priority,
 //! the fallback rules, and the summaries and messages a path's answers become.
 //! What stays here is the public API, the per-path driver, and the store
 //! classification the CLI loads through.

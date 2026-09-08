@@ -2,9 +2,9 @@
 //! algorithm policy, canonicalization of `ds:SignedInfo`, and verification of
 //! `ds:SignatureValue` against the certificate that actually signed it.
 //!
-//! The module is split by what each part decides: [`signed_info`] reads
+//! The module is split by what each part decides: `signed_info` reads
 //! `ds:SignedInfo` and applies the signature-level algorithm policy, and
-//! [`collect`] gathers the signature's timestamp tokens and the octets each
+//! `collect` gathers the signature's timestamp tokens and the octets each
 //! one must be checked against. What stays here is the driver, signer
 //! selection, and verification of `ds:SignatureValue`.
 

@@ -25,6 +25,17 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
   check code, status, message, ordering and JSON field is unchanged, and the
   crate's public API keeps the paths it had. See
   [docs/architecture.md](docs/architecture.md#module-map).
+- Second-round internal split of the five remaining oversized
+  `openszigno-verify` sources, moving code verbatim with no behaviour change:
+  `certs.rs` became `certs/` (`extensions`, `purpose`, `names`, `path`),
+  `revocation.rs` became `revocation/` (`crl`, `ocsp`, `tiers`), `tsa.rs`
+  became `tsa/` (`token`, `imprint`, `path`, `tests`), `signature.rs` gained
+  `signed_info` and `collect`, and `trustlist.rs` became `trustlist/`
+  (`parse`, `services`, `qualified`). Every check code, status, message,
+  ordering and JSON field is unchanged, and every public item keeps its old
+  path through `pub use` re-exports. No `openszigno-verify` source file is
+  named in `scripts/file-length-allowlist.txt` any more. See
+  [docs/architecture.md](docs/architecture.md#module-map).
 - `crates/openszigno-verify/tests/common/mod.rs` (2394 lines) was split into
   `pki.rs`, `dossier.rs`, `signer.rs`, `timestamps.rs`, `cms.rs` and
   `trustlist.rs`, with `mod.rs` reduced to module declarations and `pub use`

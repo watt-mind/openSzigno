@@ -8,9 +8,9 @@
 //! rule below is explicit, and anything unrecognised is refused rather than
 //! ignored.
 //!
-//! The module is split along what each part decides: [`extensions`] reads a
-//! certificate's extensions, [`purpose`] holds the `extendedKeyUsage` policy,
-//! [`names`] implements name constraints, and [`path`] builds and validates a
+//! The module is split along what each part decides: `extensions` reads a
+//! certificate's extensions, `purpose` holds the `extendedKeyUsage` policy,
+//! `names` implements name constraints, and `path` builds and validates a
 //! certification path. What stays here is the public shape of a certificate,
 //! the RFC 5280 section 6.1 path check that ties the other modules together,
 //! and the public-key signature verification every one of them needs.

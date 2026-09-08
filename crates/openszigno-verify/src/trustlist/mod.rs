@@ -38,10 +38,10 @@
 //! subset, are read far enough to be *reported* as unprocessed and are never
 //! used to widen a determination.
 //!
-//! The module is split by what each part does: [`parse`] reads the XML — the
+//! The module is split by what each part does: `parse` reads the XML — the
 //! list frame, the service records and their digital identities, and the
-//! pointers to other lists; [`services`] evaluates the status timeline and the
-//! pre-eIDAS rules; and [`qualified`] decides the qualified status of a
+//! pointers to other lists; `services` evaluates the status timeline and the
+//! pre-eIDAS rules; and `qualified` decides the qualified status of a
 //! validated chain. What stays here is the public API and the verification of
 //! the list's own XMLDSig signature.
 

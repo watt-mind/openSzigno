@@ -14,9 +14,9 @@
 //! one most often skipped. Nothing here reports a token as verified unless
 //! every one of those steps passed.
 //!
-//! The module is split by step: [`token`] holds the RFC 3161 wire formats and
-//! the CMS signed-attribute checks, [`imprint`] holds the digest allowlist and
-//! the imprint recomputation, and [`path`] holds the TSA certificate's purpose
+//! The module is split by step: `token` holds the RFC 3161 wire formats and
+//! the CMS signed-attribute checks, `imprint` holds the digest allowlist and
+//! the imprint recomputation, and `path` holds the TSA certificate's purpose
 //! and its certification path. What stays here is the token driver, the
 //! reported types, and stage F's entry point.
 
