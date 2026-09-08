@@ -2,6 +2,7 @@
 """Golden JSON and human output contract tests for the openSzigno CLI.
 
 Runs a fixed command matrix over every fixture in `tests/fixtures/**/*.es3`,
+plus one `create` case that builds a dossier from `tests/fixtures/create/`,
 normalises the two time values that cannot be stable, and compares the result
 against the committed files under `tests/golden/`.
 
@@ -101,6 +102,37 @@ def cases(fixture, temp):
         yield f"verify.{variant}.human", base
 
 
+# The `create` case. It is not driven by a fixture: it builds one, from the
+# two committed inputs under `tests/fixtures/create/`, at a pinned creation
+# date so the output is byte-identical on every run. Its own output is
+# committed as `tests/fixtures/created.es3`, which the fixture matrix above
+# then covers like any other fixture; `crates/openszigno-cli/tests/create.rs`
+# asserts the two agree byte for byte.
+CREATE_TITLE = "Synthetic created dossier"
+CREATE_INPUTS = ("hello.txt", "note.txt")
+CREATE_CREATED = "2026-01-01T00:00:00Z"
+
+
+def create_cases(temp):
+    """The `create` matrix: `(name, argv, cwd)` triples.
+
+    Each case runs in its own throwaway working directory and writes to the
+    bare relative path `created.es3`. `create` echoes the output path the
+    caller gave it, so running from that directory is what keeps a
+    machine-local absolute path out of the golden.
+    """
+    for name in ("create", "create.human"):
+        cwd = temp / "create" / name
+        cwd.mkdir(parents=True, exist_ok=True)
+        argv = ["create", "--output", "created.es3", "--title", CREATE_TITLE]
+        for document in CREATE_INPUTS:
+            argv += ["--document", str(FIXTURES / "create" / document)]
+        argv += ["--created", CREATE_CREATED]
+        if not name.endswith(".human"):
+            argv.append("--json")
+        yield name, argv, cwd
+
+
 def mask_json(node):
     """Mask the two time values in a parsed envelope, in place.
 
@@ -157,7 +189,7 @@ def normalise_text(raw):
     return "\n".join(lines)
 
 
-def run(binary, argv, temp):
+def run(binary, argv, temp, cwd=REPO):
     """Run one case and return `(normalised stdout, exit status)`."""
     env = {
         "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
@@ -174,7 +206,7 @@ def run(binary, argv, temp):
         env["SYSTEMROOT"] = os.environ.get("SYSTEMROOT", "")
     completed = subprocess.run(
         [str(binary)] + argv,
-        cwd=REPO,
+        cwd=cwd,
         env=env,
         capture_output=True,
         text=True,
@@ -205,6 +237,14 @@ def matrix(binary, temp):
                 body, extension = normalise_json(stdout), "json"
             produced[f"{directory}/{name}.{extension}"] = body
             produced[f"{directory}/{name}.exit"] = f"{status}\n"
+    for name, argv, cwd in create_cases(temp):
+        stdout, status = run(binary, argv, temp, cwd=cwd)
+        if name.endswith(".human"):
+            body, extension = normalise_text(stdout), "txt"
+        else:
+            body, extension = normalise_json(stdout), "json"
+        produced[f"create/{name}.{extension}"] = body
+        produced[f"create/{name}.exit"] = f"{status}\n"
     return produced
 
 

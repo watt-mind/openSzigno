@@ -1,0 +1,55 @@
+{
+  "command": "create",
+  "data": {
+    "bytes": 1693,
+    "created": "2026-01-01T00:00:00Z",
+    "documents": [
+      {
+        "index": 0,
+        "mime_type": {
+          "charset": null,
+          "extension": "txt",
+          "media_type": "text",
+          "subtype": "plain"
+        },
+        "nested_dossier": false,
+        "object_ref": "obj0",
+        "source_size": 54,
+        "title": "hello.txt",
+        "transforms": [
+          "base64"
+        ]
+      },
+      {
+        "index": 1,
+        "mime_type": {
+          "charset": null,
+          "extension": "txt",
+          "media_type": "text",
+          "subtype": "plain"
+        },
+        "nested_dossier": false,
+        "object_ref": "obj1",
+        "source_size": 62,
+        "title": "note.txt",
+        "transforms": [
+          "base64"
+        ]
+      }
+    ],
+    "output": "created.es3"
+  },
+  "errors": [],
+  "input": {
+    "bytes": null,
+    "format": "microsec-es3"
+  },
+  "ok": true,
+  "schema_version": 1,
+  "warnings": [
+    {
+      "code": "created_dossier_unsigned",
+      "message": "the dossier carries no signature and no timestamp"
+    }
+  ]
+}

@@ -1,0 +1,49 @@
+{
+  "command": "inspect",
+  "data": {
+    "capabilities": {
+      "base64_extraction": true,
+      "cryptographic_verification": false,
+      "encrypted_extraction": "with_key",
+      "structural_validation": true,
+      "zip_base64_extraction": true
+    },
+    "dossier": {
+      "category": "electronic dossier",
+      "creation_date": "2026-01-01T00:00:00Z",
+      "documents": 2,
+      "namespace": "https://www.microsec.hu/ds/e-szigno30#",
+      "nested_dossiers": 0,
+      "signature_inventory": {
+        "signatures": [],
+        "timestamps": [],
+        "verified": false
+      },
+      "signatures_present": 0,
+      "signatures_verified": false,
+      "timestamps_present": 0,
+      "title": "Synthetic created dossier",
+      "xml_encoding": "UTF-8"
+    },
+    "limits": {
+      "max_base64_chars": 100663296,
+      "max_decoded_document_bytes": 67108864,
+      "max_documents": 256,
+      "max_input_bytes": 67108864,
+      "max_total_decoded_bytes": 268435456,
+      "max_xml_depth": 128,
+      "max_xml_nodes": 1000000,
+      "max_zip_compression_ratio": 100,
+      "max_zip_expanded_bytes": 67108864,
+      "max_zip_members": 16
+    }
+  },
+  "errors": [],
+  "input": {
+    "bytes": 1693,
+    "format": "microsec-es3"
+  },
+  "ok": true,
+  "schema_version": 1,
+  "warnings": []
+}
