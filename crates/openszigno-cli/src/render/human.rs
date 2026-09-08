@@ -124,15 +124,21 @@ pub(crate) fn write_human_success(command: &str, response: &Response) -> io::Res
                 } else {
                     ""
                 };
+                let encrypted = if document["encrypted"] == Value::Bool(true) {
+                    " | encrypted"
+                } else {
+                    ""
+                };
                 writeln!(
                     out,
-                    "[{}] {} | {}/{} | {} B | {}{}",
+                    "[{}] {} | {}/{} | {} B | {}{}{}",
                     document["index"],
                     display_json_string(&document["title"]),
                     display_json_string(&document["mime_type"]["media_type"]),
                     display_json_string(&document["mime_type"]["subtype"]),
                     display_source_size(&document["source_size"]),
                     document["transforms"],
+                    encrypted,
                     nested
                 )?;
             }
@@ -312,15 +318,21 @@ pub(crate) fn write_human_success(command: &str, response: &Response) -> io::Res
                 } else {
                     ""
                 };
+                let encrypted = if document["encrypted"] == Value::Bool(true) {
+                    " | encrypted"
+                } else {
+                    ""
+                };
                 writeln!(
                     out,
-                    "[{}] {} | {}/{} | {} B | {}{}",
+                    "[{}] {} | {}/{} | {} B | {}{}{}",
                     document["index"],
                     display_json_string(&document["title"]),
                     display_json_string(&document["mime_type"]["media_type"]),
                     display_json_string(&document["mime_type"]["subtype"]),
                     display_source_size(&document["source_size"]),
                     document["transforms"],
+                    encrypted,
                     nested
                 )?;
             }

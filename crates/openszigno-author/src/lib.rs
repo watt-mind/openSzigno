@@ -99,6 +99,10 @@ pub struct BuiltDocument {
     /// Whether the declared type marks this document as an embedded dossier,
     /// under the same rule the reader applies.
     pub nested_dossier: bool,
+    /// Whether the payload was written as a CMS `EnvelopedData`, so that only
+    /// a recipient's private key can read it back. It says nothing about who
+    /// wrote the document.
+    pub encrypted: bool,
     /// The `ds:Object` `Id` the profile points at, which is also the
     /// `extract --document` selector for it.
     pub object_ref: String,
@@ -268,6 +272,7 @@ pub fn build(spec: &DossierSpec, limits: &Limits) -> Result<BuiltDossier, Error>
             index,
             title,
             source_size: document.bytes.len() as u64,
+            encrypted: transforms.iter().any(|transform| transform == "encrypt"),
             transforms,
             nested_dossier: is_nested_dossier(&mime_type),
             mime_type,

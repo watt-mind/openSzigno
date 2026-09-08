@@ -186,6 +186,19 @@ pub(crate) struct CreateArgs {
     /// `--document` list.
     #[arg(long = "embed", value_name = "FILE")]
     pub(crate) embed: Vec<PathBuf>,
+    /// Encrypt every `--document` payload for this recipient certificate,
+    /// PEM or DER, as CMS EnvelopedData: AES-256-CBC content encryption with
+    /// a fresh key per document, wrapped for each recipient with RSAES-OAEP
+    /// and SHA-256. Repeatable; any one recipient's private key reads the
+    /// document back. Embedded dossiers are never encrypted. Encrypting
+    /// makes the output depend on a random source, so two runs differ.
+    #[arg(long = "encrypt-for", value_name = "CERT")]
+    pub(crate) encrypt_for: Vec<PathBuf>,
+    /// Wrap the content-encryption key with RSAES-PKCS1-v1_5 instead of
+    /// RSAES-OAEP, for a reader that cannot do OAEP. Its padding is the one
+    /// the Bleichenbacher/Marvin attack is about; prefer the default.
+    #[arg(long = "legacy-key-transport", requires = "encrypt_for")]
+    pub(crate) legacy_key_transport: bool,
     /// The creation date to write, as an RFC 3339 timestamp, normalised to
     /// UTC seconds. Without it the current time is used, which makes the
     /// output depend on the clock.
