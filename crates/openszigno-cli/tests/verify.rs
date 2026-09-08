@@ -536,3 +536,24 @@ fn a_pem_bundle_is_validated_block_by_block() {
         .to_owned();
     assert!(message.contains("block 2"), "{message}");
 }
+
+/// `--at` with a calendar-impossible date (Feb 31 does not exist, whatever
+/// day-of-month range it superficially fits in) is a usage error, exit 2,
+/// caught during argument parsing rather than silently rolling over into
+/// March.
+#[test]
+fn at_with_an_impossible_date_is_a_usage_error() {
+    let output = run(&[
+        "verify",
+        fixture("plain-base64.es3").to_str().unwrap(),
+        "--at",
+        "2026-02-31T00:00:00Z",
+    ]);
+    assert_eq!(
+        status(&output),
+        2,
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stdout.is_empty(), "a usage error emits no JSON");
+}

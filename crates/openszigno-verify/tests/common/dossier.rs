@@ -145,6 +145,10 @@ pub struct SigSpec {
     /// Enveloped countersignatures placed in this signature's
     /// `xades:UnsignedSignatureProperties`.
     pub countersignatures: Vec<CounterSignatureSpec>,
+    /// The `xades:SigningTime` text, verbatim. `None` uses the harness
+    /// default (`2020-01-01T00:00:00Z`); `Some` lets a test claim an
+    /// arbitrary, possibly calendar-impossible or malformed, string.
+    pub signing_time: Option<String>,
 }
 
 /// One `xades:CounterSignature` element and the signatures inside it.

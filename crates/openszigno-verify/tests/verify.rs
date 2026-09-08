@@ -1092,6 +1092,35 @@ fn rfc3339_round_trips() {
     }
 }
 
+/// Calendar validity is checked precisely, not merely bounded to 1..=31:
+/// Feb 29 exists only in leap years (divisible by 4, except centuries unless
+/// also divisible by 400), and no month runs past its real length.
+#[test]
+fn rfc3339_rejects_impossible_calendar_dates() {
+    // Feb 29 in leap years: 2024 (div 4), 2000 (div 400) both parse.
+    for leap in ["2024-02-29T00:00:00Z", "2000-02-29T00:00:00Z"] {
+        assert!(parse_rfc3339(leap).is_some(), "{leap} must parse");
+    }
+    // Feb 29 in non-leap years: 2023 (not div 4), 1900 (div 100, not 400).
+    for non_leap in ["2023-02-29T00:00:00Z", "1900-02-29T00:00:00Z"] {
+        assert!(
+            parse_rfc3339(non_leap).is_none(),
+            "{non_leap} must not parse"
+        );
+    }
+    // Feb 30/31 never exist, in any year.
+    for bad in ["2024-02-30T00:00:00Z", "2024-02-31T00:00:00Z"] {
+        assert!(parse_rfc3339(bad).is_none(), "{bad} must not parse");
+    }
+    // April has 30 days, not 31; the classic silent-rollover case from the
+    // review finding (2026-02-31 must not become 2026-03-03).
+    assert!(parse_rfc3339("2026-04-31T00:00:00Z").is_none());
+    assert!(parse_rfc3339("2026-02-31T00:00:00Z").is_none());
+    // Valid month ends still parse.
+    assert!(parse_rfc3339("2026-01-31T00:00:00Z").is_some());
+    assert!(parse_rfc3339("2026-04-30T00:00:00Z").is_some());
+}
+
 /// Adding a non-passing check can only lower a verdict, never raise it.
 #[test]
 fn the_verdict_function_is_monotone() {

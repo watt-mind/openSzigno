@@ -428,6 +428,36 @@ fn a_token_older_than_the_claimed_signing_time_is_unknown() {
     assert_ne!(report.verdict, Verdict::Invalid);
 }
 
+/// A `SigningTime` that names a calendar-impossible date (Feb 31, which does
+/// not exist regardless of day-of-month bounds) does not parse, so it is
+/// treated exactly as an absent claim: nothing orders the token's `genTime`
+/// against it, and `TimestampBeforeSigningTime` never fires even for a
+/// `genTime` that would have looked contradictory against the raw text.
+#[test]
+fn an_impossible_claimed_signing_time_is_treated_as_absent() {
+    let pki = good_pki();
+    let signature = signature_with_timestamp(&pki, |timestamp| {
+        timestamp.gen_time = "2019-06-01T09:00:00Z".to_owned();
+    });
+    let signature = SigSpec {
+        signing_time: Some("2026-02-31T00:00:00Z".to_owned()),
+        ..signature
+    };
+    let xml = dossier(signature, &pki.signer_key);
+    let report = run_at(&xml, vec![pki.root_der.clone()], "2020-06-02T00:00:00Z");
+
+    assert!(
+        !codes(&report).iter().any(|code| code.starts_with(&format!(
+            "{}=",
+            CheckCode::TimestampBeforeSigningTime.as_str()
+        ))),
+        "an unparseable SigningTime must not be ordered against the token"
+    );
+    // The raw claim is still reported, unauthenticated, for anyone who reads
+    // the report.
+    assert_check(&report, CheckCode::SigningTimePresent, CheckStatus::Info);
+}
+
 // ---------------------------------------------------------------------------
 // The validation time
 // ---------------------------------------------------------------------------
