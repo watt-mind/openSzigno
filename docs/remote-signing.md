@@ -516,18 +516,24 @@ To talk to this server, openSzigno would need, at minimum:
 ### 2.5 The ARF and the eIDAS 2 obligation
 
 The Architecture and Reference Framework treats remote signing as a
-first-class role. Section 2.4 "Qualified electronic signatures" states that
-users can create qualified electronic signatures and seals and that these
-are provided by default and free of charge within the Wallet Unit; section
-3.9 defines the Qualified Electronic Signature Remote Creation (QESRC)
-Provider role; and section 4.3.3 lists a Remote Signing or Sealing Interface
-(RSI) between the Wallet Unit and a QESRC Provider. These section numbers
-were read from the published ARF at
-[eudi.dev](https://eudi.dev/2.4.0/architecture-and-reference-framework-main/);
-the fetched rendering truncated inside section 4.4.2, so the detailed rQES
-technical requirements and any CSC version binding in the ARF were not read
-and are unverified. The source repository is
-[eudi-doc-architecture-and-reference-framework](https://github.com/eu-digital-identity-wallet/eudi-doc-architecture-and-reference-framework).
+first-class role. Chapter 2, "EUDI Wallet functionalities", states that a
+Wallet Unit can connect to a remote qualified signature creation device
+managed by a qualified trust service provider, and that qualified electronic
+signatures are provided by default and free of charge within the Wallet Unit
+([chapter 2](https://eudi.dev/latest/main/02-eudi-wallet-functionalities/)).
+Chapter 3 defines the Qualified Electronic Signature Remote Creation (QESRC)
+Provider as an ecosystem role, and describes a Remote Signing or Sealing
+Interface (RSI) between the Wallet Unit and a QESRC Provider
+([chapter 3](https://eudi.dev/latest/main/03-roles-within-the-eudi-wallet-ecosystem/)).
+Annex 4 carries a dedicated flow diagram,
+[Remote QES: creating a signature channeled by the EUDI Wallet](https://eudi.dev/latest/annexes/annex-4/annex-4.08-remote-qes-creating-a-signature-channeled-by-eudi-wallet.pdf).
+The most recent ARF tag in the source repository,
+[eudi-doc-architecture-and-reference-framework](https://github.com/eu-digital-identity-wallet/eudi-doc-architecture-and-reference-framework),
+is `v3.0.0`. The section numbers 2.4, 3.9 and 4.3.3 for these topics were
+read from the 2.4.0 rendering
+([eudi.dev/2.4.0](https://eudi.dev/2.4.0/architecture-and-reference-framework-main/));
+whether they still carry those numbers in v3.0.0, and whether the ARF binds
+a specific CSC API version, were not confirmed and are unverified.
 
 The legal driver is Regulation (EU) 2024/1183, which amends Regulation (EU)
 No 910/2014. In the consolidated text, Article 5a(5)(g) requires wallets to
