@@ -64,6 +64,14 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
   setting `too-many-lines-threshold`. See
   [CONTRIBUTING.md](CONTRIBUTING.md#required-checks) for the current
   threshold and the plan to lower it.
+- `scripts/coverage_gate.py`, run in CI's Coverage job, enforces a 90%
+  per-crate line-coverage floor, 80% patch coverage on lines a pull
+  request adds or modifies under `crates/*/src/` (when at least 20
+  instrumentable lines changed), and a ratchet against
+  `scripts/coverage-floors.txt` so a crate cannot silently drop more than
+  1.0 point below its recorded coverage. The job posts and refreshes a
+  single PR comment with the summary. See
+  [CONTRIBUTING.md](CONTRIBUTING.md#coverage-quality-gate).
 
 ## [0.4.0] - 2026-09-08
 

@@ -96,6 +96,7 @@ CI additionally runs, on every pull request:
 | Release container | `docker build .`, then the CLI subcommands inside the image |
 | Workflow lint | `actionlint` with `SHELLCHECK_OPTS=--severity=warning` |
 | Source file length | `python3 scripts/check-file-length.py` |
+| Coverage quality gate | `python3 scripts/coverage_gate.py --lcov lcov.info --base origin/develop` |
 
 Any of these can be reproduced locally with the same command. The
 container job runs `inspect`, `list`, `validate-structure`, `extract`, and
@@ -111,6 +112,41 @@ never edited by hand, including its pins: see
 
 Coverage is reported by CI; to reproduce it locally see
 [docs/testing.md](docs/testing.md#coverage).
+
+### Coverage quality gate
+
+`scripts/coverage_gate.py` reads the lcov report `cargo llvm-cov` produces
+and enforces, in the CI `coverage` job:
+
+- **Per-crate floor.** Every crate (`crates/<name>`) must be at or above
+  90% line coverage.
+- **Patch coverage.** Lines added or modified by the pull request, under
+  `crates/*/src/`, must be at or above 80% covered, whenever the change
+  touches at least 20 instrumentable lines; smaller changes skip this
+  check rather than fail it.
+- **Ratchet.** `scripts/coverage-floors.txt` records each crate's (and the
+  workspace's) coverage at the time it was last updated. A crate that
+  drops more than 1.0 point below its recorded value fails the job, the
+  same ratchet model as the file-length guardrail above: the floor exists
+  to catch regressions, not to require every change to raise coverage.
+
+The workspace-wide `--fail-under-lines 85` check also still runs, as a
+coarse backstop after the script's finer-grained gates.
+
+On a pull request, the job posts (and on a later push, refreshes in place)
+one PR comment marked `<!-- coverage-gate -->` with the same Markdown
+summary that appears in the job's step summary.
+
+To update the ratchet floors after a change that legitimately raises or
+lowers coverage, run coverage locally and rewrite the file:
+
+```sh
+cargo llvm-cov --workspace --lcov --output-path lcov.info
+python3 scripts/coverage_gate.py --lcov lcov.info --update-floors
+```
+
+Commit the updated `scripts/coverage-floors.txt` alongside the change that
+caused the shift. CI never rewrites this file itself.
 
 ## Documentation
 

@@ -66,6 +66,24 @@ half a minute longer than the rest. It never leaves the loopback interface.
 Coverage runs must never be pointed at the private corpus: the opt-in tests
 stay inert unless their environment variables are set, so leave them unset.
 
+CI enforces coverage with `scripts/coverage_gate.py`, run against the lcov
+file above:
+
+```sh
+cargo llvm-cov --workspace --lcov --output-path lcov.info
+python3 scripts/coverage_gate.py --lcov lcov.info --base origin/develop
+```
+
+It reads `lcov.info` and checks three things: every crate (`crates/<name>`)
+is at or above 90% line coverage; lines added or modified since `--base`
+under `crates/*/src/` are at or above 80% covered, when the change touches
+at least 20 instrumentable lines; and no crate has dropped more than 1.0
+point below the value recorded for it in `scripts/coverage-floors.txt`. The
+workspace's `--fail-under-lines 85` check in CI stays as a coarse backstop
+after this gate. See
+[CONTRIBUTING.md](../CONTRIBUTING.md#coverage-quality-gate) for the ratchet
+rule and how to update the floors file after a legitimate coverage change.
+
 ## Public fixtures
 
 The repository contains only synthetic, redistributable test dossiers. They

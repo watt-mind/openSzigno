@@ -105,10 +105,22 @@ jobs:
     name: Coverage
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    # Posting or refreshing the PR coverage comment needs to create issue
+    # comments on the pull request; everything else in this job only
+    # needs the default read access, so the elevated permissions are
+    # scoped to this job rather than the workflow.
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          # Full history, and all branches (not just the checked-out
+          # ref), so `git merge-base` can find the base commit the
+          # patch-coverage gate diffs against.
+          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable branch @ 2026-09-03
         with:
           toolchain: stable
@@ -121,10 +133,59 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - name: Measure line coverage
         run: cargo llvm-cov --workspace --locked --lcov --output-path lcov.info
-      - name: Report and enforce the coverage floor
+      - name: Report the coverage summary
+        run: cargo llvm-cov report --summary-only | tee coverage-summary.txt
+      - name: Determine the patch-coverage base
+        id: base
         run: |
-          cargo llvm-cov report --summary-only | tee coverage-summary.txt
-          cargo llvm-cov report --fail-under-lines 85
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            base=$(git merge-base "origin/${{ github.base_ref || 'develop' }}" HEAD)
+          else
+            base=$(git rev-parse HEAD~1)
+          fi
+          echo "base=$base" >> "$GITHUB_OUTPUT"
+      - name: Run the coverage quality gate
+        id: gate
+        run: |
+          set +e
+          python3 scripts/coverage_gate.py \
+            --lcov lcov.info \
+            --base "${{ steps.base.outputs.base }}" \
+            | tee coverage-gate-summary.md
+          status="${PIPESTATUS[0]}"
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+        shell: bash
+      - name: Post or refresh the coverage PR comment
+        if: github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          marker='<!-- coverage-gate -->'
+          repo="${{ github.repository }}"
+          pr_number="${{ github.event.pull_request.number }}"
+          body_file="$(mktemp)"
+          { echo "$marker"; echo; cat coverage-gate-summary.md; } > "$body_file"
+
+          existing=$(gh api "repos/$repo/issues/$pr_number/comments" --paginate \
+            --jq "[.[] | select(.body | startswith(\"$marker\"))][-1].id // empty")
+          if [ -n "$existing" ]; then
+            gh api "repos/$repo/issues/comments/$existing" -X PATCH -f body=@"$body_file"
+          else
+            gh api "repos/$repo/issues/$pr_number/comments" -X POST -f body=@"$body_file"
+          fi
+      - name: Enforce the coverage quality gate
+        run: |
+          if [ "${{ steps.gate.outputs.status }}" != "0" ]; then
+            echo "::error::scripts/coverage_gate.py reported a coverage-gate failure; see the job summary or the PR comment"
+            exit 1
+          fi
+      - name: Coverage floor backstop
+        # scripts/coverage_gate.py is the primary, finer-grained gate
+        # (per-crate floor, ratchet, patch coverage); this workspace-wide
+        # 85% floor stays as a coarse last-resort backstop in case the
+        # script itself has a bug that makes it pass when it should not.
+        run: cargo llvm-cov report --fail-under-lines 85
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: coverage
@@ -132,6 +193,7 @@ jobs:
           path: |
             lcov.info
             coverage-summary.txt
+            coverage-gate-summary.md
 
   deny:
     name: Licenses and advisories
