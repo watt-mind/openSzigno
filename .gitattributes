@@ -1,0 +1,3 @@
+# Markdown is embedded into the binary (`openszigno skill`), so its line
+# endings must not depend on the checkout host.
+*.md text eol=lf

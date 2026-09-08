@@ -23,6 +23,8 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
   `openszigno skill > .claude/skills/openszigno/SKILL.md` installs it with
   no checkout. It takes no `FILE` and no `--json`, and emits no JSON
   envelope.
+  A `.gitattributes` rule keeps Markdown at LF on every checkout, so the
+  embedded bytes are the same whichever host built the binary.
 
 ## [0.5.1] - 2026-09-08
 
