@@ -1,27 +1,35 @@
 //! The per-signature driver: `ds:SignedInfo` parsing, the signature-level
 //! algorithm policy, canonicalization of `ds:SignedInfo`, and verification of
 //! `ds:SignatureValue` against the certificate that actually signed it.
+//!
+//! The module is split by what each part decides: [`signed_info`] reads
+//! `ds:SignedInfo` and applies the signature-level algorithm policy, and
+//! [`collect`] gathers the signature's timestamp tokens and the octets each
+//! one must be checked against. What stays here is the driver, signer
+//! selection, and verification of `ds:SignatureValue`.
+
+mod collect;
+mod signed_info;
+
+pub use collect::TimestampSource;
+
+use collect::collect_timestamps;
 
 use openszigno_core::XMLDSIG_NAMESPACE;
 use openszigno_core::roxmltree::Node;
 
-use crate::c14n::{C14nAlgorithm, NodeSet};
+use crate::c14n::NodeSet;
 use crate::certs::{CertificateSource, ParsedCertificate, dedup};
 use crate::codes::{Check, CheckCode, CheckStatus, Verdict};
 use crate::countersign::countersignature_binding;
 use crate::dsig::{
-    Context, attribute, decode_base64, direct_child, direct_children, id_of, inclusive_prefixes,
-    text_of,
+    Context, decode_base64, direct_child, direct_children, id_of, inclusive_prefixes, text_of,
 };
-use crate::policy::{Digest, SignatureScheme, Transform};
-use crate::references::{
-    Reference, digest_reference, is_known_c14n, parse_reference, report_reference,
-    resolve_reference,
-};
+use crate::policy::SignatureScheme;
+use crate::references::{digest_reference, report_reference};
 use crate::report::{ReferenceReport, SignatureReport, SignatureRole, SignatureScope};
 use crate::scope::{placement_of, reference_scope_check};
-use crate::tsa::TimestampKind;
-use crate::xades::{self, StageC, XadesProperties, stage_c_binding, stage_c_presence};
+use crate::xades::{self, StageC, stage_c_binding, stage_c_presence};
 
 /// What the signature covers, and the certificates it offers.
 pub struct SignatureOutcome {
@@ -41,17 +49,6 @@ pub struct SignatureOutcome {
     /// says nothing about the signature it was dropped into, so it must not
     /// touch that signature's verdict.
     pub unsupported_nesting_parent: Option<usize>,
-}
-
-/// One timestamp token found in a signature, and the data it covers.
-pub struct TimestampSource {
-    pub kind: TimestampKind,
-    pub token: Vec<u8>,
-    /// The canonicalized octets the token's message imprint must match.
-    pub imprint_input: Vec<u8>,
-    /// Set when the timestamp uses a form this build does not implement, in
-    /// which case it is reported as unchecked rather than verified.
-    pub unsupported: Option<String>,
 }
 
 /// The identity of one signature, carried through every early return.
@@ -109,88 +106,27 @@ pub fn verify_signature(
         .and_then(crate::trust::parse_rfc3339);
 
     // --- Stage A1: structure ------------------------------------------------
-    let signed_info = direct_child(signature, XMLDSIG_NAMESPACE, "SignedInfo");
-    let signature_value_node = direct_child(signature, XMLDSIG_NAMESPACE, "SignatureValue");
-    let (Some(signed_info), Some(signature_value_node)) = (signed_info, signature_value_node)
-    else {
-        checks.push(Check::failed(
-            CheckCode::SigStructureInvalid,
-            "the signature is missing ds:SignedInfo or ds:SignatureValue",
-        ));
-        return finish(
-            header.clone(),
-            stage_c_presence(&properties),
-            checks,
-            references_report,
-            None,
-            Vec::new(),
-            None,
-            Vec::new(),
-            claimed_signing_time,
-            unsupported_nesting_parent,
-        );
+    let structure = match signed_info::parse(context, signature) {
+        Ok(structure) => structure,
+        Err(check) => {
+            checks.push(check);
+            return finish(
+                header.clone(),
+                stage_c_presence(&properties),
+                checks,
+                references_report,
+                None,
+                Vec::new(),
+                None,
+                Vec::new(),
+                claimed_signing_time,
+                unsupported_nesting_parent,
+            );
+        }
     };
-    let c14n_node = direct_child(signed_info, XMLDSIG_NAMESPACE, "CanonicalizationMethod");
-    let method_node = direct_child(signed_info, XMLDSIG_NAMESPACE, "SignatureMethod");
-    let reference_nodes: Vec<Node<'_, '_>> =
-        direct_children(signed_info, XMLDSIG_NAMESPACE, "Reference").collect();
-    let (Some(c14n_node), Some(method_node)) = (c14n_node, method_node) else {
-        checks.push(Check::failed(
-            CheckCode::SigStructureInvalid,
-            "ds:SignedInfo is missing its canonicalization or signature method",
-        ));
-        return finish(
-            header.clone(),
-            stage_c_presence(&properties),
-            checks,
-            references_report,
-            None,
-            Vec::new(),
-            None,
-            Vec::new(),
-            claimed_signing_time,
-            unsupported_nesting_parent,
-        );
-    };
-    if reference_nodes.is_empty() {
-        checks.push(Check::failed(
-            CheckCode::SigStructureInvalid,
-            "ds:SignedInfo contains no ds:Reference",
-        ));
-        return finish(
-            header.clone(),
-            stage_c_presence(&properties),
-            checks,
-            references_report,
-            None,
-            Vec::new(),
-            None,
-            Vec::new(),
-            claimed_signing_time,
-            unsupported_nesting_parent,
-        );
-    }
-    if reference_nodes.len() > context.limits.max_references_per_signature {
-        checks.push(Check::failed(
-            CheckCode::SigStructureInvalid,
-            format!(
-                "the signature exceeds {} references",
-                context.limits.max_references_per_signature
-            ),
-        ));
-        return finish(
-            header.clone(),
-            stage_c_presence(&properties),
-            checks,
-            references_report,
-            None,
-            Vec::new(),
-            None,
-            Vec::new(),
-            claimed_signing_time,
-            unsupported_nesting_parent,
-        );
-    }
+    let signed_info = structure.signed_info;
+    let signature_value_node = structure.signature_value_node;
+    let c14n_node = structure.c14n_node;
     checks.push(Check::passed(
         CheckCode::SigStructure,
         "signature structure is well formed",
@@ -225,162 +161,13 @@ pub fn verify_signature(
         )),
     }
 
-    // --- Stage A3: canonicalization method ----------------------------------
-    let c14n_uri = attribute(c14n_node, "Algorithm")
-        .unwrap_or_default()
-        .to_owned();
-    let signed_info_algorithm = C14nAlgorithm::from_uri(&c14n_uri);
-    match signed_info_algorithm {
-        Some(algorithm) => checks.push(Check::passed(
-            CheckCode::C14nMethodAllowed,
-            format!(
-                "ds:SignedInfo uses the {} canonicalization algorithm",
-                algorithm.short_name()
-            ),
-        )),
-        None => checks.push(Check::failed(
-            CheckCode::C14nUnsupported,
-            "the ds:CanonicalizationMethod algorithm is not supported",
-        )),
-    }
-
-    // --- Stage A4: signature algorithm --------------------------------------
-    let method_uri = attribute(method_node, "Algorithm").unwrap_or_default();
-    let scheme = SignatureScheme::from_signature_uri(method_uri)
-        .filter(|scheme| !scheme.is_legacy() || context.allow_legacy_algorithms);
-    match scheme {
-        Some(scheme) if scheme.is_legacy() => checks.push(Check::unknown(
-            CheckCode::AlgorithmLegacyAllowed,
-            format!(
-                "ds:SignatureMethod is {}, admitted only because legacy algorithms were allowed; its strength is not vouched for",
-                scheme.as_str()
-            ),
-        )),
-        Some(scheme) => checks.push(Check::passed(
-            CheckCode::SignatureAlgorithmAllowed,
-            format!("ds:SignatureMethod is {}", scheme.as_str()),
-        )),
-        None => checks.push(Check::failed(
-            CheckCode::AlgorithmRejected,
-            "the ds:SignatureMethod algorithm is outside the pinned allowlist",
-        )),
-    }
-
-    // --- Stage A5 to A8: per-reference policy -------------------------------
-    let references: Vec<Reference> = reference_nodes
-        .iter()
-        .enumerate()
-        .map(|(position, node)| parse_reference(*node, position))
-        .collect();
-
-    let mut digest_ok = true;
-    let mut digest_legacy = false;
-    for reference in &references {
-        match Digest::from_digest_uri(&reference.digest_uri) {
-            None => digest_ok = false,
-            Some(digest) if digest.is_legacy() => {
-                if context.allow_legacy_algorithms {
-                    digest_legacy = true;
-                } else {
-                    digest_ok = false;
-                }
-            }
-            Some(_) => {}
-        }
-    }
-    if !digest_ok {
-        checks.push(Check::failed(
-            CheckCode::AlgorithmRejected,
-            "a ds:DigestMethod algorithm is outside the pinned allowlist",
-        ));
-    } else if digest_legacy {
-        checks.push(Check::unknown(
-            CheckCode::AlgorithmLegacyAllowed,
-            "a ds:DigestMethod names SHA-1, admitted only because legacy algorithms were allowed; its strength is not vouched for",
-        ));
-    } else {
-        checks.push(Check::passed(
-            CheckCode::DigestAlgorithmAllowed,
-            "every ds:DigestMethod is inside the pinned allowlist",
-        ));
-    }
-
-    let mut transforms_ok = true;
-    let mut c14n_supported = true;
-    for reference in &references {
-        if reference.transforms.len() > context.limits.max_transforms_per_reference {
-            transforms_ok = false;
-            continue;
-        }
-        for (uri, _) in &reference.transforms {
-            if Transform::from_uri(uri).is_some() {
-                continue;
-            }
-            // A known canonicalization algorithm this crate does not implement
-            // is reported as unsupported, not as an attack.
-            if is_known_c14n(uri) {
-                c14n_supported = false;
-            } else {
-                transforms_ok = false;
-            }
-        }
-    }
-    if !c14n_supported {
-        checks.push(Check::failed(
-            CheckCode::C14nUnsupported,
-            "a transform names a canonicalization algorithm this build does not implement",
-        ));
-    }
-    if transforms_ok {
-        checks.push(Check::passed(
-            CheckCode::TransformsAllowed,
-            "every transform is inside the allowlist",
-        ));
-    } else {
-        checks.push(Check::failed(
-            CheckCode::TransformNotAllowed,
-            "a transform is outside the allowlist; XSLT and XPath are refused unconditionally",
-        ));
-    }
-
-    let mut same_document = true;
-    for reference in &references {
-        if !(reference.uri.is_empty() || reference.uri.starts_with('#')) {
-            same_document = false;
-        }
-    }
-    if same_document {
-        checks.push(Check::passed(
-            CheckCode::ReferencesSameDocument,
-            "every reference is same-document",
-        ));
-    } else {
-        checks.push(Check::failed(
-            CheckCode::ReferenceExternal,
-            "a reference names a URI outside the document; no reference is ever dereferenced",
-        ));
-    }
-
-    let mut resolved: Vec<Option<Node<'_, '_>>> = Vec::new();
-    let mut all_resolve = true;
-    for reference in &references {
-        let node = resolve_reference(context, reference);
-        if node.is_none() && same_document {
-            all_resolve = false;
-        }
-        resolved.push(node);
-    }
-    if all_resolve {
-        checks.push(Check::passed(
-            CheckCode::ReferencesResolve,
-            "every reference resolves to exactly one node in the validated ID space",
-        ));
-    } else {
-        checks.push(Check::failed(
-            CheckCode::ReferenceUnresolved,
-            "a reference does not resolve to a node in the validated ID space",
-        ));
-    }
+    // --- Stage A3 to A8: the signature-level algorithm policy ---------------
+    let signed_info::Policy {
+        signed_info_algorithm,
+        scheme,
+        references,
+        resolved,
+    } = signed_info::algorithm_policy(context, &structure, &mut checks);
 
     // --- Stage A9: reference scope ------------------------------------------
     checks.push(reference_scope_check(
@@ -667,150 +454,6 @@ fn finish(
         claimed_signing_time,
         unsupported_nesting_parent,
     }
-}
-
-/// Collect the signature timestamps and canonicalize what each one covers.
-///
-/// A `xades:SignatureTimeStamp` covers the canonicalized `ds:SignatureValue`
-/// **element**, not the Base64 text and not its digest. The canonicalization
-/// algorithm is the one the timestamp element names, defaulting to inclusive
-/// C14N as XAdES prescribes. The `Include` and `ReferenceInfo` forms select
-/// other data and are not implemented, so a timestamp that uses one is
-/// reported as unchecked rather than verified against the wrong bytes.
-/// Whether a `xades:SignatureTimeStamp` selects data this build cannot compute
-/// the imprint over, and why.
-///
-/// The implicit form — no data-selection child at all — covers the
-/// `ds:SignatureValue` element, which is what XAdES prescribes for a signature
-/// timestamp. The explicit `xades:Include` form (EN 319 132-1, XAdES 1.3.2 and
-/// 1.4.1) is accepted for exactly the case where it says the same thing: every
-/// `Include` is a same-document `#id` reference resolving, through the
-/// validated ID space, to *this signature's own* `ds:SignatureValue`. The
-/// `referencedData` attribute is not consulted, because for this target it
-/// cannot change what is digested.
-///
-/// Any other target set — another element, a URI that does not resolve, an
-/// external reference, or the `ReferenceInfo`, `HashDataInfo` and
-/// `XMLTimeStamp` forms — is refused by name rather than digested over the
-/// wrong bytes.
-fn unsupported_form(
-    context: &Context<'_, '_, '_>,
-    timestamp: Node<'_, '_>,
-    signature_value: Node<'_, '_>,
-) -> Option<String> {
-    for child in timestamp.children().filter(Node::is_element) {
-        match child.tag_name().name() {
-            "ReferenceInfo" | "HashDataInfo" | "XMLTimeStamp" => {
-                return Some(
-                    "the timestamp selects its data with a form this build does not implement"
-                        .to_owned(),
-                );
-            }
-            "Include" => {
-                let uri = attribute(child, "URI").unwrap_or_default();
-                let Some(id) = uri.strip_prefix('#').filter(|id| !id.is_empty()) else {
-                    return Some(
-                        "the timestamp includes a URI that is not a same-document reference"
-                            .to_owned(),
-                    );
-                };
-                match context.ids.get(id) {
-                    Some(node) if node.id() == signature_value.id() => {}
-                    _ => {
-                        return Some(
-                            "the timestamp includes data other than this signature's ds:SignatureValue"
-                                .to_owned(),
-                        );
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-    None
-}
-
-fn collect_timestamps(
-    context: &Context<'_, '_, '_>,
-    signature: Node<'_, '_>,
-    properties: &XadesProperties<'_, '_>,
-) -> Vec<TimestampSource> {
-    let Some(signature_value) = direct_child(signature, XMLDSIG_NAMESPACE, "SignatureValue") else {
-        return Vec::new();
-    };
-    let mut sources = Vec::new();
-    for node in properties
-        .signature_timestamps
-        .iter()
-        .take(context.limits.max_timestamps_per_signature)
-    {
-        let unsupported = unsupported_form(context, *node, signature_value);
-
-        let tokens: Vec<Vec<u8>> = xades::xades_children(*node, "EncapsulatedTimeStamp")
-            .filter_map(|element| decode_base64(&text_of(element)))
-            .take(2)
-            .collect();
-        let (token, unsupported) = match (tokens.len(), unsupported) {
-            (_, Some(reason)) => (tokens.first().cloned().unwrap_or_default(), Some(reason)),
-            (1, None) => (tokens[0].clone(), None),
-            (0, None) => (
-                Vec::new(),
-                Some("the timestamp carries no decodable xades:EncapsulatedTimeStamp".to_owned()),
-            ),
-            (_, None) => (
-                tokens[0].clone(),
-                Some(
-                    "the timestamp carries more than one token, which this build does not process"
-                        .to_owned(),
-                ),
-            ),
-        };
-
-        let algorithm = xades::ds_child(*node, "CanonicalizationMethod")
-            .and_then(|method| {
-                attribute(method, "Algorithm").map(|uri| (method, C14nAlgorithm::from_uri(uri)))
-            })
-            .map_or(
-                Some((C14nAlgorithm::Inclusive { comments: false }, Vec::new())),
-                |(method, algorithm)| {
-                    algorithm.map(|algorithm| (algorithm, inclusive_prefixes(method)))
-                },
-            );
-        let (imprint_input, unsupported) = match algorithm {
-            Some((algorithm, prefixes)) => {
-                match context.backend.canonicalize(
-                    context.source,
-                    &NodeSet::subtree(signature_value),
-                    algorithm,
-                    &prefixes,
-                ) {
-                    Ok(octets) => (octets, unsupported),
-                    Err(_) => (
-                        Vec::new(),
-                        unsupported.or(Some(
-                            "the ds:SignatureValue could not be canonicalized for the timestamp"
-                                .to_owned(),
-                        )),
-                    ),
-                }
-            }
-            None => (
-                Vec::new(),
-                unsupported.or(Some(
-                    "the timestamp names a canonicalization algorithm this build does not implement"
-                        .to_owned(),
-                )),
-            ),
-        };
-
-        sources.push(TimestampSource {
-            kind: TimestampKind::SignatureTimestamp,
-            token,
-            imprint_input,
-            unsupported,
-        });
-    }
-    sources
 }
 
 /// The index the structural model gives the containing document, which counts
