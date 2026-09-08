@@ -1,15 +1,16 @@
-//! What a signature's resolved references cover.
+//! What a signature's references cover.
 //!
-//! Coverage is decided by resolved references and by the implemented e-dossier
-//! scope rules, and is deliberately independent of every cryptographic
-//! outcome.
+//! Coverage is decided by the effective node set of each resolved reference —
+//! the same [`crate::references::ReferenceScope`] the reference-scope check
+//! uses — and by the implemented e-dossier scope rules. It is deliberately
+//! independent of every cryptographic outcome.
 
 use openszigno_core::XMLDSIG_NAMESPACE;
-use openszigno_core::roxmltree::{Node, NodeId};
+use openszigno_core::roxmltree::Node;
 
 use crate::codes::{Check, CheckCode, CheckStatus, Verdict};
 use crate::dsig::{Context, direct_child, direct_children};
-use crate::references::{parse_reference, resolve_reference};
+use crate::references::{ReferenceScope, effective_node_set, parse_reference, resolve_reference};
 use crate::report::{
     CoverageState, CoverageVia, CoveringSignature, DocumentCoverage, SignatureReport,
     SignatureScope,
@@ -22,10 +23,11 @@ use crate::report::{
 /// which mandated set applies, and the mandated set is then either covered or
 /// it is not.
 pub struct SignatureCoverage {
-    /// Every node a `ds:Reference` resolved to. An element is covered when it
-    /// is one of these or a descendant of one, which is the same rule the
-    /// reference-scope check applies.
-    pub resolved: Vec<NodeId>,
+    /// The effective node set of every `ds:Reference` that resolved. An
+    /// element is covered when it is inside one of them — ancestor
+    /// containment minus what the transforms removed — which is the same rule,
+    /// and the same code, the reference-scope check applies.
+    pub scopes: Vec<ReferenceScope>,
     /// Whether `reference_scope_complete` passed. A signature whose mandated
     /// set is incomplete covers nothing: the container's own rule for what it
     /// must reference was not met, so what it did reference is not a
@@ -47,14 +49,16 @@ pub fn signature_coverage(
     signature: Node<'_, '_>,
     checks: &[Check],
 ) -> SignatureCoverage {
-    let resolved = direct_child(signature, XMLDSIG_NAMESPACE, "SignedInfo")
+    let scopes = direct_child(signature, XMLDSIG_NAMESPACE, "SignedInfo")
         .map(|signed_info| {
             direct_children(signed_info, XMLDSIG_NAMESPACE, "Reference")
                 .take(context.limits.max_references_per_signature)
                 .enumerate()
                 .map(|(position, node)| parse_reference(node, position))
-                .filter_map(|reference| resolve_reference(context, &reference))
-                .map(|node| node.id())
+                .filter_map(|reference| {
+                    let node = resolve_reference(context, &reference)?;
+                    Some(effective_node_set(signature, &reference, node))
+                })
                 .collect()
         })
         .unwrap_or_default();
@@ -85,7 +89,7 @@ pub fn signature_coverage(
         }
     });
     SignatureCoverage {
-        resolved,
+        scopes,
         scope_complete: checks
             .iter()
             .any(|check| check.code == CheckCode::ReferenceScopeComplete),
@@ -93,11 +97,10 @@ pub fn signature_coverage(
     }
 }
 
-/// Whether a resolved reference set covers one element: the element itself, or
-/// any ancestor of it, is a resolved node.
-pub fn covers(resolved: &[NodeId], node: Node<'_, '_>) -> bool {
-    node.ancestors()
-        .any(|candidate| resolved.contains(&candidate.id()))
+/// Whether a signature's references cover one element: it lies inside the
+/// effective node set of at least one of them.
+pub fn covers(scopes: &[ReferenceScope], node: Node<'_, '_>) -> bool {
+    scopes.iter().any(|scope| scope.covers(node))
 }
 
 /// One signature, as the coverage pass sees it.
@@ -129,8 +132,8 @@ fn containing_document<'a, 'input>(
 
 /// The per-document signature coverage of one dossier, in source order.
 ///
-/// Coverage is decided by **resolved references** and by the implemented
-/// e-dossier scope rules. Placement never grants coverage on its own: it
+/// Coverage is decided by **what the resolved references actually digest**
+/// and by the implemented e-dossier scope rules. Placement never grants coverage on its own: it
 /// selects which mandated set applies, and a signature whose mandated set is
 /// incomplete covers nothing. The result is deliberately independent of every
 /// cryptographic outcome — a document covered by a signature that does not
@@ -163,7 +166,7 @@ pub(crate) fn document_coverage<'a, 'input>(
                 scope: SignatureScope::Unknown,
                 verdict: Verdict::Indeterminate,
                 coverage: SignatureCoverage {
-                    resolved: Vec::new(),
+                    scopes: Vec::new(),
                     scope_complete: false,
                     undetermined: Some(
                         "the signature was not examined because the dossier is over the signature limit",
@@ -216,20 +219,20 @@ pub(crate) fn document_coverage<'a, 'input>(
             let Some(signature_index) = source.signature_index else {
                 continue;
             };
-            let resolved = &source.coverage.resolved;
+            let scopes = &source.coverage.scopes;
             let via = match source.scope {
                 // Direct: placed in *this* document, and its references
                 // resolve to this document's profile and payload object.
                 SignatureScope::Document
                     if source.node.parent() == Some(node)
-                        && covers(resolved, profile)
-                        && payload.is_some_and(|object| covers(resolved, object)) =>
+                        && covers(scopes, profile)
+                        && payload.is_some_and(|object| covers(scopes, object)) =>
                 {
                     CoverageVia::Direct
                 }
                 // Through the frame: the dossier-level signature's references
                 // resolve to `es:Documents`, or to an ancestor of it.
-                SignatureScope::Dossier if covers(resolved, node) => CoverageVia::Frame,
+                SignatureScope::Dossier if covers(scopes, node) => CoverageVia::Frame,
                 _ => continue,
             };
             covered_by.push(CoveringSignature {

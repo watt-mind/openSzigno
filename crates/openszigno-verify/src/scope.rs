@@ -6,11 +6,11 @@
 //! defence against XML signature wrapping.
 
 use openszigno_core::XMLDSIG_NAMESPACE;
-use openszigno_core::roxmltree::{Node, NodeId};
+use openszigno_core::roxmltree::Node;
 
 use crate::codes::{Check, CheckCode};
 use crate::dsig::{Context, XADES_NAMESPACES, direct_child, direct_children, text_of};
-use crate::references::Reference;
+use crate::references::{Reference, effective_node_sets};
 use crate::report::SignatureScope;
 
 /// `ds:Reference/@Type` values that announce a `SignedProperties` reference.
@@ -179,20 +179,24 @@ pub(crate) fn reference_scope_check(
     }
 
     if xades.is_some() {
-        // Decided by resolution: a reference that resolves to the
-        // `SignedProperties` element, or to any ancestor of it (the
-        // `QualifyingProperties` or the `ds:Object` around it), covers it.
+        // Decided by what the references actually digest: a reference whose
+        // effective node set contains the `SignedProperties` element covers
+        // it, whether it resolved to that element or to an ancestor still
+        // holding it after the transforms.
         required.push((
             "xades:SignedProperties",
             signed_properties(signature).into_iter().collect(),
         ));
     }
 
-    let covered: Vec<NodeId> = resolved.iter().flatten().map(|node| node.id()).collect();
-    let is_covered = |node: Node<'_, '_>| {
-        node.ancestors()
-            .any(|candidate| covered.contains(&candidate.id()))
-    };
+    // Coverage is membership of a reference's *effective* node set, not of
+    // the subtree it resolved to. The enveloped-signature transform removes
+    // this signature from the set (XMLDSig 1.1 clause 6.6.4), so a `URI=""`
+    // reference carrying it digests nothing inside the signature and covers
+    // neither the `xades:SignedProperties` nor the profile object, both of
+    // which live there.
+    let scopes = effective_node_sets(signature, references, resolved);
+    let is_covered = |node: Node<'_, '_>| scopes.iter().any(|scope| scope.covers(node));
 
     let mut missing: Vec<&'static str> = Vec::new();
     for (name, candidates) in required {

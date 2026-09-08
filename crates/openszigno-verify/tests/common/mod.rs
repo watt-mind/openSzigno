@@ -20,6 +20,7 @@
 //! | [`timestamps`] | RFC 3161 timestamp tokens from a synthetic TSA. |
 //! | [`cms`] | Synthetic CRLs and OCSP responses. |
 //! | [`trustlist`] | A synthetic ETSI TS 119 612 trusted list. |
+//! | [`harness`] | The end-to-end verification harness the `verify*` suites share. |
 //!
 //! Every item is re-exported here, so existing `use common::{...}` imports in
 //! the test suites keep compiling unchanged regardless of which file an item
@@ -36,6 +37,7 @@
 
 pub mod cms;
 pub mod dossier;
+pub mod harness;
 pub mod keys;
 pub mod pki;
 pub mod signer;
@@ -44,6 +46,7 @@ pub mod trustlist;
 
 pub use cms::*;
 pub use dossier::*;
+pub use harness::*;
 pub use pki::*;
 pub use signer::*;
 pub use timestamps::*;

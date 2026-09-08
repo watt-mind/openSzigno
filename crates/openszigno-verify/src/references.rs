@@ -8,7 +8,7 @@
 //! filesystem.
 
 use openszigno_core::XMLDSIG_NAMESPACE;
-use openszigno_core::roxmltree::Node;
+use openszigno_core::roxmltree::{Node, NodeId};
 use sha2::{Digest as _, Sha256, Sha384, Sha512};
 
 use crate::c14n::{C14nAlgorithm, NodeSet};
@@ -27,6 +27,119 @@ pub(crate) struct Reference {
     pub(crate) transforms: Vec<(String, Vec<String>)>,
     pub(crate) digest_uri: String,
     pub(crate) digest_value: String,
+}
+
+/// The effective node set of one `ds:Reference`: the nodes its digest
+/// actually covers, once the transform chain has been applied.
+///
+/// Resolution alone does not answer that question. A transform can *remove*
+/// nodes from the set that was dereferenced, and the enveloped-signature
+/// transform always does: XMLDSig 1.1 clause 6.6.4 says it "removes the whole
+/// `Signature` element containing T from the digest calculation of the
+/// `Reference` element containing T". A reference to the whole document that
+/// carries it therefore digests nothing inside its own signature — not the
+/// `xades:SignedProperties`, not the signature's profile `ds:Object` — and
+/// must never be allowed to satisfy a scope requirement about them.
+///
+/// This is the one place that rule is expressed. The reference-scope check,
+/// the countersignature binding and the document-coverage report all decide
+/// coverage through [`ReferenceScope::covers`], so the three cannot disagree.
+#[derive(Clone, Debug)]
+pub struct ReferenceScope {
+    /// The node the reference resolved to, and the root of everything it can
+    /// cover. `None` when the transform chain is one this build cannot model,
+    /// which covers nothing rather than something guessed.
+    apex: Option<NodeId>,
+    /// Subtrees the transform chain removed from the set.
+    excluded: Vec<NodeId>,
+    /// The chain ended as an octet stream over the apex's text (`base64`), so
+    /// no element structure below the apex is covered.
+    octets: bool,
+}
+
+impl ReferenceScope {
+    /// A scope that covers nothing at all.
+    pub const fn nothing() -> Self {
+        Self {
+            apex: None,
+            excluded: Vec::new(),
+            octets: false,
+        }
+    }
+
+    /// Whether this reference's effective node set contains `node`.
+    ///
+    /// Containment, minus exclusions: `node` is the apex or a descendant of
+    /// it, and no removed subtree lies on the path from `node` to the document
+    /// root. An exclusion *above* the apex removes the apex itself, so the
+    /// whole ancestor chain is examined, not only its part below the apex.
+    pub fn covers(&self, node: Node<'_, '_>) -> bool {
+        let Some(apex) = self.apex else {
+            return false;
+        };
+        if node
+            .ancestors()
+            .any(|candidate| self.excluded.contains(&candidate.id()))
+        {
+            return false;
+        }
+        if !node.ancestors().any(|candidate| candidate.id() == apex) {
+            return false;
+        }
+        // A `base64` chain digests the decoded text of the apex, so it binds
+        // that node's content and nothing about the structure beneath it: a
+        // child element of a base64-referenced object is not covered, because
+        // rearranging the element tree inside it need not change the octets.
+        !self.octets || node.id() == apex
+    }
+}
+
+/// The effective node set of one resolved reference.
+///
+/// `signature` is the `ds:Signature` the reference is written in, which is the
+/// element the enveloped-signature transform removes — never some other
+/// signature, and never the signature a countersignature attests.
+pub(crate) fn effective_node_set(
+    signature: Node<'_, '_>,
+    reference: &Reference,
+    resolved: Node<'_, '_>,
+) -> ReferenceScope {
+    let mut scope = ReferenceScope {
+        apex: Some(resolved.id()),
+        excluded: Vec::new(),
+        octets: false,
+    };
+    for (uri, _) in &reference.transforms {
+        match Transform::from_uri(uri) {
+            Some(Transform::EnvelopedSignature) => scope.excluded.push(signature.id()),
+            // Canonicalization chooses how the set is serialized, never which
+            // nodes are in it.
+            Some(Transform::Canonicalization(_)) => {}
+            Some(Transform::Base64) => scope.octets = true,
+            // Outside the allowlist. The signature already fails
+            // `transform_not_allowed`, and what the chain would have selected
+            // is unknown, so it is credited with nothing.
+            None => return ReferenceScope::nothing(),
+        }
+    }
+    scope
+}
+
+/// The effective node set of every reference that resolved, in reference
+/// order, for the scope, binding and coverage rules to share.
+pub(crate) fn effective_node_sets(
+    signature: Node<'_, '_>,
+    references: &[Reference],
+    resolved: &[Option<Node<'_, '_>>],
+) -> Vec<ReferenceScope> {
+    references
+        .iter()
+        .zip(resolved)
+        .map(|(reference, node)| match node {
+            Some(node) => effective_node_set(signature, reference, *node),
+            None => ReferenceScope::nothing(),
+        })
+        .collect()
 }
 
 /// Recompute one reference digest.
@@ -61,6 +174,20 @@ pub(crate) fn digest_reference(
         let transform = Transform::from_uri(uri).ok_or(())?;
         value = match (transform, value) {
             (Transform::EnvelopedSignature, Value::Nodes(mut set)) => {
+                // XMLDSig 1.1 clause 6.6.4 removes the whole `ds:Signature`
+                // containing this reference. When the reference selected
+                // something inside that signature, the removal leaves the
+                // empty node set: there is nothing left to digest, and this
+                // build refuses such a reference rather than digesting the
+                // empty octet string, so that what a reference *digests* and
+                // what it *covers* (`ReferenceScope`) never disagree.
+                if set
+                    .apex()
+                    .ancestors()
+                    .any(|node| node.id() == signature.id())
+                {
+                    return Err(());
+                }
                 set.exclude(signature);
                 Value::Nodes(set)
             }

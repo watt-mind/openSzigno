@@ -489,7 +489,7 @@ pub(super) fn render_signature(spec: &SigSpec, namespace: &str) -> String {
 
     let xades_object = if spec.include_xades {
         format!(
-            "<ds:Object><xades:QualifyingProperties xmlns:xades=\"{}\" Target=\"#{}\">\
+            "<ds:Object Id=\"xadesobj-{tag}\"><xades:QualifyingProperties xmlns:xades=\"{}\" Target=\"#{}\">\
 <xades:SignedProperties Id=\"sp-{tag}\"><xades:SignedSignatureProperties>\
 {signed_properties}\
 </xades:SignedSignatureProperties></xades:SignedProperties>{unsigned}\

@@ -880,7 +880,7 @@ The split is internal; the crate's public API is unchanged.
 | --- | --- |
 | `lib.rs` | The `verify` entry point: the run's `Context`, the per-signature loop through stages A to F, and the dossier-level assembly (container timestamps, coverage, counts, verdict). |
 | `dsig` | The shared `Context` and the small XML helpers every stage is built from, plus re-exports of the items that used to live here. |
-| `references` | One `ds:Reference`: parsing, same-document resolution on the validated ID space, the transform allowlist and its application, and digest recomputation. |
+| `references` | One `ds:Reference`: parsing, same-document resolution on the validated ID space, the transform allowlist and its application, the effective node set (`ReferenceScope`) every coverage rule shares, and digest recomputation. |
 | `scope` | Placement classification (`Placement`, `placement_of`), the mandated e-dossier reference sets, and `reference_scope_check`. |
 | `countersign` | Countersignature detection, the binding check, and the reported role, parent and `countersigns` set. |
 | `signature` | The per-signature driver (stages A and B): `signed_info.rs` parses `ds:SignedInfo` and applies the signature-level algorithm policy, `collect.rs` gathers the timestamp tokens and the octets each one covers, and `mod.rs` keeps signer selection and `ds:SignatureValue` verification. |
@@ -917,10 +917,46 @@ semantics rather than on what the signature claims about itself.
 | the `ds:Signature` inside an `xades:CounterSignature` | `countersignature` | the countersigned signature's `ds:SignatureValue`, its own `xades:SignedProperties`, and its own signature-profile object **when it carries one**. Nothing about documents: a countersignature attests the parent signature, not the payload. See [Countersignatures](#countersignatures). |
 | any other nesting | `unknown` | undefined. This is the *unsupported placement* state; the mandated set is `reference_scope_unknown`. |
 
-A reference covers a required element when the element is the resolved node or
-a descendant of it, so a `URI=""` reference covers everything, and a reference
-to a `ds:Object` covers what it wraps. Two rules follow from what real
-dossiers actually contain:
+#### The effective node set
+
+A reference covers a required element when that element is in the reference's
+**effective node set**: what the reference actually digests, once its transform
+chain has been applied to the node set it dereferenced. Resolution alone does
+not answer the question, because a transform can *remove* nodes from that set.
+
+| Transform | Effect on membership |
+| --- | --- |
+| enveloped-signature | Removes the whole `ds:Signature` the reference is written in. XMLDSig 1.1 clause 6.6.4: it "removes the whole `Signature` element containing T from the digest calculation of the `Reference` element containing T". |
+| the canonicalization algorithms | None. Canonicalization chooses how the set is serialized, never which nodes are in it. |
+| base64 | The reference becomes an octet stream over the resolved node's text, so it covers that node and no element structure beneath it: rearranging the elements inside a base64-referenced object need not change the octets. |
+
+Coverage is then containment minus exclusion: the required element is the
+resolved node or a descendant of it, and no removed subtree lies on the path
+from it to the document root — an exclusion *above* the resolved node removes
+that node too. So a `URI=""` reference covers everything **except** its own
+signature, and a reference to a `ds:Object` covers what it wraps unless the
+transforms took it away.
+
+The consequence worth stating plainly: **a whole-document enveloped reference
+covers nothing inside the signature it belongs to.** The
+`xades:SignedProperties` — which carries the `SigningCertificate` binding — and
+the signature's own profile `ds:Object` both live there, so a signature that
+relies on `URI=""` alone is `reference_scope_incomplete` and names them. Each
+needs a reference of its own, which is what real dossiers write. A reference
+whose enveloped transform removes everything it selected is refused outright
+(`reference_digest_mismatch`) rather than digested as the empty octet string.
+
+One function decides this, in `references::ReferenceScope`, and the
+reference-scope check, the [countersignature binding](#countersignatures) and
+the [document coverage](#document-coverage) report all call it, so the three
+cannot disagree about what a reference covers. At the binding it matters in one
+direction only: the enveloped-signature transform removes the signature the
+reference is written in, and an enveloped countersignature sits *inside* the
+signature it attests, so its parent's `ds:SignatureValue` is never removed —
+but a signature that references a `ds:SignatureValue` nested *within itself*
+and then removes itself digests none of it, and binds nothing.
+
+Two further rules follow from what real dossiers actually contain:
 
 - **The signature-profile object is located by content, never by position.**
   The requirement is satisfied by a reference that resolves either to the
@@ -968,9 +1004,10 @@ container's own rule for what that signature must reference was not met.
 | `direct` | A document-level signature placed in **that** `es:Document`, whose reference scope is complete and whose references resolve to that document's `es:DocumentProfile` and its payload `ds:Object`. |
 | `frame` | A dossier-level signature whose reference scope is complete and whose references resolve to `es:Documents`, or to an ancestor of it, so the document sits inside what was signed. |
 
-An element counts as covered when it is a resolved node or a descendant of
-one, which is exactly the rule the scope check applies. A document-level
-signature covers only the document it is placed in.
+An element counts as covered when it is inside the [effective node
+set](#the-effective-node-set) of one of the signature's references, which is
+exactly the rule — and the same code — the scope check applies. A
+document-level signature covers only the document it is placed in.
 
 The states, per document:
 
