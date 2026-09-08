@@ -31,6 +31,15 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
   re-exports; every existing `use common::{...}` import keeps compiling
   unchanged. Code moved verbatim, no behaviour change. See
   [docs/testing.md](docs/testing.md#test-layout).
+- `crates/openszigno-core/src/decrypt.rs` (1008 lines) was split into
+  `decrypt/mod.rs`, `cms.rs`, `ciphers.rs` and `keys.rs`, one module per
+  concern of the `encrypt` transform: CMS `ContentInfo`/`EnvelopedData`/
+  `RecipientInfo` parsing and key unwrap, content-cipher identification and
+  AES/3DES-CBC decryption, and recipient key loading and certificate
+  matching. Code moved verbatim; `DecryptOptions` and `RecipientKey` keep
+  their `openszigno_core::` paths, and every error code, message and test is
+  unchanged. Removed from `scripts/file-length-allowlist.txt`. See
+  [docs/architecture.md](docs/architecture.md#module-map-openszigno-core).
 
 ### Added
 
