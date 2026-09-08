@@ -11,21 +11,31 @@
 //!   URL read as one host while naming another, and it is also credential
 //!   material this tool has no business sending anywhere.
 //! - **No private destinations**, unless `--online-allow-private` says
-//!   otherwise: loopback, RFC 1918, link-local, unique-local, and the
-//!   `localhost` name. A dossier that could point the verifier at
-//!   `http://169.254.169.254/` or at a service on the operator's own subnet
-//!   would have turned a signature check into a port scanner and an SSRF
-//!   primitive.
+//!   otherwise. The list is exact: **loopback** (`127.0.0.0/8`, `::1`),
+//!   **RFC 1918 private** (`10/8`, `172.16/12`, `192.168/16`),
+//!   **link-local** (`169.254/16`, `fe80::/10`), **unique-local**
+//!   (`fc00::/7`), **unspecified** (`0.0.0.0`, `::`, and the rest of
+//!   `0.0.0.0/8`), **broadcast** (`255.255.255.255`), **multicast**
+//!   (`224/4`, `ff00::/8`), the **cloud metadata** addresses
+//!   `169.254.169.254` and `fd00:ec2::254`, and the name `localhost` (and any
+//!   `*.localhost`). An IPv4-mapped IPv6 address is judged as the IPv4
+//!   address it carries, so it is not a way round any of the above. A dossier
+//!   that could point the verifier at `http://169.254.169.254/` or at a
+//!   service on the operator's own subnet would have turned a signature check
+//!   into a port scanner and an SSRF primitive.
 //! - **The resolved address is checked too.** A public name that resolves to
 //!   `127.0.0.1` — DNS rebinding, or simply a hostile zone — is refused on the
-//!   address, not on the name. The lookup happens here and the connection is
-//!   made by `ureq`, which resolves again, so this is a mitigation and not a
-//!   proof; it is one of the reasons the flag exists at all.
+//!   address, not on the name. Every hop is checked: the URL out of the
+//!   certificate and each redirect target the fetcher follows go through this
+//!   module before a socket is opened. The lookup happens here and the
+//!   connection is made by `ureq`, which resolves again, so this is a
+//!   mitigation and not a proof; it is one of the reasons the flag exists at
+//!   all.
 //!
 //! Everything in this module is about *reaching* bytes. Nothing here decides
 //! whether the bytes are believed: that is the verifier's, offline.
 
-use std::net::{IpAddr, Ipv4Addr, ToSocketAddrs as _};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, ToSocketAddrs as _};
 
 /// Why a destination was not contacted.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -42,8 +52,20 @@ const REFUSED_SCHEME: &str = "the URL scheme is not http or https";
 const REFUSED_NO_HOST: &str = "the URL names no host";
 const REFUSED_USERINFO: &str = "the URL carries userinfo before the host";
 const REFUSED_LOCALHOST: &str = "the host is localhost, which is not a destination a certificate legitimately publishes; pass --online-allow-private to permit it";
-const REFUSED_LITERAL: &str = "the host is a loopback, private, link-local or unique-local address; pass --online-allow-private to permit it";
-const REFUSED_RESOLVED: &str = "the host resolves to a loopback, private, link-local or unique-local address; pass --online-allow-private to permit it";
+const REFUSED_LITERAL: &str = "the host is a loopback, private, link-local, unique-local, unspecified or multicast address; pass --online-allow-private to permit it";
+const REFUSED_RESOLVED: &str = "the host resolves to a loopback, private, link-local, unique-local, unspecified or multicast address; pass --online-allow-private to permit it";
+const REFUSED_METADATA_LITERAL: &str = "the host is a cloud instance metadata address, which no certificate legitimately publishes; pass --online-allow-private to permit it";
+const REFUSED_METADATA_RESOLVED: &str = "the host resolves to a cloud instance metadata address, which no certificate legitimately publishes; pass --online-allow-private to permit it";
+
+/// The IPv4 link-local address every major cloud answers instance metadata on,
+/// credentials included. It is inside `169.254.0.0/16` and so already refused;
+/// it is named separately because a refusal that says *why* is the difference
+/// between an operator shrugging and an operator looking at where their
+/// dossier came from.
+const METADATA_V4: Ipv4Addr = Ipv4Addr::new(169, 254, 169, 254);
+/// The IPv6 instance metadata address (`fd00:ec2::254`), likewise inside a
+/// range already refused.
+const METADATA_V6: Ipv6Addr = Ipv6Addr::new(0xfd00, 0x0ec2, 0, 0, 0, 0, 0, 0x0254);
 
 /// Whether one URL may be contacted.
 ///
@@ -68,10 +90,10 @@ pub(super) fn permitted(url: &str, allow_private: bool) -> Result<(), Refusal> {
         return Err(Refusal::Refused(REFUSED_LOCALHOST));
     }
     if let Some(address) = literal_address(host) {
-        return if is_restricted(address) {
-            Err(Refusal::Refused(REFUSED_LITERAL))
-        } else {
-            Ok(())
+        return match verdict(address) {
+            Verdict::Metadata => Err(Refusal::Refused(REFUSED_METADATA_LITERAL)),
+            Verdict::Restricted => Err(Refusal::Refused(REFUSED_LITERAL)),
+            Verdict::Permitted => Ok(()),
         };
     }
     let port = port.unwrap_or(if scheme == "https" { 443 } else { 80 });
@@ -81,8 +103,10 @@ pub(super) fn permitted(url: &str, allow_private: bool) -> Result<(), Refusal> {
     let mut any = false;
     for address in resolved {
         any = true;
-        if is_restricted(address.ip()) {
-            return Err(Refusal::Refused(REFUSED_RESOLVED));
+        match verdict(address.ip()) {
+            Verdict::Metadata => return Err(Refusal::Refused(REFUSED_METADATA_RESOLVED)),
+            Verdict::Restricted => return Err(Refusal::Refused(REFUSED_RESOLVED)),
+            Verdict::Permitted => {}
         }
     }
     if any {
@@ -119,27 +143,39 @@ fn literal_address(host: &str) -> Option<IpAddr> {
     host.parse::<IpAddr>().ok()
 }
 
-/// Whether an address is one `--online` refuses to contact by default.
+/// What the policy makes of one address.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Verdict {
+    Permitted,
+    /// Refused by range.
+    Restricted,
+    /// Refused, and it is an instance metadata address — worth saying,
+    /// because it is the destination an SSRF actually wants.
+    Metadata,
+}
+
+/// Judge one address.
 ///
 /// The ranges are the ones that make an SSRF worth attempting: the machine
 /// itself, the operator's own network, the link-local range that carries cloud
-/// metadata services, and the IPv6 equivalents of each.
-fn is_restricted(address: IpAddr) -> bool {
-    match address {
-        IpAddr::V4(v4) => is_restricted_v4(v4),
+/// metadata services, the group addresses that reach more than one host, and
+/// the IPv6 equivalents of each.
+fn verdict(address: IpAddr) -> Verdict {
+    // An IPv4-mapped address is an IPv4 destination written the other way
+    // round, and must not be a way past the IPv4 rules.
+    let address = match address {
         IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
-            // An IPv4-mapped address is an IPv4 destination written the other
-            // way round, and must not be a way past the IPv4 rules.
-            Some(mapped) => is_restricted_v4(mapped),
-            None => {
-                v6.is_loopback()
-                    || v6.is_unspecified()
-                    // fc00::/7, unique local (RFC 4193).
-                    || (v6.segments()[0] & 0xfe00) == 0xfc00
-                    // fe80::/10, link local (RFC 4291).
-                    || (v6.segments()[0] & 0xffc0) == 0xfe80
-            }
+            Some(mapped) => IpAddr::V4(mapped),
+            None => IpAddr::V6(v6),
         },
+        other => other,
+    };
+    match address {
+        IpAddr::V4(v4) if v4 == METADATA_V4 => Verdict::Metadata,
+        IpAddr::V6(v6) if v6 == METADATA_V6 => Verdict::Metadata,
+        IpAddr::V4(v4) if is_restricted_v4(v4) => Verdict::Restricted,
+        IpAddr::V6(v6) if is_restricted_v6(v6) => Verdict::Restricted,
+        _ => Verdict::Permitted,
     }
 }
 
@@ -149,15 +185,27 @@ fn is_restricted_v4(address: Ipv4Addr) -> bool {
         || address.is_link_local()
         || address.is_unspecified()
         || address.is_broadcast()
+        || address.is_multicast()
         // 0.0.0.0/8, "this network", which some stacks route to the host.
         || address.octets()[0] == 0
 }
 
-/// The `--online-allow-private` counterpart used only by tests and by the
-/// documentation: the IPv6 literal forms this module understands.
+fn is_restricted_v6(address: Ipv6Addr) -> bool {
+    address.is_loopback()
+        || address.is_unspecified()
+        || address.is_multicast()
+        // fc00::/7, unique local (RFC 4193).
+        || (address.segments()[0] & 0xfe00) == 0xfc00
+        // fe80::/10, link local (RFC 4291).
+        || (address.segments()[0] & 0xffc0) == 0xfe80
+}
+
+/// Whether a host names an address the policy refuses. Tests only: the policy
+/// itself goes through [`permitted`], which is the whole rule and not just the
+/// address part of it.
 #[cfg(test)]
 fn restricted_literal(host: &str) -> bool {
-    literal_address(host).is_some_and(is_restricted)
+    literal_address(host).is_some_and(|address| verdict(address) != Verdict::Permitted)
 }
 
 pub(super) fn scheme_of(url: &str) -> Option<&str> {
@@ -285,6 +333,12 @@ mod tests {
             "http://[fd00::1]/ca.crl",
             "http://[fe80::1]/ca.crl",
             "http://[::ffff:127.0.0.1]/ca.crl",
+            "http://[::ffff:10.0.0.1]/ca.crl",
+            "http://[::]/ca.crl",
+            "http://255.255.255.255/ca.crl",
+            "http://224.0.0.1/ca.crl",
+            "http://239.255.255.250/ca.crl",
+            "http://[ff02::1]/ca.crl",
             "http://localhost/ca.crl",
             "http://LOCALHOST:8080/ca.crl",
         ] {
@@ -304,6 +358,25 @@ mod tests {
         assert_eq!(permitted("http://[2001:db8::1]/ca.crl", false), Ok(()));
     }
 
+    /// The metadata addresses are refused, and the refusal says which they
+    /// are: it is the destination an SSRF is usually after, and an operator
+    /// who sees it named in a report has learned something specific.
+    #[test]
+    fn the_cloud_metadata_addresses_are_named_when_refused() {
+        for url in [
+            "http://169.254.169.254/latest/meta-data",
+            "http://[fd00:ec2::254]/latest/meta-data",
+            "http://[::ffff:169.254.169.254]/latest/meta-data",
+        ] {
+            assert_eq!(
+                permitted(url, false),
+                Err(Refusal::Refused(REFUSED_METADATA_LITERAL)),
+                "{url}"
+            );
+            assert_eq!(permitted(url, true), Ok(()), "{url} with the flag");
+        }
+    }
+
     #[test]
     fn the_restricted_ranges_are_the_documented_ones() {
         assert!(restricted_literal("127.0.0.1"));
@@ -311,8 +384,19 @@ mod tests {
         assert!(restricted_literal("fc00::1"));
         assert!(restricted_literal("fdff::1"));
         assert!(restricted_literal("fe80::1"));
+        assert!(restricted_literal("10.0.0.1"));
+        assert!(restricted_literal("172.16.0.1"));
+        assert!(restricted_literal("192.168.0.1"));
+        assert!(restricted_literal("169.254.169.254"));
+        assert!(restricted_literal("fd00:ec2::254"));
+        assert!(restricted_literal("224.0.0.1"));
+        assert!(restricted_literal("ff02::1"));
+        assert!(restricted_literal("0.0.0.0"));
+        assert!(restricted_literal("::"));
+        assert!(restricted_literal("255.255.255.255"));
         assert!(!restricted_literal("2606:4700::1111"));
         assert!(!restricted_literal("8.8.8.8"));
+        assert!(!restricted_literal("172.32.0.1"));
     }
 
     #[test]

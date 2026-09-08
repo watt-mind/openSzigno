@@ -133,6 +133,16 @@ pub struct ChainEntry {
     pub trust_anchor_origin: Option<crate::trust::TrustAnchorOrigin>,
     /// This certificate's revocation answer. `null` until stage E has run.
     pub revocation: Option<crate::revocation::CertificateRevocation>,
+    /// The certificate itself, so a caller can act on *which* certificate a
+    /// validated path is made of rather than on a name and a serial.
+    ///
+    /// Never serialised: the report is a summary and a chain of DER blobs is
+    /// not one. Its one consumer is the CLI's `--online` fetcher, which is
+    /// only allowed to contact a URL published by a certificate on a path this
+    /// run actually validated — see
+    /// [`VerifyReport::validated_path_certificates`](crate::VerifyReport::validated_path_certificates).
+    #[serde(skip)]
+    pub der: Vec<u8>,
 }
 
 /// A parsed certificate plus the DER it came from and where it was found.
@@ -177,6 +187,7 @@ impl ParsedCertificate {
             source: self.source,
             trust_anchor_origin: None,
             revocation: None,
+            der: self.der.clone(),
         }
     }
 

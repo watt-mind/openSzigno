@@ -155,10 +155,33 @@ pub(crate) fn verify_command(args: &VerifyArgs) -> CliResult {
                 .iter()
                 .map(|anchor| anchor.der.clone())
                 .collect();
-            let fetched =
-                fetcher.fill_gaps(&certificates, &anchors, &data, clock.unix_time(), &limits);
+            // An entirely offline pre-pass, whose only product is the list of
+            // certificates this run actually validated a path to a configured
+            // anchor for. Fetching is allowed for those and for nothing else,
+            // so a certificate parked elsewhere in the XML — however well it
+            // is signed by another certificate in the same file — cannot make
+            // this process open a connection. It costs one extra verification
+            // pass, and only under `--online`.
+            let eligible = {
+                let mut prepass = VerifyOptions::new(clock, trust, &store, &backend);
+                prepass.parse = args.parse_options();
+                prepass.requested_time = args.at.as_ref().map(|time| time.text.clone());
+                prepass.allow_legacy_algorithms = args.allow_legacy_algorithms;
+                verify_dossier(&bytes, &prepass)
+                    .map_err(|error| failure(input.clone(), CliError::structure(error)))?
+                    .validated_path_certificates()
+            };
+            let mut fetched = fetcher.fill_gaps(&online::GapRequest {
+                certificates: &certificates,
+                eligible: &eligible,
+                anchors: &anchors,
+                data: &data,
+                time: clock.unix_time(),
+                limits: &limits,
+            });
+            online_checks = std::mem::take(&mut fetched.checks);
             if let Some(directory) = &args.online_cache {
-                online::write_cache(directory, &fetched).map_err(|message| {
+                let notes = online::write_cache(directory, &fetched).map_err(|message| {
                     failure(
                         input.clone(),
                         CliError {
@@ -168,8 +191,8 @@ pub(crate) fn verify_command(args: &VerifyArgs) -> CliResult {
                         },
                     )
                 })?;
+                online_checks.extend(notes);
             }
-            online_checks = fetched.checks;
             // With no anchor configured nothing was fetched and nothing could
             // have been: revocation data is only fetched for a certificate on
             // a path to one. The reported policy says that rather than a bare

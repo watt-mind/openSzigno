@@ -9,13 +9,16 @@
 //!
 //! # The policy, and why each part of it is there
 //!
-//! - **Only for certificates the run actually trusts the shape of.** A URL is
-//!   contacted only for a certificate that sits on a candidate path ending at
-//!   a configured trust anchor. Checking that an embedded issuer signed an
-//!   embedded certificate proves nothing — an attacker who writes the dossier
+//! - **Only for certificates the run actually validated a path for.** A URL is
+//!   contacted only for a certificate on a certification path the verifier
+//!   built to a **configured trust anchor**, for a signature or a timestamp it
+//!   was evaluating — the set `VerifyReport::validated_path_certificates`
+//!   returns from an offline pre-pass. Checking that an embedded issuer signed
+//!   an embedded certificate proves nothing — whoever writes the dossier
 //!   writes both — so without this rule any file handed to the tool could
-//!   choose the tool's next network destination. With no anchors configured
-//!   nothing is fetched at all, and the report says so.
+//!   choose the tool's next network destination, and a certificate parked
+//!   somewhere else in the XML could generate traffic of its own. With no
+//!   anchors configured nothing is fetched at all, and the report says so.
 //! - **Only URLs the certificates themselves publish.** A CRL distribution
 //!   point and an AIA OCSP responder are fields a CA wrote into a certificate
 //!   that a trust anchor signed. No URL is ever taken from the dossier's XML,
@@ -52,7 +55,6 @@
 mod destination;
 
 use std::collections::BTreeSet;
-use std::fs;
 use std::path::Path;
 use std::time::Duration;
 
@@ -63,6 +65,8 @@ use openszigno_verify::revocation::{
 use openszigno_verify::{Check, CheckCode, MAX_REVOCATION_ITEM_BYTES, VerifyLimits};
 
 use destination::{Refusal, host_of, permitted, resolve, scheme_of};
+
+use crate::extract::output_dir::{OpenError, OutputDir};
 
 /// How long to wait for the connection itself.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -82,13 +86,6 @@ const MAX_REDIRECTS: usize = 3;
 /// one dossier can generate.
 const MAX_CERTIFICATES: usize = 32;
 const MAX_URLS_PER_CERTIFICATE: usize = 4;
-/// The largest number of issuer-signature checks the trust reachability scan
-/// will perform, so that a bag of name-matching certificates cannot turn the
-/// scan itself into the expensive part of a run.
-const MAX_ANCHOR_LINK_CHECKS: usize = 256;
-/// How far the reachability scan will walk away from an anchor. It matches the
-/// verifier's own `max_chain_length`.
-const MAX_ANCHOR_DEPTH: usize = 8;
 
 /// What one run fetched, and what it could not.
 #[derive(Debug, Default)]
@@ -147,6 +144,26 @@ impl FailureClass {
     }
 }
 
+/// What one `--online` run may fetch, and for whom.
+#[derive(Clone, Copy)]
+pub struct GapRequest<'a> {
+    /// Every certificate the run has: the dossier's, the trust store's
+    /// anchors, and its intermediates. Used to find an issuer and to ask the
+    /// verifier's own coverage question, never as a licence to fetch.
+    pub certificates: &'a [Vec<u8>],
+    /// The only certificates a URL may be fetched for: those on a path the
+    /// verifier validated to a configured trust anchor, for a signature or a
+    /// timestamp under evaluation. See
+    /// [`openszigno_verify::VerifyReport::validated_path_certificates`].
+    pub eligible: &'a [Vec<u8>],
+    /// The configured trust anchors, needed for the RFC 6960 section 2.2
+    /// trusted-responder model when coverage is asked.
+    pub anchors: &'a [Vec<u8>],
+    pub data: &'a RevocationData<'a>,
+    pub time: i64,
+    pub limits: &'a VerifyLimits,
+}
+
 /// The transport, configured once so that every fetch in a run is bounded the
 /// same way.
 pub struct Fetcher {
@@ -188,23 +205,21 @@ impl Fetcher {
 
     /// Fetch whatever the caller's own material does not already cover.
     ///
-    /// `certificates` is every certificate the dossier and the trust material
-    /// carry; the issuer of each is looked up among them, because a
+    /// `request.certificates` is every certificate the dossier and the trust
+    /// material carry; the issuer of each is looked up among them, because a
     /// certificate whose issuer is not to hand cannot have a CRL or an OCSP
-    /// response checked against it anyway.
-    ///
-    /// `anchors` is what makes any of it happen. A certificate is fetched for
-    /// only when a candidate path from it reaches one of them, so a dossier
-    /// that chains to nothing the operator configured produces no traffic
-    /// whatsoever — not even a DNS lookup.
-    pub fn fill_gaps(
-        &self,
-        certificates: &[Vec<u8>],
-        anchors: &[Vec<u8>],
-        data: &RevocationData<'_>,
-        time: i64,
-        limits: &VerifyLimits,
-    ) -> Fetched {
+    /// response checked against it anyway. Being in that pool is *not* a
+    /// licence to fetch: only `request.eligible` is, and that is the set the
+    /// verifier's own offline pre-pass says it validated a path for.
+    pub fn fill_gaps(&self, request: &GapRequest<'_>) -> Fetched {
+        let GapRequest {
+            certificates,
+            eligible,
+            anchors,
+            data,
+            time,
+            limits,
+        } = *request;
         let parsed = dedup(
             certificates
                 .iter()
@@ -220,13 +235,13 @@ impl Fetcher {
             .filter_map(|der| ParsedCertificate::from_der(der, CertificateSource::TrustStore))
             .collect();
         let mut fetched = Fetched::default();
-        if anchors.is_empty() {
-            // Nothing to reach, so nothing to fetch. The report says why,
-            // through `revocation_policy` and every
+        if anchors.is_empty() || eligible.is_empty() {
+            // No anchor, or no path validated to one: nothing may be fetched
+            // for anything, and not one DNS lookup leaves the process. The
+            // report says why, through `revocation_policy` and every
             // `revocation_status_unknown` message.
             return fetched;
         }
-        let trusted = anchored_certificates(&parsed, &anchors);
         let mut crls_tried: BTreeSet<String> = BTreeSet::new();
         let mut ocsp_tried: BTreeSet<(String, String)> = BTreeSet::new();
         let mut budget = MAX_CERTIFICATES;
@@ -243,8 +258,9 @@ impl Fetcher {
             }
             // The gate. Everything below this line contacts the network on
             // behalf of this certificate, so this certificate has to be one
-            // the caller's own trust material vouches for.
-            if !trusted.contains(&subject.der) {
+            // the verifier put on a path it validated to a configured anchor,
+            // for a signature or a timestamp it was actually evaluating.
+            if !eligible.contains(&subject.der) {
                 continue;
             }
             let Some(issuer) = parsed.iter().find(|candidate| {
@@ -404,55 +420,6 @@ impl Fetcher {
     }
 }
 
-/// Every certificate that sits on a candidate path ending at a configured
-/// trust anchor.
-///
-/// This is deliberately *not* the verifier's `validate_path`: that answers
-/// about one leaf, for one purpose, and would refuse a timestamp authority's
-/// certificate under the signing purpose and vice versa. The question here is
-/// narrower and is only ever used to decide whether a URL may be contacted: is
-/// there a chain of real issuer signatures from this certificate up to
-/// something the operator configured? Whether the path is *acceptable* stays
-/// the verifier's answer to give, offline, afterwards.
-///
-/// The walk goes downwards from the anchors so that each issuer signature is
-/// checked at most once per candidate, and it is bounded twice over: by depth,
-/// and by the total number of signature checks.
-fn anchored_certificates(
-    parsed: &[ParsedCertificate],
-    anchors: &[ParsedCertificate],
-) -> BTreeSet<Vec<u8>> {
-    let mut trusted: BTreeSet<Vec<u8>> = anchors.iter().map(|anchor| anchor.der.clone()).collect();
-    let mut frontier: Vec<&ParsedCertificate> = anchors.iter().collect();
-    let mut checks = 0usize;
-    for _ in 0..MAX_ANCHOR_DEPTH {
-        let mut next: Vec<&ParsedCertificate> = Vec::new();
-        for issuer in &frontier {
-            for candidate in parsed {
-                if trusted.contains(&candidate.der) {
-                    continue;
-                }
-                if candidate.issuer_der() != issuer.subject_name_der() {
-                    continue;
-                }
-                checks += 1;
-                if checks > MAX_ANCHOR_LINK_CHECKS {
-                    return trusted;
-                }
-                if openszigno_verify::certs::verify_issued_by(candidate, issuer) {
-                    trusted.insert(candidate.der.clone());
-                    next.push(candidate);
-                }
-            }
-        }
-        if next.is_empty() {
-            break;
-        }
-        frontier = next;
-    }
-    trusted
-}
-
 fn classify_transport(error: ureq::Error) -> FailureClass {
     match error {
         ureq::Error::Timeout(_) => FailureClass::Timeout,
@@ -528,9 +495,36 @@ fn sanitize_url(url: &str) -> String {
 /// is which, and a re-run that fetches a fresher answer for the same question
 /// adds a file rather than being mistaken for the old one.
 ///
+/// # How it is written, and why not with `fs::write`
+///
+/// The cache directory is a path an operator gives on the command line, and
+/// the tool may be running unattended next to something that can write there.
+/// Path-based writing gets all three of the following wrong:
+///
+/// - a component of the path, or the final file, may be a **symlink**, and
+///   `create_dir_all` and `fs::write` follow both — a dangling symlink named
+///   after a content hash turns "write the cache" into "write wherever that
+///   points";
+/// - checking `Path::exists` and then writing is a **time-of-check /
+///   time-of-use** gap, and `fs::write` **truncates** whatever it finds, so
+///   losing the race means destroying a file;
+/// - two runs caching the same artefact at the same time must both succeed.
+///
+/// So the cache is written the way an extraction is: the directory is opened
+/// once with `O_DIRECTORY | O_NOFOLLOW`, walked one component at a time so no
+/// component is resolved through a link, and every file is created relative to
+/// that descriptor with `O_CREAT | O_EXCL | O_NOFOLLOW`. **Nothing is ever
+/// truncated or replaced.** A name that already holds exactly these bytes is
+/// the idempotent case and is left alone — which is also what a concurrent
+/// writer looks like from here. A name that holds something else, or that
+/// cannot be read back because it is a symlink, is reported as one
+/// `online_fetch_failed` with the class `cache_collision` and the run
+/// continues: a cache is an optimisation, and a strange file in it is not a
+/// reason to fail a verification that has already been done.
+///
 /// Nothing is ever deleted: the cache only grows, and an operator who wants it
 /// pruned knows more about their retention policy than this tool does.
-pub fn write_cache(directory: &Path, fetched: &Fetched) -> Result<(), String> {
+pub fn write_cache(directory: &Path, fetched: &Fetched) -> Result<Vec<Check>, String> {
     let ocsp_names: Vec<String> = fetched
         .ocsp
         .iter()
@@ -538,7 +532,15 @@ pub fn write_cache(directory: &Path, fetched: &Fetched) -> Result<(), String> {
         .map(|(item, cert_id)| format!("{cert_id}-{}", hex(&sha256(item))))
         .collect();
     let crl_names: Vec<String> = fetched.crls.iter().map(|item| hex(&sha256(item))).collect();
+    if fetched.crls.is_empty() && fetched.ocsp.is_empty() {
+        return Ok(Vec::new());
+    }
 
+    let root = OutputDir::open(directory).map_err(|error| match error {
+        OpenError::Unsafe(reason) => format!("the online cache path is not usable: {reason}"),
+        OpenError::Io(_) => "the online cache directory could not be created".to_owned(),
+    })?;
+    let mut notes = Vec::new();
     for (subdirectory, items, names) in [
         ("crls", &fetched.crls, &crl_names),
         ("ocsp", &fetched.ocsp, &ocsp_names),
@@ -546,19 +548,58 @@ pub fn write_cache(directory: &Path, fetched: &Fetched) -> Result<(), String> {
         if items.is_empty() {
             continue;
         }
-        let path = directory.join(subdirectory);
-        fs::create_dir_all(&path)
-            .map_err(|_| "the online cache directory could not be created".to_owned())?;
+        let target =
+            root.open_or_create_subdirectory(subdirectory)
+                .map_err(|error| match error {
+                    OpenError::Unsafe(reason) => {
+                        format!("the online cache path is not usable: {reason}")
+                    }
+                    OpenError::Io(_) => {
+                        "the online cache directory could not be created".to_owned()
+                    }
+                })?;
         for (item, name) in items.iter().zip(names) {
-            let file = path.join(format!("{name}.der"));
-            if file.exists() {
-                continue;
+            let name = format!("{name}.der");
+            match target.create_new_file(&name) {
+                Ok(mut file) => {
+                    use std::io::Write as _;
+
+                    file.write_all(item)
+                        .map_err(|_| "an online cache file could not be written".to_owned())?;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    // Either this artefact is already cached — the ordinary,
+                    // idempotent case, and what a concurrent writer looks like
+                    // — or the name holds something else. Only the bytes can
+                    // tell the two apart, and they are compared without
+                    // following a link.
+                    if target
+                        .read_file(&name)
+                        .is_ok_and(|existing| existing == *item)
+                    {
+                        continue;
+                    }
+                    notes.push(collision());
+                }
+                Err(_) => {
+                    return Err("an online cache file could not be written".to_owned());
+                }
             }
-            fs::write(&file, item)
-                .map_err(|_| "an online cache file could not be written".to_owned())?;
         }
     }
-    Ok(())
+    Ok(notes)
+}
+
+/// The check a refused cache write contributes.
+///
+/// `info`, like every other `online_fetch_failed`: the artefact was fetched
+/// and is in this run's answer, and failing to write a copy of it changes no
+/// verdict. No path is named, because a cache path may be private.
+fn collision() -> Check {
+    Check::info(
+        CheckCode::OnlineFetchFailed,
+        "caching a fetched revocation artefact failed (cache_collision: the cache already holds a different file, or a symlink, under that name; nothing was overwritten)",
+    )
 }
 
 fn sha256(bytes: &[u8]) -> [u8; 32] {
