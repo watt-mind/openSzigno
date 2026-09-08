@@ -87,20 +87,31 @@ pub(super) enum Unwrapped {
     UnsupportedAlgorithm(String),
 }
 
+/// Unwrap a `KeyTransRecipientInfo`'s encrypted content-encryption key.
+///
+/// `enc_key` is the RSA ciphertext, and it comes straight from the dossier: an
+/// attacker who can submit chosen dossiers and observe how long, or whether,
+/// this call fails controls the ciphertext in a Bleichenbacher/Marvin-style
+/// (RUSTSEC-2023-0071) chosen-ciphertext attack against PKCS#1 v1.5 key
+/// transport. Decryption is blinded (a fresh random factor masks the private
+/// exponentiation) to close the timing side-channel `rsa` 0.9's plain
+/// `decrypt` leaves open in its modular exponentiation; see `deny.toml` for
+/// what blinding does and does not mitigate here.
 pub(super) fn unwrap_key(
     recipient: &KeyTransRecipientInfo,
     private: &RsaPrivateKey,
 ) -> Result<Unwrapped, Error> {
     let algorithm = &recipient.key_enc_alg;
     let wrapped = recipient.enc_key.as_bytes();
+    let mut rng = rand_core::OsRng;
     let key = if algorithm.oid == RSA_ENCRYPTION {
         private
-            .decrypt(rsa::Pkcs1v15Encrypt, wrapped)
+            .decrypt_blinded(&mut rng, rsa::Pkcs1v15Encrypt, wrapped)
             .map_err(|_| decrypt_failed())?
     } else if algorithm.oid == RSAES_OAEP {
         match oaep_padding(algorithm)? {
             Some(padding) => private
-                .decrypt(padding, wrapped)
+                .decrypt_blinded(&mut rng, padding, wrapped)
                 .map_err(|_| decrypt_failed())?,
             None => return Ok(Unwrapped::UnsupportedAlgorithm(RSAES_OAEP.to_string())),
         }
