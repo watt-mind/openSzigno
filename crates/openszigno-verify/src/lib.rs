@@ -31,11 +31,16 @@
 pub mod c14n;
 pub mod certs;
 pub mod codes;
+pub mod countersign;
+pub mod coverage;
 pub mod dsig;
 pub mod estimestamp;
 pub mod policy;
+pub mod references;
 pub mod report;
 pub mod revocation;
+pub mod scope;
+pub mod signature;
 pub mod trust;
 pub mod trustlist;
 pub mod tsa;
