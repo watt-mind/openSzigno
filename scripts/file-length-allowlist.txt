@@ -7,10 +7,5 @@
 #
 # Reducing them is logic-adjacent work (splitting verification logic, not
 # moving code verbatim) and is owned by other tickets, not LAB-260.
-crates/openszigno-verify/src/certs.rs 1617
-crates/openszigno-verify/src/revocation.rs 1582
-crates/openszigno-verify/src/tsa.rs 1428
-crates/openszigno-verify/src/signature.rs 930
-crates/openszigno-verify/src/trustlist.rs 925
 crates/openszigno-verify/tests/revocation.rs 2110
 crates/openszigno-cli/tests/cli.rs 1611

@@ -872,21 +872,24 @@ The split is internal; the crate's public API is unchanged.
 | `references` | One `ds:Reference`: parsing, same-document resolution on the validated ID space, the transform allowlist and its application, and digest recomputation. |
 | `scope` | Placement classification (`Placement`, `placement_of`), the mandated e-dossier reference sets, and `reference_scope_check`. |
 | `countersign` | Countersignature detection, the binding check, and the reported role, parent and `countersigns` set. |
-| `signature` | The per-signature driver: `ds:SignedInfo` parsing, the signature-level algorithm policy, canonicalization of `ds:SignedInfo`, signature-value verification and signer selection (stages A and B). |
+| `signature` | The per-signature driver (stages A and B): `signed_info.rs` parses `ds:SignedInfo` and applies the signature-level algorithm policy, `collect.rs` gathers the timestamp tokens and the octets each one covers, and `mod.rs` keeps signer selection and `ds:SignatureValue` verification. |
 | `coverage` | What a signature's resolved references cover, and the per-document coverage report and its dossier-level checks. |
 | `xades` | Stage C: the XAdES qualifying properties and the signed `SigningCertificate` binding. |
-| `certs` | Stage D: certificate parsing, path building and validation. |
-| `revocation` | Stage E: CRL and OCSP processing for a validated path. |
-| `tsa` | Stage F: RFC 3161 token parsing and verification, for signature and container timestamps alike. |
-| `estimestamp` | The container's own `es:TimeStamp` elements and what they cover. |
-| `trustlist` | ETSI TS 119 612 trusted lists, and the qualified status of a validated chain. |
+| `certs` | Stage D: `extensions.rs` decodes a certificate's extensions, `purpose.rs` holds the `extendedKeyUsage` policy per `PathPurpose`, `names.rs` implements RFC 5280 name constraints, `path.rs` builds and validates a path, and `mod.rs` keeps the public types, `check_path` and public-key signature verification. |
+| `revocation` | Stage E: `crl.rs` validates and looks up CRLs, `ocsp.rs` validates OCSP responses and the RFC 6960 responder-authorisation models, `tiers.rs` holds the source priority, coverage and fallback rules with the summaries and messages they produce, and `mod.rs` keeps the public API and `check_path`. |
+| `tsa` | Stage F: `token.rs` holds the RFC 3161 wire formats and the CMS signed-attribute checks, `imprint.rs` the digest allowlist and the imprint recomputation, `path.rs` the TSA certificate's purpose and its path at `genTime`, and `mod.rs` the token driver and `verify_signature_timestamps`. |
+| `estimestamp` | The container's own `es:TimeStamp` elements and what they cover, including the `xades:Include` data selection. |
+| `trustlist` | ETSI TS 119 612 trusted lists: `parse.rs` reads the XML, `services.rs` evaluates the status timeline and the pre-eIDAS rules, `qualified.rs` decides a validated chain's qualified status, and `mod.rs` keeps the public API and the verification of the list's own signature. |
 | `trust`, `policy`, `codes`, `report`, `c14n`, `embedded` | The injected I/O seams, the pinned algorithm and limit policy, the check codes, the JSON report types, canonicalization, and the whole-document reads the CLI's `--online` fetcher needs. |
+
+Each of those directory modules re-exports every public item at the path it
+had before the split, so the crate's public API is unchanged.
 
 `scripts/check-file-length.py`, run in CI, keeps a new `src` file under 800
 lines and a new `tests` file under 1500 (see
-[CONTRIBUTING.md](../CONTRIBUTING.md)); the modules above that already
-exceeded that when the guardrail was added are named in
-`scripts/file-length-allowlist.txt` and may only shrink from there.
+[CONTRIBUTING.md](../CONTRIBUTING.md)); no module of this crate is named in
+`scripts/file-length-allowlist.txt` any more, and none of its source files
+exceeds the limit.
 
 ### Reference scope
 
