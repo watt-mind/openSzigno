@@ -17,6 +17,25 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
   those passed the check on the pull request that landed them, and two
   older commits predate the rule.
 
+### Security
+
+- `verify` stage A1 now enforces the cardinality and order the XMLDSig
+  schema fixes for `ds:Signature`, `ds:SignedInfo` and each `ds:Reference`
+  before any critical child is read by name. Previously each child was
+  located by a first-match lookup, so a signature carrying a second
+  `ds:SignatureValue`, `ds:SignedInfo`, canonicalization or signature
+  method, `ds:Transforms`, `ds:DigestMethod` or `ds:DigestValue`, or one
+  whose children appeared out of order, was accepted: openSzigno read the
+  first copy and reported a passed `signature_value_ok` while another
+  consumer could read the other. Such a signature now fails
+  `sig_structure_invalid`, with a message naming the element and whether it
+  is a duplicate, out of order, or a child the schema does not allow there,
+  and the verdict is `invalid`. The schema's extension points stay open:
+  `ds:Object` and `ds:KeyInfo` content is unconstrained, so XAdES
+  qualifying properties are unaffected, and whitespace and comments between
+  children are ignored. See
+  [docs/architecture.md](docs/architecture.md#xmldsig-structural-rules).
+
 ## [0.5.0] - 2026-09-08
 
 ### Added

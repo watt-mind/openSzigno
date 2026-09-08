@@ -470,7 +470,7 @@ Then, per `ds:Signature` in document order:
 
 | # | Check code | Fails when |
 | --- | --- | --- |
-| A1 | `sig_structure` | `ds:SignedInfo`, `ds:SignatureValue`, or a required child is missing or malformed |
+| A1 | `sig_structure` | `ds:SignedInfo`, `ds:SignatureValue`, or a required child is missing or malformed, appears more than the schema allows, appears out of the schema's order, or is a child the schema does not put there |
 | A2 | `sig_placement` | The signature is not at `//es:Document/ds:Signature` or `//es:Dossier/ds:Signature` |
 | A3 | `c14n_method_allowed` | `ds:CanonicalizationMethod` is outside the allowlist (`c14n_unsupported` for known-but-unsupported) |
 | A4 | `signature_algorithm_allowed` | `ds:SignatureMethod` is outside the allowlist; `algorithm_legacy_allowed` warning when `--allow-legacy-algorithms` admits it |
