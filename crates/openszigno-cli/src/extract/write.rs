@@ -72,13 +72,25 @@ impl Writer {
 
     /// Undo everything this run created, deepest entry first, so a partial
     /// extraction is never left behind.
+    ///
+    /// Every recorded entry is attempted exactly once, in reverse creation
+    /// order, even after an earlier removal fails: a directory that turns out
+    /// non-empty (because a later file under it could not be removed) must
+    /// not stop the files created before it, in other directories, from being
+    /// cleaned up too.
     pub(crate) fn roll_back(&self, error: CliError) -> CliError {
-        let removed = self.created.iter().rev().all(|entry| match entry {
-            Undo::File(directory, name) => self.directories[*directory].remove_file(name).is_ok(),
-            Undo::Directory(directory, name) => {
-                self.directories[*directory].remove_directory(name).is_ok()
-            }
-        });
+        let mut removed = true;
+        for entry in self.created.iter().rev() {
+            let ok = match entry {
+                Undo::File(directory, name) => {
+                    self.directories[*directory].remove_file(name).is_ok()
+                }
+                Undo::Directory(directory, name) => {
+                    self.directories[*directory].remove_directory(name).is_ok()
+                }
+            };
+            removed &= ok;
+        }
         if removed {
             return error;
         }
@@ -162,5 +174,91 @@ mod tests {
         assert_eq!(error.code, "io_error");
         assert_eq!(error.exit, 3);
         assert!(error.message.ends_with("; some extracted files may remain"));
+    }
+
+    /// `roll_back` used to fold over the entries with `Iterator::all`, which
+    /// short-circuits on the first `false` and never even calls the closure
+    /// for what comes after. Recorded entries are undone in reverse creation
+    /// order, so that bug meant: the moment the *last*-created entry failed
+    /// to remove, every earlier entry was left on disk untouched. This forces
+    /// exactly that: the last-created (so first-undone) entry never actually
+    /// exists, and asserts the two real files created before it are still
+    /// removed.
+    #[test]
+    fn roll_back_keeps_removing_after_an_early_reverse_order_failure() {
+        let temporary = scratch();
+        let directory = OutputDir::open(temporary.path()).expect("output directory opens");
+        for name in ["first.txt", "second.txt"] {
+            let mut file = directory.create_new_file(name).expect("file is created");
+            file.write_all(b"payload").expect("file is writable");
+        }
+        // Recorded as created, but never actually written: its removal fails
+        // and, in reverse order, fails first.
+        let writer = Writer {
+            directories: vec![directory],
+            created: vec![
+                Undo::File(0, "first.txt".to_owned()),
+                Undo::File(0, "second.txt".to_owned()),
+                Undo::File(0, "never-created.txt".to_owned()),
+            ],
+            extracted: Vec::new(),
+        };
+
+        let error = writer.roll_back(CliError::io("could not write an extracted document"));
+
+        assert!(error.message.ends_with("; some extracted files may remain"));
+        for name in ["first.txt", "second.txt"] {
+            assert!(
+                !temporary.path().join(name).exists(),
+                "{name} must still be removed despite the earlier-undone entry failing"
+            );
+        }
+    }
+
+    /// The same, but forced with a real filesystem failure instead of a
+    /// never-created file: a non-empty directory refuses to remove on every
+    /// platform, and it is the last entry undone (first attempted, since undo
+    /// walks in reverse) while the directory it holds a file it does not
+    /// track was itself created earlier and must still be removed.
+    #[cfg(unix)]
+    #[test]
+    fn roll_back_keeps_removing_after_a_real_removal_failure() {
+        let temporary = scratch();
+        let directory = OutputDir::open(temporary.path()).expect("output directory opens");
+        let mut first = directory
+            .create_new_file("first.txt")
+            .expect("file is created");
+        first.write_all(b"payload").expect("file is writable");
+        let nested = directory
+            .create_subdirectory("nested.d")
+            .expect("subdirectory is created");
+        // A file this run did not track, left inside the recorded directory,
+        // so removing the directory fails with a real ENOTEMPTY.
+        std::fs::write(
+            temporary.path().join("nested.d").join("untracked.txt"),
+            b"x",
+        )
+        .expect("the untracked file is written");
+
+        let writer = Writer {
+            directories: vec![directory, nested],
+            created: vec![
+                Undo::File(0, "first.txt".to_owned()),
+                Undo::Directory(0, "nested.d".to_owned()),
+            ],
+            extracted: Vec::new(),
+        };
+
+        let error = writer.roll_back(CliError::io("could not write an extracted document"));
+
+        assert!(error.message.ends_with("; some extracted files may remain"));
+        assert!(
+            !temporary.path().join("first.txt").exists(),
+            "first.txt must still be removed despite the directory removal failing"
+        );
+        assert!(
+            temporary.path().join("nested.d").exists(),
+            "the non-empty directory is the one expected to remain"
+        );
     }
 }
