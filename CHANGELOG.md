@@ -188,6 +188,14 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
   1.0 point below its recorded coverage. The job posts and refreshes a
   single PR comment with the summary. See
   [CONTRIBUTING.md](CONTRIBUTING.md#coverage-quality-gate).
+- `.github/workflows/mutants.yml`, a nightly (and manually dispatchable)
+  `cargo-mutants` run over `openszigno-core` and `openszigno-verify`.
+  `scripts/mutants_gate.py` enforces a ratchet against
+  `scripts/mutants-floors.txt`, the same model as the coverage floors: a
+  crate's caught-mutant percentage cannot drop more than 2.0 points below
+  its recorded value. It is not a required pull-request check; a gate
+  failure opens or refreshes a single "Mutation testing: survivors" issue
+  instead. See [docs/testing.md](docs/testing.md#mutation-testing).
 
 ## [0.4.0] - 2026-09-08
 

@@ -97,6 +97,7 @@ CI additionally runs, on every pull request:
 | Workflow lint | `actionlint` with `SHELLCHECK_OPTS=--severity=warning` |
 | Source file length | `python3 scripts/check-file-length.py` |
 | Coverage quality gate | `python3 scripts/coverage_gate.py --lcov lcov.info --base origin/develop` |
+| Mutation testing (nightly, not a required check) | `cargo mutants -p <crate> --timeout-multiplier 2 -j 2` then `python3 scripts/mutants_gate.py --dir mutants.out --crate <crate>` |
 
 Any of these can be reproduced locally with the same command. The
 container job runs `inspect`, `list`, `validate-structure`, `extract`, and
@@ -132,6 +133,28 @@ and enforces, in the CI `coverage` job:
 
 The workspace-wide `--fail-under-lines 85` check also still runs, as a
 coarse backstop after the script's finer-grained gates.
+
+### Mutation testing gate
+
+`.github/workflows/mutants.yml` runs `cargo-mutants` nightly (and on manual
+dispatch) over `openszigno-core` and `openszigno-verify`, and
+`scripts/mutants_gate.py` enforces, per crate:
+
+- **Ratchet only.** `scripts/mutants-floors.txt` records each crate's
+  caught-mutant percentage (`caught / (caught + missed)`) at the time it was
+  last updated. A crate that drops more than 2.0 points below its recorded
+  value fails the job, the same ratchet model the coverage and file-length
+  guardrails use.
+- **No minimum floor.** Unlike the coverage gate, there is no fixed
+  percentage every crate must clear; a low-but-stable score is not itself a
+  failure, only a decline past the tolerance is.
+
+This is a nightly job, not a pull-request check: a full run is tens of
+minutes per crate, too slow for every push. A gate failure opens or
+refreshes a single tracking issue titled "Mutation testing: survivors"
+instead of blocking a merge. See
+[docs/testing.md](docs/testing.md#mutation-testing) for how to run it
+locally, read a survivor, and update the floors file.
 
 On a pull request, the job posts (and on a later push, refreshes in place)
 one PR comment marked `<!-- coverage-gate -->` with the same Markdown
