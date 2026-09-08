@@ -209,6 +209,19 @@ crate's mutants (`--shard 1/4`), not a full run, because of the host time
 budget available when it was seeded; the first nightly run replaces it with
 the true value, and the ratchet tolerance absorbs the difference until then.
 
+LAB-274 turned the first batch of survivors from that seeding pass into
+behavioural tests: boundary tests for `decode.rs`'s compression-ratio check
+and its ZIP symlink guard, exact-limit and deep-offset cases for `scan.rs`'s
+depth/node counting, `inventory.rs`'s first-occurrence match guards,
+`trust.rs`'s trust/revocation accessors and further `parse_rfc3339`
+boundaries beyond LAB-273's, and `scope.rs`'s node-ownership guard so that
+covering one signature's own profile object never satisfies a different
+signature's requirement. One survivor turned out to be effectively
+unreachable through the public API rather than a gap: `xml.rs`'s `allow_dtd`
+wiring is defence in depth behind `scan::prescan`, which already rejects any
+`<!` markup before a tree is ever built. Not every survivor from the seeding
+pass is gone; the rest are left for a later pass.
+
 ## Fuzzing
 
 `fuzz/` is a [`cargo-fuzz`](https://github.com/rust-fuzz/cargo-fuzz) package,

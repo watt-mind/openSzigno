@@ -154,6 +154,33 @@ fn declared_encoding(bytes: &[u8]) -> Option<String> {
     None
 }
 
+/// Map a parser error to a stable code without echoing document content.
+/// `roxmltree` error messages include element, attribute, and entity names,
+/// which may be confidential; only the position is kept.
+fn xml_error(error: roxmltree::Error) -> Error {
+    match error {
+        roxmltree::Error::DtdDetected => Error::new(
+            ErrorCode::UnsafeXml,
+            "DTD and entity declarations are not allowed",
+        ),
+        roxmltree::Error::NodesLimitReached
+        | roxmltree::Error::AttributesLimitReached
+        | roxmltree::Error::NamespacesLimitReached => {
+            Error::new(ErrorCode::UnsafeXml, "XML exceeds the node limit")
+        }
+        other => {
+            let position = other.pos();
+            Error::new(
+                ErrorCode::InvalidXml,
+                format!(
+                    "XML parsing failed at line {} column {}",
+                    position.row, position.col
+                ),
+            )
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -183,32 +210,5 @@ mod tests {
         let source = XmlSource::decode(b"<a><b/></a>", &Limits::default()).unwrap();
         let tree = source.parse_tree(&Limits::default()).unwrap();
         assert_eq!(tree.root_element().tag_name().name(), "a");
-    }
-}
-
-/// Map a parser error to a stable code without echoing document content.
-/// `roxmltree` error messages include element, attribute, and entity names,
-/// which may be confidential; only the position is kept.
-fn xml_error(error: roxmltree::Error) -> Error {
-    match error {
-        roxmltree::Error::DtdDetected => Error::new(
-            ErrorCode::UnsafeXml,
-            "DTD and entity declarations are not allowed",
-        ),
-        roxmltree::Error::NodesLimitReached
-        | roxmltree::Error::AttributesLimitReached
-        | roxmltree::Error::NamespacesLimitReached => {
-            Error::new(ErrorCode::UnsafeXml, "XML exceeds the node limit")
-        }
-        other => {
-            let position = other.pos();
-            Error::new(
-                ErrorCode::InvalidXml,
-                format!(
-                    "XML parsing failed at line {} column {}",
-                    position.row, position.col
-                ),
-            )
-        }
     }
 }

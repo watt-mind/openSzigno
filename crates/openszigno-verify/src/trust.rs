@@ -538,9 +538,10 @@ mod tests {
     /// these content assertions.
     #[test]
     fn memory_trust_store_accessors_report_loaded_contents() {
-        let mut store = MemoryTrustStore::new(vec![b"anchor-der".to_vec()], vec![
-            b"intermediate-der".to_vec(),
-        ]);
+        let mut store = MemoryTrustStore::new(
+            vec![b"anchor-der".to_vec()],
+            vec![b"intermediate-der".to_vec()],
+        );
         store.extend_services(vec![service_identity(b"service-der")]);
         store.push_check(Check::new(
             CheckCode::SigStructureInvalid,
@@ -587,8 +588,10 @@ mod tests {
     /// tier.
     #[test]
     fn memory_revocation_store_separates_offline_and_online_material() {
-        let mut store =
-            MemoryRevocationStore::new(vec![b"offline-crl".to_vec()], vec![b"offline-ocsp".to_vec()]);
+        let mut store = MemoryRevocationStore::new(
+            vec![b"offline-crl".to_vec()],
+            vec![b"offline-ocsp".to_vec()],
+        );
         assert_eq!(store.policy(), RevocationPolicy::Offline);
         assert_eq!(store.crls(), &[b"offline-crl".to_vec()]);
         assert_eq!(store.ocsp_responses(), &[b"offline-ocsp".to_vec()]);
@@ -616,7 +619,8 @@ mod tests {
 
     #[test]
     fn into_online_without_anchors_reports_that_policy_with_no_fetched_material() {
-        let store = MemoryRevocationStore::new(Vec::new(), Vec::new()).into_online_without_anchors();
+        let store =
+            MemoryRevocationStore::new(Vec::new(), Vec::new()).into_online_without_anchors();
         assert_eq!(store.policy(), RevocationPolicy::OnlineNoAnchors);
         assert!(store.online_crls().is_empty());
         assert!(store.online_ocsp_responses().is_empty());
