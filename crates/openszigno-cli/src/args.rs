@@ -35,6 +35,8 @@ pub(crate) enum Command {
     ValidateStructure(InputArgs),
     /// Verify XMLDSig/XAdES signatures, certificate paths, and revocation.
     Verify(VerifyArgs),
+    /// Print the agent skill (SKILL.md) that teaches an AI agent this CLI.
+    Skill,
 }
 
 /// A validation time from `--at`, kept in both the shape the report needs and

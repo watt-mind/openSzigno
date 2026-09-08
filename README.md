@@ -147,11 +147,12 @@ the URLs the certificates themselves publish.
 | `validate-structure FILE` | Apply the strict structural rules and report `valid_structure` and any conformance warnings. | 0, 2, 3, 4 |
 | `extract FILE --output DIR` | Decode supported payloads into `DIR`, expanding embedded dossiers, never overwriting a file. `--document SEL --stdout` writes one payload to stdout instead. | 0, 2, 3, 4, 5 |
 | `verify FILE` | Verify every `ds:Signature` against the trust material you supply and report a per-signature verdict of `valid`, `invalid`, or `indeterminate`. | 0, 2, 3, 4, 6, 7 |
+| `skill` | Write the embedded agent skill (`SKILL.md`) to stdout and nothing else. Takes no `FILE` and no `--json`. | 0, 2, 3 |
 
-Every command takes `-` in place of the path and reads the dossier from
-standard input. Every flag, the JSON envelope, the stable error, warning and
-check codes, the exit statuses, and the parser limits are specified in
-[docs/architecture.md](docs/architecture.md).
+Every command except `skill` takes `-` in place of the path and reads the
+dossier from standard input. Every flag, the JSON envelope, the stable
+error, warning and check codes, the exit statuses, and the parser limits
+are specified in [docs/architecture.md](docs/architecture.md).
 
 ## Verification
 
@@ -175,10 +176,17 @@ lay out all of it.
 - [Trust, revocation, and qualified status](docs/trust.md)
 - [ES3 specification and implementation map](docs/es3-specification.md)
 - [Roadmap and residual risks](docs/roadmap.md)
-- [Agent skill](skills/openszigno/SKILL.md): how an AI agent should drive
-  the CLI to inspect, extract, decrypt and verify dossiers. Copy the
-  `skills/openszigno` directory into `.claude/skills/` (Claude Code) or
-  `.codex/skills/` (Codex) of the project that uses it.
+- [Agent skill](crates/openszigno-cli/skills/openszigno/SKILL.md): how an AI
+  agent should drive the CLI to inspect, extract, decrypt and verify
+  dossiers. The binary carries it, so no checkout is needed to install it:
+
+  ```sh
+  mkdir -p .claude/skills/openszigno
+  openszigno skill > .claude/skills/openszigno/SKILL.md
+  ```
+
+  Use `.codex/skills/openszigno/` for Codex, or `~/.claude/skills/openszigno/`
+  to install it for every project instead of one.
 
 ## Contributing
 
