@@ -219,16 +219,7 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - name: Check openszigno-core against the published API
         run: cargo semver-checks -p openszigno-core
-      - name: Check openszigno-verify against the published API (advisory)
-        # openszigno-verify on develop already carries breaking API changes
-        # relative to the published 0.4.0 (new pub fields on
-        # SignatureCoverage/ChainEntry, a new RevocationPolicy variant, and
-        # a renamed SignatureCoverage field), with no version bump yet to
-        # authorize them. That is a version decision for the next release,
-        # not something this job should block on; see
-        # docs/releasing.md#semver-checks. Flip this step blocking (drop
-        # `continue-on-error`) once the version is bumped to cover them.
-        continue-on-error: true
+      - name: Check openszigno-verify against the published API
         run: cargo semver-checks -p openszigno-verify
 
   coverage:

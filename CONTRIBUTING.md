@@ -120,7 +120,7 @@ CI additionally runs, on every pull request:
 | Commit and PR hygiene (pull requests only) | `git log --format=%s origin/<base>..HEAD` through `scripts/commit-msg.sh -`, plus a `Fixes\|Closes\|Refs LAB-<n>` line in the pull request body |
 | Source file length | `python3 scripts/check-file-length.py` |
 | Golden output contract | `python3 scripts/golden.py check --bin target/release/openszigno` |
-| Semver checks (`openszigno-core` blocking, `openszigno-verify` advisory, both against crates.io) | `cargo semver-checks -p <crate>` |
+| Semver checks (`openszigno-core` and `openszigno-verify` against the version published on crates.io) | `cargo semver-checks -p <crate>` |
 | Coverage quality gate | `python3 scripts/coverage_gate.py --lcov lcov.info --base origin/develop` |
 | Mutation testing (nightly, not a required check) | `cargo mutants -p <crate> --timeout-multiplier 2 -j 2` then `python3 scripts/mutants_gate.py --dir mutants.out --crate <crate>` |
 | Fuzzing (nightly, not a required check) | `cargo +nightly fuzz run <target> -- -max_total_time=600 -jobs=1`; see [docs/testing.md](docs/testing.md#fuzzing) |

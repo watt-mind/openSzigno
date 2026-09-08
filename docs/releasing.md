@@ -320,15 +320,11 @@ crate's `Cargo.toml`, in the same pull request, for the job to pass; a bump
 without a breaking change, or a patch-level fix, needs no bump at all to
 stay green.
 
-`openszigno-verify` on `develop` already carries breaking changes relative to
-its published `0.4.0` (new public fields on `SignatureCoverage` and
-`ChainEntry`, a new `RevocationPolicy` variant, and a renamed
-`SignatureCoverage` field) with no version bump yet to cover them. Bumping
-the version is a release decision, not something to make inside an
-unrelated change, so the job's `openszigno-verify` step runs with
-`continue-on-error: true` until the next version bump accounts for those
-changes; `openszigno-core` has no pending breaking changes and its step
-blocks normally.
+Both steps block. When a release bumps the workspace version, the bump
+lands in the release preparation pull request (step 1 above) together with
+the changelog, so a breaking change that accumulated on `develop` is
+covered by the release that ships it. Between releases the job keeps
+`develop` honest about which changes still need that bump.
 
 ## Required secrets and one-time setup
 
