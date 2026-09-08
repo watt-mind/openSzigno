@@ -393,19 +393,27 @@ under `data.limits`. They are not yet configurable on the command line; see
 | `extract FILE --document SEL --stdout` | Decode exactly one document and write its raw payload bytes to stdout. Writes no files. | No |
 | `extract FILE --decrypt-key KEY` | The same, additionally decrypting documents whose transform chain contains `encrypt`. See [Decryption](#decryption). | No |
 | `validate-structure FILE` | Apply the project's strict structural rules without validating signatures. | No |
-| `verify FILE` | Verify every `ds:Signature`: canonicalization, reference digests, the signature value, the e-dossier reference-scope rules, and the certificate path. Cannot report a signature as `valid` in this release. | No |
+| `verify FILE` | Verify every `ds:Signature`: canonicalization, reference digests, the signature value, the e-dossier reference-scope rules, the XAdES signed `SigningCertificate` binding, RFC 3161 signature timestamps, the certificate path, and revocation. Reports a per-signature verdict of `valid`, `invalid`, or `indeterminate`. | No |
 
 In every command `FILE` is either a path to a regular file or `-`, which
 reads the dossier from standard input; see [Reading from stdin](#reading-from-stdin).
 
-`verify` additionally accepts `--trust-store <DIR>` and `--at <RFC3339>`; see
-[The `verify` command](#the-verify-command).
-
-All commands accept `--json` and `--allow-namespace <URI>` (repeatable).
-`extract` additionally accepts:
+These flags apply to every command:
 
 | Flag | Meaning |
 | --- | --- |
+| `--json` | Emit exactly one JSON object on stdout. |
+| `FILE` as `-` | Read the dossier from standard input instead of from a path. The stream is capped at `max_input_bytes` and buffered in memory. |
+| `--allow-namespace <URI>` | Also accept a dossier rooted in this namespace, in addition to the known-compatible ones. Repeatable. See [Namespace policy](#namespace-policy). |
+| `-h`, `--help` | Print help as plain text. |
+| `-V`, `--version` | Print the version as plain text. Top level only. |
+
+`verify` has its own flags; see
+[The `verify` command](#the-verify-command). `extract` additionally accepts:
+
+| Flag | Meaning |
+| --- | --- |
+| `-o`, `--output <DIR>` | Destination directory; created if missing. |
 | `--no-recursive` | Write an embedded dossier as a plain payload file instead of expanding it. |
 | `--max-depth <N>` | Nesting levels of embedded dossiers to expand, default 3; values above the hard cap of 8 are clamped to 8. |
 | `--document <SELECTOR>` | Extract only the named documents. Repeatable. See [Selecting documents](#selecting-documents). |
@@ -818,6 +826,21 @@ openszigno verify FILE [--json]
     --allow-legacy-algorithms   # admit SHA-1 for diagnosis only
     --allow-namespace URI       # as on every other command, repeatable
 ```
+
+| Flag | Meaning |
+| --- | --- |
+| `--trust-store <DIR>` | Directory of trust anchors (`anchors/*`, PEM or DER) and optional extra CA certificates (`intermediates/*`). A directory of certificates with no `anchors` subdirectory is read as anchors. Without it, every chain check is `unknown`. See [Trust store](#trust-store). |
+| `--trust-list <FILE>` | ETSI TS 119 612 trusted list (XML) to take trust anchors from. Repeatable. Its anchors join the `--trust-store` ones, each reported with its origin, and only these can make a chain `qualified`. Nothing is fetched. See [Trusted lists](#trusted-lists). |
+| `--lotl <FILE>` | EU list of trusted lists (XML). Its `PointersToOtherTSL` entries name the national lists' signing certificates, so one out-of-band certificate bootstraps every `--trust-list`. The LOTL is verified against `--trust-list-signer` first and contributes no trust anchors of its own. |
+| `--trust-list-signer <CERT>` | Certificate, PEM or DER, that must have signed the `--lotl` and, absent one, every `--trust-list`. Obtain it out of band; for the EU list of trusted lists, from the Official Journal. Without any signer the lists are read but reported `trust_list_unverified`, which caps the verdict at `indeterminate`. |
+| `--revocation-store <DIR>` | Directory of CRLs (`crls/`) and OCSP responses (`ocsp/`), DER or PEM, checked in addition to the signature's own `xades:RevocationValues`. A flat directory works too; each file is classified by what it contains. Nothing is ever fetched. See [Revocation](#revocation). |
+| `--no-revocation` | Do not check revocation at all. Emits `revocation_not_checked`, which is blocking, so this produces at most `indeterminate`. Cannot be combined with `--online`. |
+| `--online` | Fetch revocation data the offline material does not cover, from the CRL distribution points and AIA OCSP responders the certificates themselves publish, and only for certificates on a path openSzigno validated to a configured trust anchor. With no trust material nothing is fetched at all. The only thing that makes openSzigno touch the network. See [Online revocation fetching](#online-revocation-fetching) for the timeouts, size caps, and destination rules. |
+| `--online-cache <DIR>` | Write everything `--online` fetched into `DIR` in the `--revocation-store` layout, so a later run with `--revocation-store DIR` and no `--online` reproduces the result with no network at all. Files are created relative to an opened directory descriptor and never follow a symlink; nothing existing is ever truncated or replaced. Requires `--online`. |
+| `--online-proxy <URL>` | Route `--online` fetches through this proxy. Without it no proxy is used: `HTTP_PROXY` and its relatives are deliberately ignored. Requires `--online`. |
+| `--online-allow-private` | Permit `--online` to contact loopback, private (RFC 1918), link-local and unique-local addresses and the host name `localhost`, which are refused by default because the URL comes out of a certificate the run has not yet established trust in. For an internal CA that really does publish there. Requires `--online`. |
+| `--at <RFC3339>` | Validation time. It overrides everything: without it, a signature whose timestamp verified completely is validated at that token's `genTime`, and otherwise at the current time. See [Validation time](#validation-time). |
+| `--allow-legacy-algorithms` | Admit SHA-1 digests and RSA-SHA1 signature methods for diagnosis only: they emit `algorithm_legacy_allowed` instead of a passed check, the verdict stays capped at `indeterminate`, and no failed check can become a passed one. MD5, HMAC, DSA, and RSA keys below 2048 bits stay refused. See [Algorithm policy](#algorithm-policy). |
 
 Offline is the default and `openszigno-verify` is network-free by
 construction: it opens no socket in any mode, and revocation data reaches it

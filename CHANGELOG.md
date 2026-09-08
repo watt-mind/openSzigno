@@ -119,6 +119,21 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
 
 ### Changed
 
+- `README.md` restructured from 536 lines to a scannable front door. "Why and
+  for whom" now sits directly under the security boundary instead of behind
+  the installation block, and states what the tool offers agents, people, and
+  anyone handling hostile input. Installation is one block per channel, the
+  quick start is one human, one `--json`, and one `verify` example, and the
+  command reference is a single table with each command's exit statuses. The
+  reference material moved out of it, deduplicated: the flag tables, the
+  global and `extract` flags, and the full `verify` flag table are now in
+  [docs/architecture.md](docs/architecture.md), which already held the JSON
+  envelope, the stable codes, the exit statuses, and the limits; the
+  "what is not supported yet" list is now a "Not yet implemented" section in
+  [docs/roadmap.md](docs/roadmap.md), refreshed because M2 phase 2, M2 phase 3,
+  and M3 have all shipped since it was written. The README's LEGAL section no
+  longer claims that verification can report "only `invalid` or
+  `indeterminate`", which stopped being true when revocation checking landed.
 - Internal module split of the CLI crate: `crates/openszigno-cli/src/main.rs`
   became `args`, `input`, `response`, `render/`, `commands/`, `extract/`, and
   `trust`, and each unit test moved next to the code it covers. No behaviour
