@@ -92,7 +92,7 @@ review happens on the draft body before the tag exists rather than after.
 | `custom-smoke-test` | Unpacks the built `x86_64-unknown-linux-musl` archive and runs `inspect`, `list`, `validate-structure`, `extract` (byte-checking the payload), the golden output contract, and `verify` against it, so a binary that cannot read a synthetic dossier, or whose output has drifted, never reaches the release. |
 | `host` | Stages the artefacts and the manifest. It does not touch the release. |
 | `publish-homebrew-formula` | Commits `Formula/openszigno.rb` to `watt-mind/homebrew-tap`. |
-| `custom-publish-crates` | Publishes the three crates to crates.io, skipping any version already there. |
+| `custom-publish-crates` | Publishes the four crates to crates.io, skipping any version already there. |
 | `custom-container` | Builds and pushes the multi-arch GHCR image and attests its provenance. |
 | `announce` | Uploads every asset into the draft release and undrafts it. |
 
@@ -130,7 +130,7 @@ formula is a `publish-jobs` entry by construction.
 
 The release page has the archives, checksums, and installers;
 `watt-mind/homebrew-tap` has a new `Formula/openszigno.rb` commit; GHCR has
-the new image with its provenance attestation; and all three crates are on
+the new image with its provenance attestation; and all four crates are on
 crates.io.
 
 ## Rerunning a failed publish job
