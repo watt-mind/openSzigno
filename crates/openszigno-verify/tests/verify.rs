@@ -1341,50 +1341,6 @@ fn a_reference_to_an_ancestor_covers_the_signed_properties() {
     );
 }
 
-/// A whole-document reference carrying the enveloped-signature transform
-/// covers **nothing inside the signature it is written in**.
-///
-/// XMLDSig 1.1 clause 6.6.4: the transform "removes the whole `Signature`
-/// element containing T from the digest calculation of the `Reference` element
-/// containing T". The `xades:SignedProperties` — which carries the
-/// `SigningCertificate` binding — and the signature's own profile `ds:Object`
-/// both live there, so neither is in the digested bytes and neither may be
-/// credited to the reference. Treating them as covered let unauthenticated
-/// XAdES properties reach the later stages, which is what this regression
-/// guards.
-#[test]
-fn an_enveloped_whole_document_reference_covers_nothing_inside_the_signature() {
-    let pki = simple_pki();
-    let mut signature = document_signature(pki.chain.clone());
-    signature.references = vec![RefSpec::to("").with_transforms(&[ENVELOPED_URI, C14N_EXC])];
-    let spec = DossierSpec {
-        document_signature: Some(signature),
-        ..Default::default()
-    };
-    let xml = build(&spec, &[("doc", &pki.signer_key)]);
-    let report = run(&xml, vec![pki.root_der], "2020-06-01T00:00:00Z");
-    assert_check(
-        &report,
-        CheckCode::ReferenceScopeIncomplete,
-        CheckStatus::Failed,
-    );
-    let message = report.signatures[0]
-        .checks
-        .iter()
-        .find(|check| check.code == CheckCode::ReferenceScopeIncomplete)
-        .map(|check| check.message.clone())
-        .expect("the check was emitted");
-    assert!(message.contains("xades:SignedProperties"), "{message}");
-    assert!(
-        message.contains("ds:Signature/ds:Object holding es:SignatureProfile"),
-        "{message}"
-    );
-    // The document's own profile and payload object sit outside the removed
-    // subtree, so they stay covered and are not named.
-    assert!(!message.contains("es:DocumentProfile"), "{message}");
-    assert!(!message.contains("es:Document/ds:Object"), "{message}");
-}
-
 /// A caller must always see what each URI resolved to, even when the run
 /// stopped before any digest was recomputed.
 #[test]

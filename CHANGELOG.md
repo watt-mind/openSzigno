@@ -163,6 +163,36 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
   single PR comment with the summary. See
   [CONTRIBUTING.md](CONTRIBUTING.md#coverage-quality-gate).
 
+### Fixed
+
+- **Reference scope is decided by each reference's effective node set, not by
+  the node it resolved to.** The check read coverage off the resolved node and
+  its ancestors and ignored the transform chain, so a reference to the whole
+  document (`URI=""`), or to any ancestor, carrying the enveloped-signature
+  transform was credited with covering the `xades:SignedProperties` and the
+  signature's own profile `ds:Object` — both inside the `ds:Signature` that
+  transform removes from the digest calculation (XMLDSig 1.1 clause 6.6.4),
+  and so absent from the digested bytes. Coverage is now membership of the
+  effective node set: ancestor containment minus the subtrees the transforms
+  removed, with canonicalization changing nothing and `base64` covering the
+  resolved node's content but no element structure beneath it. The rule lives
+  in one function, which the reference-scope check, the countersignature
+  binding and the document-coverage report all use, so the three agree by
+  construction. A reference whose enveloped transform removes everything it
+  selected is now refused rather than digested as the empty octet string. No
+  check code, status name or JSON field changed. See
+  [docs/architecture.md](docs/architecture.md#the-effective-node-set).
+
+### Security
+
+- A signature relying on a whole-document enveloped reference could pass the
+  reference-scope check while its `xades:SignedProperties` — including the
+  `SigningCertificate` binding — and its signature profile object were
+  unsigned, feeding unauthenticated XAdES properties to the later stages. Such
+  a signature is now `reference_scope_incomplete`, naming both elements, and
+  covers no document. Signatures that reference those elements directly, as
+  real dossiers do, are unaffected.
+
 ## [0.4.0] - 2026-09-08
 
 ### Added (M4: decryption of encrypted payloads)

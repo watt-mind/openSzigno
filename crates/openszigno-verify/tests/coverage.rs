@@ -423,6 +423,55 @@ fn an_embedded_dossier_is_covered_without_recursion() {
     assert_eq!(report.verdict, Verdict::Valid);
 }
 
+/// A whole-document reference carrying the enveloped-signature transform
+/// covers **nothing inside the signature it is written in**, so it satisfies
+/// no scope requirement about the signature's own elements and the dossier is
+/// left unsigned.
+///
+/// XMLDSig 1.1 clause 6.6.4: the transform "removes the whole `Signature`
+/// element containing T from the digest calculation of the `Reference` element
+/// containing T". The `xades:SignedProperties` — which carries the
+/// `SigningCertificate` binding — and the signature's own profile `ds:Object`
+/// both live there, so neither is in the digested bytes and neither may be
+/// credited to the reference. Treating them as covered let unauthenticated
+/// XAdES properties reach the later stages, which is what this regression
+/// guards.
+#[test]
+fn an_enveloped_whole_document_reference_covers_nothing_inside_the_signature() {
+    let pki = pki();
+    let mut signature = document_signature(vec![pki.signer_der.clone()]);
+    signature.references = vec![RefSpec::to("").with_transforms(&[ENVELOPED_URI, C14N_EXC])];
+    let spec = DossierSpec {
+        document_signature: Some(signature),
+        ..Default::default()
+    };
+    let report = run_bare(&build(&spec, &[("doc", &pki.signer_key)]));
+
+    assert_check(
+        &report,
+        CheckCode::ReferenceScopeIncomplete,
+        CheckStatus::Failed,
+    );
+    let message = report.signatures[0]
+        .checks
+        .iter()
+        .find(|check| check.code == CheckCode::ReferenceScopeIncomplete)
+        .map(|check| check.message.clone())
+        .expect("the check was emitted");
+    assert!(message.contains("xades:SignedProperties"), "{message}");
+    assert!(
+        message.contains("ds:Signature/ds:Object holding es:SignatureProfile"),
+        "{message}"
+    );
+    // The document's own profile and payload object sit outside the removed
+    // subtree, so they stay covered and are not named.
+    assert!(!message.contains("es:DocumentProfile"), "{message}");
+    assert!(!message.contains("es:Document/ds:Object"), "{message}");
+    // And with the mandated set incomplete, the document it is placed in is
+    // covered by nothing.
+    assert_eq!(states(&report), vec![CoverageState::Uncovered]);
+}
+
 /// A frame signature whose mandated set is incomplete covers nothing: the
 /// container's own rule for what it must reference was not met.
 #[test]
