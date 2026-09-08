@@ -10,6 +10,8 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-09-08
+
 ### Added
 
 - The CI `semver` job runs `cargo-semver-checks` for `openszigno-core` and
@@ -17,12 +19,12 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
   failing on a breaking API change unless the crate's `Cargo.toml` version
   was bumped to cover it. See
   [docs/releasing.md](docs/releasing.md#semver-checks) for how this applies
-  to the pre-1.0 `0.x` crates here. The `openszigno-verify` step currently
-  runs with `continue-on-error: true`: `develop` already carries breaking
-  API changes relative to the published `0.4.0` (new public fields on
-  `SignatureCoverage` and `ChainEntry`, a new `RevocationPolicy` variant, and
-  a renamed `SignatureCoverage` field) that need a version-bump decision at
-  the next release, not a code change here.
+  to the pre-1.0 `0.x` crates here. The `openszigno-verify` step ran as
+  advisory until this release, because `develop` carried breaking API
+  changes relative to the published `0.4.0` (new public fields on
+  `SignatureCoverage` and `ChainEntry`, a new `RevocationPolicy` variant,
+  and a renamed `SignatureCoverage` field); the `0.5.0` bump covers them
+  and both steps block again.
 - The CI `hygiene` job, on pull requests only, runs `scripts/commit-msg.sh`
   (now reusable with a file path or `-` for stdin, in addition to its
   original hook mode) over every commit subject in the pull request's
@@ -1390,6 +1392,7 @@ This release performs no cryptographic verification of any kind.
 
 [0.1.0]: https://github.com/watt-mind/openSzigno/releases/tag/v0.1.0
 [0.2.0]: https://github.com/watt-mind/openSzigno/compare/v0.1.0...v0.2.0
-[Unreleased]: https://github.com/watt-mind/openSzigno/compare/v0.4.0...develop
+[Unreleased]: https://github.com/watt-mind/openSzigno/compare/v0.5.0...develop
+[0.5.0]: https://github.com/watt-mind/openSzigno/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/watt-mind/openSzigno/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/watt-mind/openSzigno/compare/v0.2.0...v0.3.0
