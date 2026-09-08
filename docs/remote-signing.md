@@ -359,10 +359,13 @@ algorithm needs them, notably RSASSA-PSS.
 
 The SHA-256, sha256WithRSAEncryption and ecdsa-with-SHA256 values appear in
 the EUDI reference material cited above and, for the EC pair, in the live
-`info` response quoted in section 1.3. The RSA, RSASSA-PSS and SHA-384/512
-rows are the standard registry values rather than values read out of the CSC
-PDF; the specification's own algorithm tables could not be extracted from
-the PDF in this environment and are unverified.
+`info` response quoted in section 1.3. RSASSA-PSS with a populated
+`signAlgoParams` was observed first-hand in the PrimeSign test service's
+`info` response (section 3.5), which pairs `1.2.840.113549.1.1.10` with a
+base64 DER `RSASSA-PSS-params` structure. The SHA-384 and SHA-512 rows are
+the standard registry values rather than values read out of the CSC PDF; the
+specification's own algorithm tables could not be extracted from the PDF in
+this environment and are unverified.
 
 ### 1.5 Placing the result into a XAdES signature
 
@@ -648,3 +651,39 @@ list:
 
 A-Trust and Digidentity are useful for CSC v1 compatibility testing.
 Everything Hungarian is behind a sales conversation.
+
+### 3.5 Sandboxes reached directly
+
+Two of the three shortlisted sandboxes answer `info` without credentials.
+Both were called on 2026-09-09; the values below are from the live
+responses.
+
+| Field | PrimeSign `qs.primesign-test.com` | Cleverbase `signing.lab.cleverbase.io` |
+| --- | --- | --- |
+| `specs` | `2.1.0.1` | `2.2.0.0` |
+| `name` | `primesign MOBILE` | `Cleverbase CSC V2 Testbed` |
+| `region` | `AT` | `NL` |
+| `authType` | `["oauth2code"]` | `["oauth2code"]` |
+| `oauth2` | `https://id.primesign-test.com/realms/qs-staging/` | `https://signing.lab.cleverbase.io/idp` |
+| `supportsRar` | `true` | `false` |
+| `supportedHashTypes` | `["dtbsr"]` | `["2.16.840.1.101.3.4.2.1"]` |
+| `methods` | `credentials/list`, `credentials/info`, `signatures/signHash` | `oauth2/authorize`, `oauth2/pushed_authorize`, `credentials/list`, `credentials/info`, `signatures/signHash` |
+| Signature algorithms | ECDSA over SHA-256/384/512, several SHA-3 variants, RSASSA-PSS with DER `signAlgoParams`, and `0.4.0.127.0.7.1.1.4.1` | ECDSA with SHA-256 only |
+
+Three differences here are exactly the interoperability surface a client has
+to handle. `supportedHashTypes` is a keyword on one service and an OID on
+the other. `supportsRar` is true on one and false on the other, so a client
+needs both the `authorization_details` form and the plain query form.
+Cleverbase advertises `oauth2/pushed_authorize`, which the CSC method list
+in section 1.2 does not contain, so the `methods` array can carry
+service-specific extensions. None of this is discoverable without calling
+`info` first.
+
+The reproduction commands:
+
+```sh
+curl -s -X POST https://qs.primesign-test.com/csc/v2/info \
+  -H 'Content-Type: application/json' -d '{}'
+curl -s -X POST https://signing.lab.cleverbase.io/csc/v2/info \
+  -H 'Content-Type: application/json' -d '{"lang":"en"}'
+```
