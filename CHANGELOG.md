@@ -10,6 +10,13 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
 
 ## [Unreleased]
 
+### Fixed
+
+- The CI `hygiene` job no longer re-checks commits that are already on
+  `develop` when a release pull request promotes `develop` to `master`;
+  those passed the check on the pull request that landed them, and two
+  older commits predate the rule.
+
 ## [0.5.0] - 2026-09-08
 
 ### Added
