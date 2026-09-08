@@ -54,6 +54,69 @@ jobs:
       - name: Source file length
         run: python3 scripts/check-file-length.py
 
+  hygiene:
+    name: Commit and PR hygiene
+    # Only meaningful over a pull request's commit range and its body; a
+    # push (to develop or master, after merge) has neither.
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          # Full history so `origin/<base>..HEAD` resolves the whole
+          # pull request range, not just the last commit.
+          fetch-depth: 0
+      - name: Check commit subjects in the pull request range
+        run: |
+          set -euo pipefail
+          base="origin/${{ github.event.pull_request.base.ref }}"
+          status=0
+          for hash in $(git log --format=%H "$base"..HEAD); do
+            # `git rev-list --parents -n1` prints "<hash> <parent>...";
+            # more than one parent word means a merge commit. develop's
+            # history has merge commits ("Merge pull request ...") this
+            # rule was never meant to police, so they are skipped here
+            # rather than required to look like a Conventional Commit.
+            parents=$(git rev-list --parents -n 1 "$hash" | wc -w)
+            if [ "$parents" -gt 2 ]; then
+              continue
+            fi
+            author_email=$(git log -1 --format=%ae "$hash")
+            case "$author_email" in
+              *\[bot\]@users.noreply.github.com) continue ;;
+            esac
+            subject=$(git log -1 --format=%s "$hash")
+            if ! printf '%s\n' "$subject" | ./scripts/commit-msg.sh -; then
+              echo "::error::commit $hash: $subject"
+              status=1
+            fi
+          done
+          exit "$status"
+      - name: Check the pull request body for a ticket reference
+        env:
+          BODY: ${{ github.event.pull_request.body }}
+          AUTHOR: ${{ github.event.pull_request.user.login }}
+          LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+        run: |
+          set -euo pipefail
+          case "$AUTHOR" in
+            dependabot\[bot\]|github-actions\[bot\])
+              echo "bot-authored pull request ($AUTHOR); skipping the ticket-reference check"
+              exit 0 ;;
+          esac
+          case ",$LABELS," in
+            *,no-ticket,*)
+              echo "'no-ticket' label present; skipping the ticket-reference check"
+              exit 0 ;;
+          esac
+          if printf '%s\n' "$BODY" | grep -Eiq '^(Fixes|Closes|Refs) LAB-[0-9]+'; then
+            exit 0
+          fi
+          echo "::error::pull request body must contain a line like 'Fixes LAB-123', 'Closes LAB-123', or 'Refs LAB-123' (or add the 'no-ticket' label)"
+          exit 1
+
   test:
     name: Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
