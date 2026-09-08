@@ -10,9 +10,9 @@
 mod common;
 
 use common::{
-    C14N_EXC, DossierSpec, RefSpec, SIGNED_PROPERTIES_TYPE, XSLT_URI, assert_check,
-    assert_no_failures, build, document_signature, dossier_signature, run, run_without_trust,
-    simple_pki,
+    C14N_EXC, CounterSignatureSpec, DossierSpec, RefSpec, SIGNED_PROPERTIES_TYPE, XSLT_URI,
+    assert_check, assert_no_failures, build, countersignature, document_signature,
+    dossier_signature, run, run_without_trust, simple_pki,
 };
 use openszigno_verify::Verdict;
 use openszigno_verify::codes::{CheckCode, CheckStatus};
@@ -238,6 +238,53 @@ fn a_reference_to_an_ancestor_covers_the_signed_properties() {
     assert_eq!(
         report.signatures[0].references[3].resolved_to.as_deref(),
         Some("Dossier/Documents/Document/Signature/Object")
+    );
+}
+
+/// Covering a *different* signature's own profile object does not satisfy
+/// this signature's "own profile object" requirement: the candidate nodes
+/// `signature_profile_nodes` returns for one signature are guarded to belong
+/// to that signature (`owning_signature(*node) == Some(signature)`), so a
+/// reference from the outer signature that points at its nested
+/// countersignature's profile object instead of its own leaves the outer
+/// signature's own requirement uncovered.
+#[test]
+fn covering_a_nested_signatures_profile_object_does_not_cover_this_signatures_own() {
+    let pki = simple_pki();
+    let mut outer = document_signature(pki.chain.clone());
+    outer.signature_value_id = Some("sigval-doc".to_owned());
+    // Point the "own profile object" reference at the countersignature's
+    // profile object instead of the outer signature's own `#sigobj-doc`.
+    outer.references[2] = RefSpec::to("#sigobj-csig");
+    outer.countersignatures = vec![CounterSignatureSpec::new(countersignature(
+        "csig",
+        pki.chain.clone(),
+        "sigval-doc",
+    ))];
+    let spec = DossierSpec {
+        document_signature: Some(outer),
+        ..Default::default()
+    };
+    let xml = build(
+        &spec,
+        &[("doc", &pki.signer_key), ("csig", &pki.signer_key)],
+    );
+    let report = run_without_trust(&xml, "2020-06-01T00:00:00Z");
+
+    assert_check(
+        &report,
+        CheckCode::ReferenceScopeIncomplete,
+        CheckStatus::Failed,
+    );
+    let message = report.signatures[0]
+        .checks
+        .iter()
+        .find(|check| check.code == CheckCode::ReferenceScopeIncomplete)
+        .map(|check| check.message.clone())
+        .expect("the check was emitted");
+    assert!(
+        message.contains("ds:Signature/ds:Object holding es:SignatureProfile"),
+        "{message}"
     );
 }
 

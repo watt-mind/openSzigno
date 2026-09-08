@@ -6,13 +6,13 @@
 #   python3 scripts/mutants_gate.py --dir <mutants.out> --crate <crate> --update-floors
 # CI never updates this file.
 #
-# Seeded 2026-09-08 (LAB-267). `openszigno-core` is a full-crate run
-# (559 mutants: 433 caught, 51 missed, 64 unviable, 11 timeouts). Host time
-# budget did not allow a full `openszigno-verify` run locally (1601 mutants,
-# ~45 minutes extrapolated from timing); this floor is measured from an
-# exact quarter of the crate's mutants (`--shard 1/4`, 401 mutants: 252
-# caught, 105 missed, 44 unviable). The nightly workflow runs each crate in
-# full and will move this floor to the true value on its first `--update-floors`
-# run; treat this line as provisional until then.
-openszigno-core 89.46
-openszigno-verify 70.59
+# Updated 2026-09-08 (LAB-274, behavioural tests for the first batch of
+# mutation-testing survivors). `openszigno-core` is a full-crate run (559
+# mutants: 441 caught, 43 missed, 64 unviable, 11 timeouts). `openszigno-verify`
+# is the same `--shard 1/4` slice the floor was originally seeded from (LAB-267:
+# 401 mutants, 44 unviable, both then and now), so the change from 70.59% to
+# 78.99% is a direct, apples-to-apples measurement of this change, not a
+# different sample; the full-crate `openszigno-verify` measurement is still
+# owed to the nightly workflow.
+openszigno-core 91.12
+openszigno-verify 78.99

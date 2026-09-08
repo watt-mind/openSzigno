@@ -91,6 +91,19 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
   failure opens or refreshes a single "Mutation testing: survivors" issue
   instead. See [docs/testing.md](docs/testing.md#mutation-testing).
 
+### Tests
+
+- Behavioural tests for the first batch of `cargo-mutants` survivors from the
+  LAB-267 seeding pass: `decode.rs`'s compression-ratio boundary and ZIP
+  symlink guard, `scan.rs`'s depth/node-limit and self-closing-tag
+  arithmetic, `inventory.rs`'s first-occurrence match guards,
+  `trust.rs`'s `TrustSource`/`RevocationSource` accessors and further
+  `parse_rfc3339` boundaries, and `scope.rs`'s signature-profile
+  node-ownership guard. Raised the `openszigno-core` mutation floor from
+  89.46% to 91.12% (full-crate run) and `openszigno-verify` from 70.59% to
+  78.99% (the same `--shard 1/4` slice it was seeded from). See
+  [docs/testing.md](docs/testing.md#mutation-testing).
+
 ### Changed
 
 - `README.md` restructured from 536 lines to a scannable front door. "Why and
