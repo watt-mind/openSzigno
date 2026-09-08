@@ -1,7 +1,8 @@
 //! Per-document signature coverage: which modelled documents the signatures
 //! in a dossier actually cover.
 //!
-//! Coverage is decided by resolved references and the implemented scope rules,
+//! Coverage is decided by what the resolved references digest — the effective
+//! node set of each one — and the implemented scope rules,
 //! never by where a signature sits, and it is kept apart from every
 //! cryptographic outcome. Every dossier here is synthetic and every
 //! certificate is minted by the in-tests PKI.
@@ -9,9 +10,9 @@
 mod common;
 
 use common::{
-    CertSpec, CrlSpec, DossierSpec, ExtraDocumentSpec, RefSpec, SigSpec, SigningCertificateSpec,
-    TestKey, TimestampSpec, XSLT_URI, build, build_crl, document_signature, dossier_signature,
-    extended_key_usage_extension, issued_by, keys, rsa_key, self_signed, tamper,
+    C14N_EXC, CertSpec, CrlSpec, DossierSpec, ENVELOPED_URI, ExtraDocumentSpec, RefSpec, SigSpec,
+    SigningCertificateSpec, TestKey, TimestampSpec, XSLT_URI, build, build_crl, document_signature,
+    dossier_signature, extended_key_usage_extension, issued_by, keys, rsa_key, self_signed, tamper,
 };
 use openszigno_verify::codes::{CheckCode, CheckStatus};
 use openszigno_verify::{
@@ -213,6 +214,44 @@ fn a_frame_signature_covers_every_document() {
     );
     assert_check(&report, CheckCode::DocumentsAllCovered, CheckStatus::Passed);
     assert_eq!(report.verdict, Verdict::Valid);
+}
+
+/// Document coverage uses the same effective node set the scope check does.
+///
+/// A frame signature whose one payload reference is `URI=""` with the
+/// enveloped-signature transform covers `es:Documents` — that sits outside the
+/// `ds:Signature` the transform removes — and so covers every document. Its
+/// own profile object and signed properties are inside the removed subtree and
+/// need references of their own, which is precisely the split the scope check
+/// enforces.
+#[test]
+fn an_enveloped_frame_signature_covers_the_documents_outside_it() {
+    let pki = pki();
+    let mut signature = dossier_signature(vec![pki.signer_der.clone()]);
+    signature.references = vec![
+        RefSpec::to("").with_transforms(&[ENVELOPED_URI, C14N_EXC]),
+        RefSpec::to("#sigobj-frame"),
+        RefSpec::signed_properties("#sp-frame"),
+    ];
+    let spec = DossierSpec {
+        dossier_signature: Some(complete(&pki, signature)),
+        extra_documents: vec![ExtraDocumentSpec::new("obj-second")],
+        ..Default::default()
+    };
+    let report = run_trusted(&build(&spec, &[("frame", &pki.signer_key)]), &pki);
+
+    assert_check(
+        &report,
+        CheckCode::ReferenceScopeComplete,
+        CheckStatus::Passed,
+    );
+    assert_eq!(states(&report), vec![CoverageState::Covered; 2]);
+    assert!(
+        report
+            .documents
+            .iter()
+            .all(|document| document.covered_by[0].via == CoverageVia::Frame)
+    );
 }
 
 /// A document-level signature covers the document it is placed in and nothing

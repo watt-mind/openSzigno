@@ -17,10 +17,10 @@
 mod common;
 
 use common::{
-    CertSpec, CounterSignatureSpec, CrlSpec, DossierSpec, ExtraDocumentSpec, RefSpec, SigSpec,
-    SigningCertificateSpec, TestKey, TimestampSpec, build, build_crl, countersignature,
-    document_signature, dossier_signature, extended_key_usage_extension, issued_by, keys, rsa_key,
-    self_signed, tamper,
+    C14N_EXC, CertSpec, CounterSignatureSpec, CrlSpec, DossierSpec, ENVELOPED_URI,
+    ExtraDocumentSpec, RefSpec, SigSpec, SigningCertificateSpec, TestKey, TimestampSpec, build,
+    build_crl, countersignature, document_signature, dossier_signature,
+    extended_key_usage_extension, issued_by, keys, rsa_key, self_signed, tamper,
 };
 use openszigno_verify::codes::{CheckCode, CheckStatus};
 use openszigno_verify::{
@@ -421,6 +421,86 @@ fn a_nested_signature_that_binds_nothing_is_reported_as_missing() {
         CheckStatus::Failed,
     );
     assert_eq!(report.signatures[1].verdict, Verdict::Invalid);
+}
+
+/// The enveloped-signature transform inside a countersignature cannot take the
+/// countersigned `ds:SignatureValue` with it.
+///
+/// XMLDSig 1.1 clause 6.6.4 removes only "the whole `Signature` element
+/// containing T", and an enveloped countersignature sits *inside* the
+/// signature it attests, so the parent's `ds:SignatureValue` is never in the
+/// removed subtree. The binding therefore still holds, and the transform
+/// changes neither the digest nor the effective node set of that reference.
+#[test]
+fn an_enveloped_transform_in_a_countersignature_still_binds_to_the_parent() {
+    let pki = pki();
+    let mut nested = enveloped_countersignature(&pki);
+    nested.references[0] =
+        RefSpec::countersigned("#sigval-doc").with_transforms(&[ENVELOPED_URI, C14N_EXC]);
+    let mut parent = countersigned_document_signature(&pki);
+    parent.countersignatures = vec![CounterSignatureSpec::new(nested)];
+    let spec = DossierSpec {
+        document_signature: Some(parent),
+        ..Default::default()
+    };
+    let report = run_trusted(
+        &build(
+            &spec,
+            &[("doc", &pki.signer_key), ("csig", &pki.counter_key)],
+        ),
+        &pki,
+    );
+
+    assert_check(
+        &report,
+        CheckCode::CountersignatureBindingOk,
+        CheckStatus::Passed,
+    );
+    assert_eq!(report.signatures[1].countersigns, vec![0]);
+    assert_eq!(report.signatures[1].verdict, Verdict::Valid);
+}
+
+/// The other direction is where the removal bites: a signature that references
+/// a `ds:SignatureValue` **inside itself** — the one belonging to an enveloped
+/// countersignature in its own unsigned properties — and then removes itself
+/// with the enveloped-signature transform digests none of that value, so it
+/// binds nothing.
+///
+/// Resolution alone said otherwise, which is exactly the reference-scope
+/// finding this file's rule shares with `scope`: the binding is decided by the
+/// effective node set, not by where a URI points.
+#[test]
+fn a_reference_to_a_signature_value_the_enveloped_transform_removes_binds_nothing() {
+    let pki = pki();
+    let mut nested = enveloped_countersignature(&pki);
+    nested.signature_value_id = Some("sigval-csig".to_owned());
+    let mut parent = countersigned_document_signature(&pki);
+    parent.signature_profile_type = "countersignature".to_owned();
+    parent
+        .references
+        .push(RefSpec::countersigned("#sigval-csig").with_transforms(&[ENVELOPED_URI, C14N_EXC]));
+    parent.countersignatures = vec![CounterSignatureSpec::new(nested)];
+    let spec = DossierSpec {
+        document_signature: Some(parent),
+        ..Default::default()
+    };
+    let report = run_trusted(
+        &build(
+            &spec,
+            &[("doc", &pki.signer_key), ("csig", &pki.counter_key)],
+        ),
+        &pki,
+    );
+
+    // The parent declares the e-dossier countersignature role, and its one
+    // candidate reference covers nothing, so the binding is missing rather
+    // than satisfied.
+    assert!(signature_has(
+        &report,
+        0,
+        CheckCode::CountersignatureBindingMissing
+    ));
+    assert!(report.signatures[0].countersigns.is_empty());
 }
 
 // ---------------------------------------------------------------------------

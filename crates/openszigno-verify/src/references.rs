@@ -174,6 +174,20 @@ pub(crate) fn digest_reference(
         let transform = Transform::from_uri(uri).ok_or(())?;
         value = match (transform, value) {
             (Transform::EnvelopedSignature, Value::Nodes(mut set)) => {
+                // XMLDSig 1.1 clause 6.6.4 removes the whole `ds:Signature`
+                // containing this reference. When the reference selected
+                // something inside that signature, the removal leaves the
+                // empty node set: there is nothing left to digest, and this
+                // build refuses such a reference rather than digesting the
+                // empty octet string, so that what a reference *digests* and
+                // what it *covers* (`ReferenceScope`) never disagree.
+                if set
+                    .apex()
+                    .ancestors()
+                    .any(|node| node.id() == signature.id())
+                {
+                    return Err(());
+                }
                 set.exclude(signature);
                 Value::Nodes(set)
             }
