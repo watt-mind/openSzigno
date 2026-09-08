@@ -1,4 +1,7 @@
-//! The `--trust-store DIR` loader.
+//! Trust material: the `--trust-store DIR` loader, and the ETSI TS 119 612
+//! trusted lists that `--trust-list` and `--lotl` name.
+//!
+//! # The `--trust-store DIR` loader
 //!
 //! Layout, per `docs/verify-design.md` §4:
 //!
@@ -24,8 +27,8 @@
 use std::fs;
 use std::path::Path;
 
-use openszigno_verify::MemoryTrustStore;
 use openszigno_verify::certs::certificates_from_bytes;
+use openszigno_verify::{MemoryTrustStore, RoxmltreeC14n, TrustListSnapshot};
 
 /// The largest trust-store file this loader will read, so that a store pointed
 /// at a huge file cannot exhaust memory.
@@ -34,7 +37,7 @@ const MAX_FILE_BYTES: u64 = 4 * 1024 * 1024;
 /// The largest number of files read from one directory.
 const MAX_FILES: usize = 1024;
 
-pub fn load(directory: &Path) -> Result<MemoryTrustStore, String> {
+pub(crate) fn load_store(directory: &Path) -> Result<MemoryTrustStore, String> {
     let metadata = fs::symlink_metadata(directory)
         .map_err(|_| "the trust store directory could not be inspected".to_owned())?;
     if !metadata.is_dir() {
@@ -95,4 +98,60 @@ fn read_directory(directory: &Path) -> Result<Vec<Vec<u8>>, String> {
         certificates.extend(parsed);
     }
     Ok(certificates)
+}
+
+/// Read a `--trust-list-signer` certificate, PEM or DER.
+///
+/// Exactly one certificate: a file holding several would leave "which one
+/// signed the list" ambiguous, and a verifier must not pick.
+pub(crate) fn load_signer(path: &Path) -> Result<Vec<u8>, String> {
+    let bytes = read_bounded(path, 4 * 1024 * 1024)?;
+    let certificates = openszigno_verify::certs::certificates_from_bytes(&bytes)
+        .map_err(|reason| format!("the trust-list signer certificate is not usable: {reason}"))?;
+    match certificates.len() {
+        1 => Ok(certificates.into_iter().next().expect("one certificate")),
+        _ => Err("the trust-list signer file must hold exactly one certificate".to_owned()),
+    }
+}
+
+pub(crate) fn load_trust_list(
+    path: &Path,
+    signers: &[Vec<u8>],
+    backend: &RoxmltreeC14n,
+) -> Result<openszigno_verify::TrustList, String> {
+    let bytes = read_bounded(
+        path,
+        openszigno_verify::trustlist::MAX_TRUST_LIST_BYTES as u64,
+    )?;
+    openszigno_verify::trustlist::load(&bytes, signers, backend)
+}
+
+/// The policy block's citation of one list, so a result names exactly which
+/// snapshot it relied on.
+pub(crate) fn snapshot_of(list: &openszigno_verify::TrustList) -> TrustListSnapshot {
+    TrustListSnapshot {
+        territory: list.territory.clone(),
+        sequence_number: list.sequence_number,
+        issue_date: list.issue_date.clone(),
+        next_update: list.next_update.clone(),
+        anchors: list.anchors.len(),
+        signature_verified: list
+            .checks
+            .iter()
+            .any(|check| check.code == openszigno_verify::CheckCode::TrustListSignatureOk),
+    }
+}
+
+/// Read a regular file, refusing symlinks and anything over `limit` bytes.
+/// The message never names the path, because it may be private.
+fn read_bounded(path: &Path, limit: u64) -> Result<Vec<u8>, String> {
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|_| "a trust material file could not be inspected".to_owned())?;
+    if !metadata.is_file() {
+        return Err("a trust material path is not a regular file".to_owned());
+    }
+    if metadata.len() > limit {
+        return Err("a trust material file is too large".to_owned());
+    }
+    fs::read(path).map_err(|_| "a trust material file could not be read".to_owned())
 }
