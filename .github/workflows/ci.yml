@@ -123,6 +123,44 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - run: cargo check --workspace --all-targets --locked
 
+  semver:
+    name: Semver checks
+    # Compares the crate on this branch against the version already
+    # published on crates.io. `cargo-semver-checks` reads the current
+    # `Cargo.toml` version to decide the allowed change kind, so a real
+    # minor/major bump on a pull request raises the bar it checks against
+    # instead of failing on the bump itself. See
+    # docs/releasing.md#semver-checks for how this applies to the 0.x
+    # crates here.
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable branch @ 2026-09-03
+        with:
+          toolchain: stable
+      - uses: taiki-e/install-action@84f5ac3124727fb3d284d4d22ee9ab3654fd09a6 # v2.87.7
+        with:
+          # A commit pin makes github.action_ref a SHA, so the tool the
+          # action would otherwise read from the ref has to be given.
+          tool: cargo-semver-checks@0.50.0
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Check openszigno-core against the published API
+        run: cargo semver-checks -p openszigno-core
+      - name: Check openszigno-verify against the published API (advisory)
+        # openszigno-verify on develop already carries breaking API changes
+        # relative to the published 0.4.0 (new pub fields on
+        # SignatureCoverage/ChainEntry, a new RevocationPolicy variant, and
+        # a renamed SignatureCoverage field), with no version bump yet to
+        # authorize them. That is a version decision for the next release,
+        # not something this job should block on; see
+        # docs/releasing.md#semver-checks. Flip this step blocking (drop
+        # `continue-on-error`) once the version is bumped to cover them.
+        continue-on-error: true
+        run: cargo semver-checks -p openszigno-verify
+
   coverage:
     name: Coverage
     runs-on: ubuntu-latest

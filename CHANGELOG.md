@@ -176,6 +176,17 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
 
 ### Added
 
+- The CI `semver` job runs `cargo-semver-checks` for `openszigno-core` and
+  `openszigno-verify` against the version already published on crates.io,
+  failing on a breaking API change unless the crate's `Cargo.toml` version
+  was bumped to cover it. See
+  [docs/releasing.md](docs/releasing.md#semver-checks) for how this applies
+  to the pre-1.0 `0.x` crates here. The `openszigno-verify` step currently
+  runs with `continue-on-error: true`: `develop` already carries breaking
+  API changes relative to the published `0.4.0` (new public fields on
+  `SignatureCoverage` and `ChainEntry`, a new `RevocationPolicy` variant, and
+  a renamed `SignatureCoverage` field) that need a version-bump decision at
+  the next release, not a code change here.
 - Golden output contract tests under `tests/golden/`: the stdout and exit
   status of `inspect`, `list`, `validate-structure`, `verify` and `extract`
   over every fixture in `tests/fixtures/`, in `--json` and human mode, plus
