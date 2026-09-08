@@ -1,8 +1,12 @@
 # Roadmap, residual risks, and maintainer policy
 
-This document lists planned work beyond the current extraction-only release,
-the risks that remain in the shipped code, and the maintainer rules for the
-private test corpus.
+This document lists the work planned beyond the current release, the risks
+that remain in the shipped code, and the maintainer rules for the private test
+corpus. Milestones M1 to M4 have all shipped: compatible namespaces, `verify`
+in all three of its phases, container timestamps with `--online` revocation
+fetching, and decryption of encrypted payloads. What remains is the "Not yet
+implemented" list below and the unordered [engineering
+items](#engineering-items).
 
 Nothing here changes the rule stated in
 [architecture.md](architecture.md#verification-boundary): until the code for a
@@ -148,7 +152,10 @@ timestamps as `timestamp_not_checked`, both blocking `skipped` checks.
   since expired. `--at` still overrides it, and an unverified token moves
   nothing;
 - `ArchiveTimeStamp`, dossier-level `es:TimeStamp`, and every unprocessed
-  qualifying property named and reported as `skipped` rather than ignored.
+  qualifying property named and reported rather than ignored. M3 then verified
+  the container `es:TimeStamp` elements, and the `info` status phase 3
+  introduced moved the purely reported ones off `skipped`, which now means only
+  "a required check was not performed".
 
 Level detection (B-B, B-T, B-LT, B-LTA) was deliberately left out: reporting a
 level implies a determination this build does not make, and `xades_level`

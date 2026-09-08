@@ -579,7 +579,7 @@ writes one compact line; this is pretty-printed:
 | `list` | `dossier`, plus `documents`: an array in source order with `index`, `title`, `creation_date`, `mime_type` (`media_type`, `subtype`, `extension`, `charset`), `source_size`, `object_ref`, `transforms`, and `nested_dossier`. `source_size` is `null` when the profile omits `SourceSize`. |
 | `extract` | `extracted` (array of `document_index`, `dossier_path`, `filename`, `path`, `bytes`, `detected_type`, `declared_type`, `decrypted`), `extracted_count`, `skipped_count`, `nested_dossiers_extracted`, `selected`. |
 | `validate-structure` | `valid_structure`, `documents`, `conformance_warnings`, `cryptographic_verification_performed` (always `false`). |
-| `verify` | `verdict`, `verification_time`, `policy`, `limits`, `counts`, `checks`, `signatures`. See [The `verify` command](#the-verify-command). |
+| `verify` | `verdict`, `verification_time`, `policy`, `limits`, `counts`, `checks`, `documents`, `signatures`, `timestamps`. `documents` is the per-document coverage inventory and `timestamps` the container `es:TimeStamp` reports; both are always present, as empty arrays when there is nothing to report. See [The `verify` command](#the-verify-command). |
 
 `valid_structure` stays `true` whenever parsing succeeded;
 `conformance_warnings` counts the structural deviations, which are listed
@@ -772,6 +772,10 @@ I/O and extraction policy.
 | `stdout_requires_single_document` | CLI | 4 | `--stdout` did not resolve to exactly one document, or the one it resolved to embeds a dossier while recursion is on. |
 | `document_not_extractable` | CLI | 5 | The document `--stdout` selected is encrypted or uses an unsupported transform chain. |
 | `trust_store_invalid` | CLI | 3 | `--trust-store` does not name a readable directory, holds a file that is not PEM or DER certificate data, or holds no trust anchor. A partially loaded store would silently change what "trusted" means, so the run fails instead. |
+| `trust_list_invalid` | CLI | 3 | A `--trust-list`, `--lotl`, or `--trust-list-signer` file could not be read or parsed. A trusted list that loaded only in part would silently change what "trusted" means, so the run fails instead. |
+| `revocation_store_invalid` | CLI | 3 | `--revocation-store` does not name a readable directory, holds more files than the loader will read, holds a file larger than `MAX_REVOCATION_ITEM_BYTES`, or holds a file that is neither a CRL nor an OCSP response. |
+| `online_options_invalid` | CLI | 3 | The `--online` transport could not be built, which today means `--online-proxy` is not a usable proxy URL. |
+| `online_cache_invalid` | CLI | 3 | The `--online-cache` directory could not be opened safely, or a cache file could not be written. A name inside it that already holds something else is not this error; that is one `online_fetch_failed` with the class `cache_collision`, and the run continues. |
 | `unsafe_output_directory` | CLI | 5 | The output path contains a symlink or reparse point, or is not a real directory. |
 | `total_size_limit` | CLI | 5 | Aggregate decoded size exceeds `max_total_decoded_bytes`. |
 
@@ -1242,6 +1246,7 @@ Reported verbatim under `data.limits` in `verify --json`.
 | `max_timestamps_per_signature` | 8 | `xades:SignatureTimeStamp` elements processed per signature. |
 | `max_chain_length` | 8 | Certificates in one candidate path, inclusive: a path of exactly this many certificates that ends at an anchor is accepted. |
 | `max_paths` | 32 | Completed candidate paths explored. |
+| `max_revocation_items` | 256 | CRLs or OCSP responses consulted from any one source while answering about a single certificate. |
 | path search expansions | 256 (fixed) | Total candidates visited during path building, successful or not. Not configurable. |
 | `ds:KeyInfo` candidates | 16 (fixed) | Certificates tried as the signer. |
 | `xades:Cert` entries | 16 (fixed) | `SigningCertificate` entries digested against the candidates. |
@@ -2459,6 +2464,7 @@ verify), and `revocation_not_checked` (the caller switched revocation off).
 | `trust_list_unverified` | `unknown` | A trusted list was used without `--trust-list-signer`, so its own signature was not checked. Blocking. |
 | `trust_list_signature_ok` | `passed` | The list's enveloped XMLDSig signature verified against the supplied signer certificate and covers the whole document. |
 | `trust_list_signature_invalid` | `failed` | It did not verify, does not cover the whole list, uses an algorithm or transform outside the allowlist, or is absent while a signer was demanded. |
+| `trust_list_service_not_granted` | never emitted | Reserved in `CheckCode` and never produced by this build: a service that is not granted at the validation time is reported through `certificate_not_qualified` instead. Listed here because the code is part of the stable enumeration a consumer may see in a later release. |
 | `certificate_qualified` | `info` | The chain ends at a trusted-list CA/QC service granted at the validation time, and any post-eIDAS certificate asserts `QcCompliance`. |
 | `certificate_not_qualified` | `info` | The trusted list does not record the anchor's service as granted then, or a post-eIDAS certificate carries no `QcCompliance`. |
 | `certificate_qualified_unknown` | `info` | No trusted list covers the anchor, so qualified status is not determined. Distinct from `certificate_not_qualified`. |

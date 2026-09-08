@@ -1,12 +1,13 @@
-# Synthetic unsigned fixtures
+# Synthetic fixtures
 
 Every file in this directory was created for openSzigno testing. The fixtures
 contain no real signatures or personal/company data and are dedicated under
 [CC0-1.0](LICENSE).
 
-They test structural parsing and extraction only. They are not authentic or
-legally valid e-dossiers and must not be used as signature-verification
-evidence.
+All of them are unsigned except `xmldsig/openssl-rsa-sha256.es3`, which
+carries one signature made by a synthetic test PKI whose private keys are not
+committed. They are not authentic or legally valid e-dossiers, and none of
+them may be used as evidence that any signature is genuine.
 
 | File | Expected behavior |
 | --- | --- |

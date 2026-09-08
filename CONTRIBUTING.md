@@ -110,6 +110,9 @@ CI additionally runs, on every pull request:
 
 | Check | Command |
 | --- | --- |
+| Markdown lint and relative links | `npx markdownlint-cli2` over every tracked `*.md`, then `python3 scripts/check-doc-links.py` |
+| Rustdoc | `cargo doc --workspace --no-deps --locked` with `RUSTDOCFLAGS=-D warnings` |
+| Unused dependencies | `cargo machete` |
 | Licences and advisories | `cargo deny check --all-features` |
 | Crate manifests | `cargo package -p <crate> --no-verify --locked` for all three crates |
 | Release container | `docker build .`, then the CLI subcommands inside the image |
@@ -117,7 +120,7 @@ CI additionally runs, on every pull request:
 | Commit and PR hygiene (pull requests only) | `git log --format=%s origin/<base>..HEAD` through `scripts/commit-msg.sh -`, plus a `Fixes\|Closes\|Refs LAB-<n>` line in the pull request body |
 | Source file length | `python3 scripts/check-file-length.py` |
 | Golden output contract | `python3 scripts/golden.py check --bin target/release/openszigno` |
-| Semver checks (`openszigno-core`, `openszigno-verify` against crates.io) | `cargo semver-checks -p <crate>` |
+| Semver checks (`openszigno-core` blocking, `openszigno-verify` advisory, both against crates.io) | `cargo semver-checks -p <crate>` |
 | Coverage quality gate | `python3 scripts/coverage_gate.py --lcov lcov.info --base origin/develop` |
 | Mutation testing (nightly, not a required check) | `cargo mutants -p <crate> --timeout-multiplier 2 -j 2` then `python3 scripts/mutants_gate.py --dir mutants.out --crate <crate>` |
 | Fuzzing (nightly, not a required check) | `cargo +nightly fuzz run <target> -- -max_total_time=600 -jobs=1`; see [docs/testing.md](docs/testing.md#fuzzing) |
@@ -186,6 +189,21 @@ and enforces, in the CI `coverage` job:
 The workspace-wide `--fail-under-lines 85` check also still runs, as a
 coarse backstop after the script's finer-grained gates.
 
+On a pull request, the `coverage` job posts (and on a later push, refreshes
+in place) one PR comment marked `<!-- coverage-gate -->` with the same
+Markdown summary that appears in the job's step summary.
+
+To update the ratchet floors after a change that legitimately raises or
+lowers coverage, run coverage locally and rewrite the file:
+
+```sh
+cargo llvm-cov --workspace --lcov --output-path lcov.info
+python3 scripts/coverage_gate.py --lcov lcov.info --update-floors
+```
+
+Commit the updated `scripts/coverage-floors.txt` alongside the change that
+caused the shift. CI never rewrites this file itself.
+
 ### Mutation testing gate
 
 `.github/workflows/mutants.yml` runs `cargo-mutants` nightly (and on manual
@@ -207,21 +225,6 @@ refreshes a single tracking issue titled "Mutation testing: survivors"
 instead of blocking a merge. See
 [docs/testing.md](docs/testing.md#mutation-testing) for how to run it
 locally, read a survivor, and update the floors file.
-
-On a pull request, the job posts (and on a later push, refreshes in place)
-one PR comment marked `<!-- coverage-gate -->` with the same Markdown
-summary that appears in the job's step summary.
-
-To update the ratchet floors after a change that legitimately raises or
-lowers coverage, run coverage locally and rewrite the file:
-
-```sh
-cargo llvm-cov --workspace --lcov --output-path lcov.info
-python3 scripts/coverage_gate.py --lcov lcov.info --update-floors
-```
-
-Commit the updated `scripts/coverage-floors.txt` alongside the change that
-caused the shift. CI never rewrites this file itself.
 
 ## Documentation
 
@@ -261,8 +264,10 @@ the same pull request, and CI lints the Markdown and checks relative links.
 Check locally before pushing:
 
 ```sh
-npx --yes markdownlint-cli2@0.18.1 "**/*.md" "#target" "#refs" "#tmp" "#samples"
+npx --yes markdownlint-cli2@0.18.1 "**/*.md" "#target" "#refs" "#tmp" \
+  "#samples" "#node_modules" "#fuzz/target"
 python3 scripts/check-doc-links.py
+python3 scripts/check-file-length.py
 ```
 
 ## Local hooks
@@ -282,9 +287,11 @@ enforces the Conventional Commits subject shape above via
 
 - Every behavioural change needs a test. A security fix needs a regression
   test that fails before the fix.
-- Public fixtures must be **synthetic and unsigned**, authored for this
-  project, free of personal or company data, and dedicated under CC0-1.0 in
-  `tests/fixtures/LICENSE`.
+- Public fixtures must be **synthetic**, authored for this project, free of
+  personal or company data, and dedicated under CC0-1.0 in
+  `tests/fixtures/LICENSE`. They are unsigned unless a test needs a signature,
+  in which case it is made by a synthetic test PKI whose private keys are
+  never committed, as `tests/fixtures/xmldsig/` is.
 - Never derive a public fixture from a real dossier, even by editing it.
 - Prefer generating limit cases (deep nesting, node counts, ZIP bombs,
   unsafe names) inside the test code instead of committing large binaries.
@@ -331,11 +338,25 @@ issue and propose the new value with reasoning.
 
 ## Scope reminder
 
-The current release performs structural validation and bounded extraction
-only. Signature, certificate, timestamp, and decryption support are planned
-milestones in [docs/roadmap.md](docs/roadmap.md). Until that code exists, no
+`verify` performs cryptographic checks: XMLDSig canonicalization, reference
+digests and signature values, the e-dossier reference-scope rules, the XAdES
+signed `SigningCertificate` binding, RFC 3161 signature and container
+timestamps, certificate paths, revocation, and ETSI TS 119 612 trusted lists.
+It reports `valid` only when every check it makes passed at the stated
+validation time, against trust material the caller supplied; any required
+check it could not perform caps the verdict at `indeterminate`. `--online`
+fetches revocation data only, only for certificates on a path to a configured
+anchor, and is off by default. `extract --decrypt-key` reverses the `encrypt`
+transform. The other four commands verify nothing at all, and no command
+determines a document's legal effect.
+
+What is still unimplemented is listed in
+[docs/roadmap.md](docs/roadmap.md#not-yet-implemented) and, with the code-level
+detail, in
+[docs/architecture.md](docs/architecture.md#not-yet-implemented). No
 contribution may add wording or output that states or implies that a
-signature, timestamp, certificate, or dossier is valid.
+signature, timestamp, certificate, or dossier is valid unless the code that
+proves it exists and is tested.
 
 ## License of contributions
 

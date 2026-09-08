@@ -105,29 +105,38 @@ writes one compact object; this one is pretty-printed and trimmed:
 }
 ```
 
-Verification. A run needs trust material, here a trust store of anchors,
-`--online` to fetch the revocation data it lacks, and `--at` to pin the
+Verification. A run needs trust material you supply, here a trust store
+holding the repository's own synthetic anchor, and `--at` to pin the
 validation time:
 
 ```sh
+mkdir -p trust/anchors
+cp tests/fixtures/xmldsig/root.pem trust/anchors/
 openszigno verify tests/fixtures/xmldsig/openssl-rsa-sha256.es3 \
-  --trust-store ./trust --online --online-cache ./revocation \
-  --at 2027-01-01T00:00:00Z
+  --trust-store ./trust --at 2027-01-01T00:00:00Z
 ```
 
 ```text
 Verification verdict: indeterminate
 Validation time: 2027-01-01T00:00:00Z
+Signatures: 1
   ...
 [0] document signature: indeterminate
+  validation time: 2027-01-01T00:00:00Z (source: at_flag)
+  ...
   signature_value_ok: passed
+  xades_absent: skipped
+  ...
   cert_path_ok: passed
+  ...
   revocation_status_unknown: unknown
-Revocation policy: online. A verdict of `valid` means every check passed at the stated validation time; it is not a legal opinion.
+Revocation policy: offline. A verdict of `valid` means every check passed at the stated validation time; it is not a legal opinion.
 ```
 
 Exit status 7: nothing failed, but this fixture carries no XAdES properties,
 no signature timestamp and no revocation data, so nothing reaches `valid`.
+Adding `--online` would let the run fetch the revocation data it lacks from
+the URLs the certificates themselves publish.
 
 ## Commands
 
