@@ -91,8 +91,9 @@ const MAX_OCSP_BYTES: u64 = 64 * 1024;
 const MAX_REDIRECTS: usize = 3;
 /// The largest number of certificates one run will fetch for, and the largest
 /// number of URLs tried per certificate. Both bound how much traffic opening
-/// one dossier can generate.
-const MAX_CERTIFICATES: usize = 32;
+/// one dossier can generate. The certificate budget is the caller's, because
+/// a run fetches over several rounds and the cap is on the run.
+pub const MAX_CERTIFICATES: usize = 32;
 const MAX_URLS_PER_CERTIFICATE: usize = 4;
 
 /// What one run fetched, and what it could not.
@@ -110,12 +111,76 @@ pub struct Fetched {
     /// One `online_fetch_failed` per failure, naming the URL and the failure
     /// class.
     pub checks: Vec<Check>,
+    /// How much of the caller's certificate budget this run consumed: one for
+    /// every certificate it actually opened a connection on behalf of. The
+    /// caller carries the remainder into the next round, so the cap on how
+    /// much traffic one dossier can generate is a cap on the whole run rather
+    /// than on each round of it.
+    pub spent: usize,
 }
 
 impl Fetched {
     fn push_ocsp(&mut self, der: Vec<u8>, cert_id: String) {
         self.ocsp.push(der);
         self.ocsp_cert_ids.push(cert_id);
+    }
+
+    /// Take everything another round fetched into this accumulator, keeping
+    /// each OCSP response next to the question it answers.
+    pub fn absorb(&mut self, other: Self) {
+        let Self {
+            crls,
+            ocsp,
+            ocsp_cert_ids,
+            checks,
+            spent,
+        } = other;
+        self.crls.extend(crls);
+        self.ocsp.extend(ocsp);
+        self.ocsp_cert_ids.extend(ocsp_cert_ids);
+        self.checks.extend(checks);
+        self.spent += spent;
+    }
+}
+
+/// One certificate a URL may be fetched for, with every validation time a
+/// validated path carrying it was evaluated at.
+///
+/// The times matter because coverage is a question about an instant: a CRL
+/// that expired in 2021 still covers a signer path a verified timestamp pins
+/// to 2020, and a CRL issued today does not. Judging every certificate at one
+/// global time both fetches for certificates a run already covers and, worse,
+/// calls a certificate covered by data that does not apply at the instant the
+/// verdict rests on.
+#[derive(Clone, Debug)]
+pub struct EligibleCertificate {
+    pub der: Vec<u8>,
+    /// Every validation time this certificate is needed at, deduplicated. An
+    /// empty list means no time this run can name, and nothing is fetched.
+    pub times: Vec<i64>,
+}
+
+impl EligibleCertificate {
+    /// Group the `(certificate, validation time)` pairs
+    /// [`openszigno_verify::VerifyReport::validated_path_certificates_at`]
+    /// returns, so each certificate is considered once and carries every time
+    /// it is needed at.
+    pub fn group(pairs: Vec<(Vec<u8>, i64)>) -> Vec<Self> {
+        let mut out: Vec<Self> = Vec::new();
+        for (der, time) in pairs {
+            match out.iter_mut().find(|entry| entry.der == der) {
+                Some(entry) => {
+                    if !entry.times.contains(&time) {
+                        entry.times.push(time);
+                    }
+                }
+                None => out.push(Self {
+                    der,
+                    times: vec![time],
+                }),
+            }
+        }
+        out
     }
 }
 
@@ -161,14 +226,17 @@ pub struct GapRequest<'a> {
     pub certificates: &'a [Vec<u8>],
     /// The only certificates a URL may be fetched for: those on a path the
     /// verifier validated to a configured trust anchor, for a signature or a
-    /// timestamp under evaluation. See
-    /// [`openszigno_verify::VerifyReport::validated_path_certificates`].
-    pub eligible: &'a [Vec<u8>],
+    /// timestamp under evaluation, each with the validation time that path was
+    /// evaluated at. See
+    /// [`openszigno_verify::VerifyReport::validated_path_certificates_at`].
+    pub eligible: &'a [EligibleCertificate],
     /// The configured trust anchors, needed for the RFC 6960 section 2.2
     /// trusted-responder model when coverage is asked.
     pub anchors: &'a [Vec<u8>],
     pub data: &'a RevocationData<'a>,
-    pub time: i64,
+    /// How many certificates this call may still fetch for. The caller owns
+    /// the budget, because it spans every round of a run.
+    pub budget: usize,
     pub limits: &'a VerifyLimits,
 }
 
@@ -242,7 +310,7 @@ impl Fetcher {
             eligible,
             anchors,
             data,
-            time,
+            mut budget,
             limits,
         } = *request;
         let parsed = dedup(
@@ -269,7 +337,6 @@ impl Fetcher {
         }
         let mut crls_tried: BTreeSet<String> = BTreeSet::new();
         let mut ocsp_tried: BTreeSet<(String, String)> = BTreeSet::new();
-        let mut budget = MAX_CERTIFICATES;
 
         for subject in &parsed {
             if budget == 0 {
@@ -285,19 +352,24 @@ impl Fetcher {
             // behalf of this certificate, so this certificate has to be one
             // the verifier put on a path it validated to a configured anchor,
             // for a signature or a timestamp it was actually evaluating.
-            if !eligible.contains(&subject.der) {
+            let Some(entry) = eligible.iter().find(|entry| entry.der == subject.der) else {
                 continue;
-            }
+            };
             let Some(issuer) = parsed.iter().find(|candidate| {
                 candidate.subject_name_der() == subject.issuer_der()
                     && openszigno_verify::certs::verify_issued_by(subject, candidate)
             }) else {
                 continue;
             };
-            if is_covered(subject, issuer, &parsed, &anchors, data, time, limits) {
+            // Coverage is asked once per validation time this certificate is
+            // needed at, and one uncovered instant is enough to fetch: an
+            // answer that is fresh at the clock says nothing about the
+            // instant a verified timestamp pins a historical path to.
+            if covered_at_every_time(entry, subject, issuer, &parsed, &anchors, data, limits) {
                 continue;
             }
             budget -= 1;
+            fetched.spent += 1;
 
             // OCSP first: it answers about this certificate, where a CRL is a
             // list that may run to megabytes.
@@ -335,13 +407,13 @@ impl Fetcher {
             // verifier's own code again, with what was just fetched, before
             // the CRL is skipped. Stopping at "the server replied" is what
             // made a central responder look like a dead end.
-            if is_covered(
+            if covered_at_every_time(
+                entry,
                 subject,
                 issuer,
                 &parsed,
                 &anchors,
                 &probe(data, &fetched),
-                time,
                 limits,
             ) {
                 continue;
@@ -494,6 +566,28 @@ fn failure(url: &str, class: FailureClass) -> Check {
             class.describe()
         ),
     )
+}
+
+/// Whether `data` already answers for this certificate at **every** validation
+/// time a path carrying it was evaluated at.
+///
+/// One uncovered instant is a gap: the verdict rests on each of these times,
+/// so data that covers the certificate at one of them and not at another
+/// leaves a question this run still has to answer. A certificate with no time
+/// at all is treated as covered, because there is no instant to fetch for.
+fn covered_at_every_time(
+    entry: &EligibleCertificate,
+    subject: &ParsedCertificate,
+    issuer: &ParsedCertificate,
+    candidates: &[ParsedCertificate],
+    anchors: &[ParsedCertificate],
+    data: &RevocationData<'_>,
+    limits: &VerifyLimits,
+) -> bool {
+    entry
+        .times
+        .iter()
+        .all(|time| is_covered(subject, issuer, candidates, anchors, data, *time, limits))
 }
 
 /// `data` widened with everything fetched so far, so coverage can be asked
@@ -687,6 +781,22 @@ mod tests {
         let check = failure("http://crl.example/ca.crl", FailureClass::TooLarge(16));
         assert!(check.message.contains("too large"));
         assert!(check.message.contains("16-byte"));
+    }
+
+    /// One certificate on two validated paths is one question asked at two
+    /// instants, not two questions.
+    #[test]
+    fn grouping_keeps_every_time_a_certificate_is_needed_at() {
+        let grouped = EligibleCertificate::group(vec![
+            (vec![1], 100),
+            (vec![2], 100),
+            (vec![1], 200),
+            (vec![1], 100),
+        ]);
+        assert_eq!(grouped.len(), 2);
+        assert_eq!(grouped[0].der, vec![1]);
+        assert_eq!(grouped[0].times, vec![100, 200]);
+        assert_eq!(grouped[1].times, vec![100]);
     }
 
     #[test]
