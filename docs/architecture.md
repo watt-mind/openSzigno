@@ -667,6 +667,20 @@ Example of a failure envelope, from `inspect --json` on
 }
 ```
 
+### Contract tests
+
+The envelope above is not only described here; it is captured. `tests/golden/`
+holds the stdout and exit status of every command over every fixture in
+`tests/fixtures/`, in both `--json` and human mode, and CI's `golden` job
+compares the built binary against those files on every pull request. A change
+to any golden file is a change to this contract and is reviewed with the
+`schema_version` rule in mind: an added field, warning code, check code, or
+human line is additive, keeps `schema_version` at `1`, and needs the goldens
+regenerated and a `CHANGELOG.md` entry; a removed or renamed field, a changed
+type, or a changed exit status for an existing outcome needs a
+`schema_version` bump in the same pull request. Only two values are masked,
+both clock-dependent times; the rules are in `tests/golden/README.md`.
+
 ## Exit statuses
 
 Exit statuses are stable at the category level:

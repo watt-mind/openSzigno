@@ -161,6 +161,16 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
 
 ### Added
 
+- Golden output contract tests under `tests/golden/`: the stdout and exit
+  status of `inspect`, `list`, `validate-structure`, `verify` and `extract`
+  over every fixture in `tests/fixtures/`, in `--json` and human mode, plus
+  two trusted `verify` runs over the signed XMLDSig vector.
+  `scripts/golden.py check --bin <binary>` diffs the built binary against
+  them and `update` regenerates them; the new CI `golden` job and the release
+  smoke test both run `check`. Only two clock-dependent times are masked. A
+  diff is a change to the JSON envelope contract and is reviewed under the
+  `schema_version` rule; see
+  [tests/golden/README.md](tests/golden/README.md).
 - `--online-allow-private` on `verify`, which permits `--online` to contact
   loopback, private, link-local and unique-local destinations and the name
   `localhost`. It requires `--online`, waives the address rules and nothing

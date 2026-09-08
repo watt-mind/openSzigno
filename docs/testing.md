@@ -33,6 +33,7 @@
 | `crates/openszigno-cli/tests/decrypt.rs` | CLI integration tests | `extract --decrypt-key` through the built binary: a decrypted document and its `decrypted: true`, a bundled PEM key and certificate, a bare key refused for want of one, a stranger's recipient and a legacy cipher as skip warnings, malformed CMS as exit 5, the passphrase coming from a file and from the environment but from no flag, the capability string, and the guarantee that no key or passphrase byte reaches stdout, stderr, or the envelope on a successful or a failing run. Every key it writes to a temporary file was generated seconds earlier by the helper above. |
 | `crates/openszigno-cli/tests/private_smoke.rs` | Private opt-in tests | Compatibility smoke tests against locally held real dossiers. They do nothing unless the relevant environment variable is set. |
 | `tests/fixtures/` | Fixture data | Synthetic, unsigned, CC0-dedicated `.es3` files used by both integration suites. |
+| `tests/golden/` | Golden contract files | The captured stdout and exit status of every command over every fixture, in `--json` and human mode, plus two trusted `verify` runs over the signed XMLDSig vector. Compared by `scripts/golden.py`; see [Golden output contract](#golden-output-contract). |
 
 The CLI integration tests exercise the real binary rather than calling library
 functions, because the JSON envelope, exit statuses, and stdout/stderr split
@@ -45,6 +46,43 @@ cargo fmt --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
+
+## Golden output contract
+
+The suites above check behaviour from inside. `tests/golden/` checks the
+output itself: for every fixture under `tests/fixtures/`, the stdout and exit
+status of `inspect`, `list`, `validate-structure`, `verify` and `extract` in
+`--json` mode, and of `inspect`, `list`, `validate-structure` and `verify` in
+human mode. The signed vector `tests/fixtures/xmldsig/openssl-rsa-sha256.es3`
+additionally gets two `verify` runs with a trust store holding its committed
+synthetic anchor and `--at` pinning the validation time.
+
+`scripts/golden.py` runs that matrix. It builds nothing, takes the binary
+from `--bin`, reaches no network, orders every case deterministically, and
+extracts into throwaway directories under the system temporary directory that
+it removes when it finishes.
+
+```sh
+cargo build --release --locked -p openszigno-cli
+python3 scripts/golden.py check  --bin target/release/openszigno
+python3 scripts/golden.py update --bin target/release/openszigno
+```
+
+`check` prints a unified diff per mismatching file and exits 1 on any
+difference, a golden that is not committed, or a committed golden no case
+produces. CI runs it in the `golden` job, and the release smoke test runs it
+against the packaged binary.
+
+Exactly two values are masked, both clock-dependent:
+`data.verification_time.effective` and the human `Validation time:` line
+always, and a signature's `validation_time` only when its
+`validation_time_source` is `current_time`. Nothing else is normalised, so
+byte counts, certificate dates, and array order are compared as produced.
+
+A diff is a change to the output contract, not a broken test. What to do
+about one, and the `schema_version` rule it is judged under, is in
+[tests/golden/README.md](../tests/golden/README.md) and
+[CONTRIBUTING.md](../CONTRIBUTING.md#golden-output-contract).
 
 ## Coverage
 

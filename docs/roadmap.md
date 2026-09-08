@@ -393,12 +393,20 @@ Residuals deliberately left out of M4:
   produced; the reference CLI's cipher list is OpenSSL `enc` names, which are
   CBC-era.
 - **Timing.** The RSA private-key operation runs through `rsa` 0.9, whose
-  non-constant-time behaviour is RUSTSEC-2023-0071. That advisory is accepted
-  in `deny.toml` on the grounds that the tool never held a private key; M4
-  makes it hold one for the length of one `extract` run. The exposure needs a
-  local attacker who can time that run, which is outside the threat model in
-  [SECURITY.md](../SECURITY.md), but the note in `deny.toml` was updated and
-  the ignore should be revisited when `rsa` 0.10 is stable.
+  Marvin/Bleichenbacher exposure is RUSTSEC-2023-0071. That advisory is
+  accepted in `deny.toml` on the grounds that the tool never held a private
+  key; M4 makes it hold one for the length of one `extract` run. The exposure
+  is a chosen-ciphertext one against PKCS#1 v1.5 key transport, not a
+  bystander timing one: it needs an attacker who submits many crafted dossiers
+  to the same key and can tell success from failure across those attempts,
+  which is a remote exposure for a *service* wrapped around
+  `extract --decrypt-key`, not for one operator decrypting their own dossier.
+  Decryption is blinded, which closes the timing signal from the modular
+  exponentiation only; the success/failure boolean the attack is built on
+  stays. See
+  [SECURITY.md](../SECURITY.md#rsa-key-transport-decryption-chosen-ciphertext-and-timing-limits)
+  for the full statement. The note in `deny.toml` was updated and the ignore
+  should be revisited when `rsa` 0.10 is stable.
 
 ## Field observations from the private corpus
 
