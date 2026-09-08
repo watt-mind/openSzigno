@@ -66,7 +66,10 @@ docs: document the stable error codes and their exit statuses
 CI's `hygiene` job enforces this shape on every commit subject in a pull
 request's range (`scripts/commit-msg.sh`, the same check the local
 commit-msg hook runs), skipping merge commits and commits authored by
-`dependabot[bot]` or `github-actions[bot]`. It also requires the pull
+`dependabot[bot]` or `github-actions[bot]`. On a release pull request into
+`master` only commits not already on `develop` are checked, since every
+commit on `develop` passed this job on the pull request that landed it.
+It also requires the pull
 request body to contain a line starting `Fixes LAB-<n>`, `Closes LAB-<n>`,
 or `Refs LAB-<n>` (case-insensitive), so every change traces to a Linear
 ticket; a bot-authored pull request is exempt, and a human-authored one

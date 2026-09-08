@@ -79,8 +79,17 @@ jobs:
         run: |
           set -euo pipefail
           base="origin/${{ github.event.pull_request.base.ref }}"
+          # A release pull request promotes develop to master. Every
+          # commit in that range already passed this check on the pull
+          # request that landed it on develop, and some predate the rule,
+          # so only commits that are not on develop yet are checked there.
+          exclude=""
+          if [ "${{ github.event.pull_request.base.ref }}" = "master" ]; then
+            exclude="^origin/develop"
+          fi
           status=0
-          for hash in $(git log --format=%H "$base"..HEAD); do
+          # shellcheck disable=SC2086
+          for hash in $(git log --format=%H "$base"..HEAD $exclude); do
             # `git rev-list --parents -n1` prints "<hash> <parent>...";
             # more than one parent word means a merge commit. develop's
             # history has merge commits ("Merge pull request ...") this
