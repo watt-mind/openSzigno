@@ -14,6 +14,14 @@
 use std::io;
 use std::path::Path;
 
+/// How much of an existing file [`OutputDir::read_file`] will read.
+///
+/// Its only caller compares the bytes against an artefact it already holds,
+/// which the fetch cap keeps at or below the verifier's own item limit, so a
+/// longer file is by definition not equal to what is being written and there
+/// is nothing to gain by reading on.
+const MAX_COMPARED_BYTES: u64 = openszigno_verify::MAX_REVOCATION_ITEM_BYTES as u64 + 1;
+
 /// Why an output directory could not be prepared.
 ///
 /// The messages are stable strings and never contain a path.
@@ -214,6 +222,55 @@ mod imp {
             }
         }
 
+        /// Open one subdirectory, creating it only if it is not there.
+        ///
+        /// `create_subdirectory` above is for an extraction tree, where a name
+        /// that already exists is a collision and must fail. A cache is the
+        /// other case: `crls/` and `ocsp/` are expected to survive between
+        /// runs, and two concurrent runs may both find them missing. The
+        /// directory is still opened with `O_NOFOLLOW` relative to this
+        /// descriptor, so an existing entry that is a symlink is refused
+        /// rather than followed.
+        pub fn open_or_create_subdirectory(&self, name: &str) -> Result<Self, OpenError> {
+            let name = OsStr::new(name);
+            match open_component(&self.directory, name) {
+                Ok(directory) => Ok(Self { directory }),
+                Err(OpenError::Io(_)) if !exists_at(&self.directory, name) => {
+                    match rustix::fs::mkdirat(&self.directory, name, Mode::RWXU) {
+                        // A concurrent run that won the race made it first,
+                        // which is the outcome this wanted anyway.
+                        Ok(()) | Err(rustix::io::Errno::EXIST) => {}
+                        Err(_) => {
+                            return Err(OpenError::Io("could not create the output directory"));
+                        }
+                    }
+                    open_component(&self.directory, name).map(|directory| Self { directory })
+                }
+                Err(error) => Err(error),
+            }
+        }
+
+        /// Read one file from the directory without following a final symlink.
+        pub fn read_file(&self, name: &str) -> io::Result<Vec<u8>> {
+            use std::io::Read as _;
+
+            let file = rustix::fs::openat(
+                &self.directory,
+                name,
+                OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                Mode::empty(),
+            )
+            .map(File::from)
+            .map_err(to_io_error)?;
+            let mut bytes = Vec::new();
+            // Bounded by the caller, which only ever compares against material
+            // it already holds.
+            (&file)
+                .take(super::MAX_COMPARED_BYTES)
+                .read_to_end(&mut bytes)?;
+            Ok(bytes)
+        }
+
         /// Remove one file from the directory.
         pub fn remove_file(&self, name: &str) -> io::Result<()> {
             rustix::fs::unlinkat(&self.directory, name, AtFlags::empty()).map_err(to_io_error)
@@ -301,6 +358,46 @@ mod imp {
             std::fs::create_dir(&path)
                 .map_err(|_| OpenError::Io("could not create the output directory"))?;
             Self::open(&path)
+        }
+
+        pub fn open_or_create_subdirectory(&self, name: &str) -> Result<Self, OpenError> {
+            self.revalidate()
+                .map_err(|_| OpenError::Unsafe("output must be a real directory, not a symlink"))?;
+            let path = self.path.join(name);
+            match std::fs::symlink_metadata(&path) {
+                Ok(metadata) if metadata.file_type().is_dir() => return Self::open(&path),
+                Ok(_) => {
+                    return Err(OpenError::Unsafe(
+                        "output must be a real directory, not a symlink",
+                    ));
+                }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(_) => return Err(OpenError::Io("could not inspect the output directory")),
+            }
+            match std::fs::create_dir(&path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+                Err(_) => return Err(OpenError::Io("could not create the output directory")),
+            }
+            Self::open(&path)
+        }
+
+        pub fn read_file(&self, name: &str) -> io::Result<Vec<u8>> {
+            use std::io::Read as _;
+
+            self.revalidate()?;
+            let path = self.path.join(name);
+            let metadata = std::fs::symlink_metadata(&path)?;
+            if metadata.file_type().is_symlink() {
+                return Err(io::Error::other("refusing to read through a symlink"));
+            }
+            super::reject_reparse_point(&metadata)
+                .map_err(|_| io::Error::other("refusing to read through a reparse point"))?;
+            let file = std::fs::File::open(&path)?;
+            let mut bytes = Vec::new();
+            file.take(super::MAX_COMPARED_BYTES)
+                .read_to_end(&mut bytes)?;
+            Ok(bytes)
         }
 
         pub fn remove_file(&self, name: &str) -> io::Result<()> {

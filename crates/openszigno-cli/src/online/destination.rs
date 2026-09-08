@@ -1,0 +1,413 @@
+//! Where `--online` is allowed to connect.
+//!
+//! The URL comes out of a certificate, and until a path to a configured trust
+//! anchor has been built that certificate is just bytes somebody handed the
+//! tool. So the URL is treated as attacker-chosen and put through a
+//! destination policy before a socket is opened:
+//!
+//! - **`http` and `https` only**, exactly as published. Every other scheme is
+//!   refused rather than rewritten into one this build speaks.
+//! - **No userinfo.** A `user:password@host` authority is a way of making a
+//!   URL read as one host while naming another, and it is also credential
+//!   material this tool has no business sending anywhere.
+//! - **No private destinations**, unless `--online-allow-private` says
+//!   otherwise. The list is exact: **loopback** (`127.0.0.0/8`, `::1`),
+//!   **RFC 1918 private** (`10/8`, `172.16/12`, `192.168/16`),
+//!   **link-local** (`169.254/16`, `fe80::/10`), **unique-local**
+//!   (`fc00::/7`), **unspecified** (`0.0.0.0`, `::`, and the rest of
+//!   `0.0.0.0/8`), **broadcast** (`255.255.255.255`), **multicast**
+//!   (`224/4`, `ff00::/8`), the **cloud metadata** addresses
+//!   `169.254.169.254` and `fd00:ec2::254`, and the name `localhost` (and any
+//!   `*.localhost`). An IPv4-mapped IPv6 address is judged as the IPv4
+//!   address it carries, so it is not a way round any of the above. A dossier
+//!   that could point the verifier at `http://169.254.169.254/` or at a
+//!   service on the operator's own subnet would have turned a signature check
+//!   into a port scanner and an SSRF primitive.
+//! - **The resolved address is checked too.** A public name that resolves to
+//!   `127.0.0.1` — DNS rebinding, or simply a hostile zone — is refused on the
+//!   address, not on the name. Every hop is checked: the URL out of the
+//!   certificate and each redirect target the fetcher follows go through this
+//!   module before a socket is opened. The lookup happens here and the
+//!   connection is made by `ureq`, which resolves again, so this is a
+//!   mitigation and not a proof; it is one of the reasons the flag exists at
+//!   all.
+//!
+//! Everything in this module is about *reaching* bytes. Nothing here decides
+//! whether the bytes are believed: that is the verifier's, offline.
+
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, ToSocketAddrs as _};
+
+/// Why a destination was not contacted.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum Refusal {
+    /// The policy refuses this destination. The text is the reason, and it is
+    /// reported to the caller.
+    Refused(&'static str),
+    /// The host does not resolve. That is a fact about the network, not a
+    /// policy decision, so it is reported as a transport failure.
+    Unresolvable,
+}
+
+const REFUSED_SCHEME: &str = "the URL scheme is not http or https";
+const REFUSED_NO_HOST: &str = "the URL names no host";
+const REFUSED_USERINFO: &str = "the URL carries userinfo before the host";
+const REFUSED_LOCALHOST: &str = "the host is localhost, which is not a destination a certificate legitimately publishes; pass --online-allow-private to permit it";
+const REFUSED_LITERAL: &str = "the host is a loopback, private, link-local, unique-local, unspecified or multicast address; pass --online-allow-private to permit it";
+const REFUSED_RESOLVED: &str = "the host resolves to a loopback, private, link-local, unique-local, unspecified or multicast address; pass --online-allow-private to permit it";
+const REFUSED_METADATA_LITERAL: &str = "the host is a cloud instance metadata address, which no certificate legitimately publishes; pass --online-allow-private to permit it";
+const REFUSED_METADATA_RESOLVED: &str = "the host resolves to a cloud instance metadata address, which no certificate legitimately publishes; pass --online-allow-private to permit it";
+
+/// The IPv4 link-local address every major cloud answers instance metadata on,
+/// credentials included. It is inside `169.254.0.0/16` and so already refused;
+/// it is named separately because a refusal that says *why* is the difference
+/// between an operator shrugging and an operator looking at where their
+/// dossier came from.
+const METADATA_V4: Ipv4Addr = Ipv4Addr::new(169, 254, 169, 254);
+/// The IPv6 instance metadata address (`fd00:ec2::254`), likewise inside a
+/// range already refused.
+const METADATA_V6: Ipv6Addr = Ipv6Addr::new(0xfd00, 0x0ec2, 0, 0, 0, 0, 0, 0x0254);
+
+/// Whether one URL may be contacted.
+///
+/// `allow_private` is `--online-allow-private`, which waives the address and
+/// name rules and nothing else: a non-HTTP scheme and a URL with userinfo stay
+/// refused whatever the flag says, because neither is a network-reachability
+/// question.
+pub(super) fn permitted(url: &str, allow_private: bool) -> Result<(), Refusal> {
+    let scheme = scheme_of(url).ok_or(Refusal::Refused(REFUSED_SCHEME))?;
+    if !matches!(scheme, "http" | "https") {
+        return Err(Refusal::Refused(REFUSED_SCHEME));
+    }
+    let authority = host_of(url).ok_or(Refusal::Refused(REFUSED_NO_HOST))?;
+    if authority.contains('@') {
+        return Err(Refusal::Refused(REFUSED_USERINFO));
+    }
+    let (host, port) = split_authority(&authority).ok_or(Refusal::Refused(REFUSED_NO_HOST))?;
+    if allow_private {
+        return Ok(());
+    }
+    if host.eq_ignore_ascii_case("localhost") || host.to_ascii_lowercase().ends_with(".localhost") {
+        return Err(Refusal::Refused(REFUSED_LOCALHOST));
+    }
+    if let Some(address) = literal_address(host) {
+        return match verdict(address) {
+            Verdict::Metadata => Err(Refusal::Refused(REFUSED_METADATA_LITERAL)),
+            Verdict::Restricted => Err(Refusal::Refused(REFUSED_LITERAL)),
+            Verdict::Permitted => Ok(()),
+        };
+    }
+    let port = port.unwrap_or(if scheme == "https" { 443 } else { 80 });
+    let resolved = (host, port)
+        .to_socket_addrs()
+        .map_err(|_| Refusal::Unresolvable)?;
+    let mut any = false;
+    for address in resolved {
+        any = true;
+        match verdict(address.ip()) {
+            Verdict::Metadata => return Err(Refusal::Refused(REFUSED_METADATA_RESOLVED)),
+            Verdict::Restricted => return Err(Refusal::Refused(REFUSED_RESOLVED)),
+            Verdict::Permitted => {}
+        }
+    }
+    if any {
+        Ok(())
+    } else {
+        Err(Refusal::Unresolvable)
+    }
+}
+
+/// Split an authority into its host and optional port, understanding the
+/// bracketed form an IPv6 literal has to be written in.
+fn split_authority(authority: &str) -> Option<(&str, Option<u16>)> {
+    if let Some(rest) = authority.strip_prefix('[') {
+        let (inside, after) = rest.split_once(']')?;
+        if inside.is_empty() {
+            return None;
+        }
+        let port = match after {
+            "" => None,
+            other => Some(other.strip_prefix(':')?.parse().ok()?),
+        };
+        return Some((inside, port));
+    }
+    match authority.rsplit_once(':') {
+        Some((host, port)) if !host.is_empty() => Some((host, Some(port.parse().ok()?))),
+        Some(_) => None,
+        None if authority.is_empty() => None,
+        None => Some((authority, None)),
+    }
+}
+
+/// The IP address a host names literally, if it names one at all.
+fn literal_address(host: &str) -> Option<IpAddr> {
+    host.parse::<IpAddr>().ok()
+}
+
+/// What the policy makes of one address.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Verdict {
+    Permitted,
+    /// Refused by range.
+    Restricted,
+    /// Refused, and it is an instance metadata address — worth saying,
+    /// because it is the destination an SSRF actually wants.
+    Metadata,
+}
+
+/// Judge one address.
+///
+/// The ranges are the ones that make an SSRF worth attempting: the machine
+/// itself, the operator's own network, the link-local range that carries cloud
+/// metadata services, the group addresses that reach more than one host, and
+/// the IPv6 equivalents of each.
+fn verdict(address: IpAddr) -> Verdict {
+    // An IPv4-mapped address is an IPv4 destination written the other way
+    // round, and must not be a way past the IPv4 rules.
+    let address = match address {
+        IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+            Some(mapped) => IpAddr::V4(mapped),
+            None => IpAddr::V6(v6),
+        },
+        other => other,
+    };
+    match address {
+        IpAddr::V4(v4) if v4 == METADATA_V4 => Verdict::Metadata,
+        IpAddr::V6(v6) if v6 == METADATA_V6 => Verdict::Metadata,
+        IpAddr::V4(v4) if is_restricted_v4(v4) => Verdict::Restricted,
+        IpAddr::V6(v6) if is_restricted_v6(v6) => Verdict::Restricted,
+        _ => Verdict::Permitted,
+    }
+}
+
+fn is_restricted_v4(address: Ipv4Addr) -> bool {
+    address.is_loopback()
+        || address.is_private()
+        || address.is_link_local()
+        || address.is_unspecified()
+        || address.is_broadcast()
+        || address.is_multicast()
+        // 0.0.0.0/8, "this network", which some stacks route to the host.
+        || address.octets()[0] == 0
+}
+
+fn is_restricted_v6(address: Ipv6Addr) -> bool {
+    address.is_loopback()
+        || address.is_unspecified()
+        || address.is_multicast()
+        // fc00::/7, unique local (RFC 4193).
+        || (address.segments()[0] & 0xfe00) == 0xfc00
+        // fe80::/10, link local (RFC 4291).
+        || (address.segments()[0] & 0xffc0) == 0xfe80
+}
+
+/// Whether a host names an address the policy refuses. Tests only: the policy
+/// itself goes through [`permitted`], which is the whole rule and not just the
+/// address part of it.
+#[cfg(test)]
+fn restricted_literal(host: &str) -> bool {
+    literal_address(host).is_some_and(|address| verdict(address) != Verdict::Permitted)
+}
+
+pub(super) fn scheme_of(url: &str) -> Option<&str> {
+    let (scheme, rest) = url.split_once("://")?;
+    if rest.is_empty() || scheme.is_empty() {
+        return None;
+    }
+    Some(scheme)
+}
+
+/// The authority of a URL, lower-cased, which is what "the same host" means
+/// here. The port is part of it: a redirect to another port on the same name
+/// is another endpoint.
+pub(super) fn host_of(url: &str) -> Option<String> {
+    let (_, rest) = url.split_once("://")?;
+    let authority = rest
+        .split(['/', '?', '#'])
+        .next()
+        .filter(|value| !value.is_empty())?;
+    Some(authority.to_ascii_lowercase())
+}
+
+/// Resolve a `Location` header against the URL it came from.
+///
+/// Only the two forms a real CA server uses are handled — an absolute URL and
+/// a root-relative path — because anything else would be guesswork, and a
+/// redirect this function refuses to resolve is reported rather than followed.
+pub(super) fn resolve(base: &str, location: &str) -> Option<String> {
+    let location = location.trim();
+    if location.is_empty() {
+        return None;
+    }
+    if location.contains("://") {
+        return Some(location.to_owned());
+    }
+    let (scheme, rest) = base.split_once("://")?;
+    let authority = rest.split(['/', '?', '#']).next()?;
+    if let Some(path) = location.strip_prefix('/') {
+        return Some(format!("{scheme}://{authority}/{path}"));
+    }
+    let directory = rest
+        .split(['?', '#'])
+        .next()
+        .and_then(|path| path.rfind('/').map(|index| &path[..index]))
+        .unwrap_or(authority);
+    Some(format!("{scheme}://{directory}/{location}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_redirect_to_another_host_is_not_resolved_as_the_same_host() {
+        let base = "http://crl.example/ca.crl";
+        let next = resolve(base, "http://evil.example/ca.crl").expect("resolves");
+        assert_ne!(host_of(&next), host_of(base));
+    }
+
+    #[test]
+    fn a_root_relative_redirect_stays_on_the_same_host() {
+        let base = "http://crl.example/pki/ca.crl";
+        let next = resolve(base, "/other.crl").expect("resolves");
+        assert_eq!(next, "http://crl.example/other.crl");
+        assert_eq!(host_of(&next), host_of(base));
+    }
+
+    #[test]
+    fn a_relative_redirect_is_resolved_against_the_directory() {
+        let next = resolve("http://crl.example/pki/ca.crl", "new.crl").expect("resolves");
+        assert_eq!(next, "http://crl.example/pki/new.crl");
+    }
+
+    #[test]
+    fn a_different_port_is_a_different_host() {
+        assert_ne!(
+            host_of("http://crl.example/a"),
+            host_of("http://crl.example:8080/a")
+        );
+    }
+
+    #[test]
+    fn only_http_schemes_are_recognised() {
+        assert_eq!(scheme_of("ldap://directory.example/cn=ca"), Some("ldap"));
+        assert_eq!(scheme_of("not a url"), None);
+        assert_eq!(
+            permitted("ldap://directory.example/cn=ca", true),
+            Err(Refusal::Refused(REFUSED_SCHEME))
+        );
+        assert_eq!(
+            permitted("file:///etc/passwd", true),
+            Err(Refusal::Refused(REFUSED_SCHEME))
+        );
+    }
+
+    /// Userinfo is refused whatever the flags say: it is not a reachability
+    /// question, and no CA publishes a distribution point with credentials in
+    /// it.
+    #[test]
+    fn userinfo_is_refused_even_with_the_flag() {
+        for url in [
+            "http://user:password@crl.example/ca.crl",
+            "http://crl.example@127.0.0.1/ca.crl",
+        ] {
+            assert_eq!(
+                permitted(url, true),
+                Err(Refusal::Refused(REFUSED_USERINFO)),
+                "{url}"
+            );
+        }
+    }
+
+    #[test]
+    fn private_and_loopback_literals_are_refused_without_the_flag() {
+        for url in [
+            "http://127.0.0.1/ca.crl",
+            "http://127.0.0.1:8080/ca.crl",
+            "http://10.1.2.3/ca.crl",
+            "http://172.16.0.1/ca.crl",
+            "http://192.168.1.1/ca.crl",
+            "http://169.254.169.254/latest/meta-data",
+            "http://0.0.0.0/ca.crl",
+            "http://[::1]/ca.crl",
+            "http://[::1]:8080/ca.crl",
+            "http://[fd00::1]/ca.crl",
+            "http://[fe80::1]/ca.crl",
+            "http://[::ffff:127.0.0.1]/ca.crl",
+            "http://[::ffff:10.0.0.1]/ca.crl",
+            "http://[::]/ca.crl",
+            "http://255.255.255.255/ca.crl",
+            "http://224.0.0.1/ca.crl",
+            "http://239.255.255.250/ca.crl",
+            "http://[ff02::1]/ca.crl",
+            "http://localhost/ca.crl",
+            "http://LOCALHOST:8080/ca.crl",
+        ] {
+            assert!(
+                matches!(permitted(url, false), Err(Refusal::Refused(_))),
+                "{url} must be refused"
+            );
+            // With the flag the same URL is a destination like any other; the
+            // loopback tests in tests/online.rs depend on exactly this.
+            assert_eq!(permitted(url, true), Ok(()), "{url} with the flag");
+        }
+    }
+
+    #[test]
+    fn a_public_literal_is_permitted() {
+        assert_eq!(permitted("http://93.184.216.34/ca.crl", false), Ok(()));
+        assert_eq!(permitted("http://[2001:db8::1]/ca.crl", false), Ok(()));
+    }
+
+    /// The metadata addresses are refused, and the refusal says which they
+    /// are: it is the destination an SSRF is usually after, and an operator
+    /// who sees it named in a report has learned something specific.
+    #[test]
+    fn the_cloud_metadata_addresses_are_named_when_refused() {
+        for url in [
+            "http://169.254.169.254/latest/meta-data",
+            "http://[fd00:ec2::254]/latest/meta-data",
+            "http://[::ffff:169.254.169.254]/latest/meta-data",
+        ] {
+            assert_eq!(
+                permitted(url, false),
+                Err(Refusal::Refused(REFUSED_METADATA_LITERAL)),
+                "{url}"
+            );
+            assert_eq!(permitted(url, true), Ok(()), "{url} with the flag");
+        }
+    }
+
+    #[test]
+    fn the_restricted_ranges_are_the_documented_ones() {
+        assert!(restricted_literal("127.0.0.1"));
+        assert!(restricted_literal("::1"));
+        assert!(restricted_literal("fc00::1"));
+        assert!(restricted_literal("fdff::1"));
+        assert!(restricted_literal("fe80::1"));
+        assert!(restricted_literal("10.0.0.1"));
+        assert!(restricted_literal("172.16.0.1"));
+        assert!(restricted_literal("192.168.0.1"));
+        assert!(restricted_literal("169.254.169.254"));
+        assert!(restricted_literal("fd00:ec2::254"));
+        assert!(restricted_literal("224.0.0.1"));
+        assert!(restricted_literal("ff02::1"));
+        assert!(restricted_literal("0.0.0.0"));
+        assert!(restricted_literal("::"));
+        assert!(restricted_literal("255.255.255.255"));
+        assert!(!restricted_literal("2606:4700::1111"));
+        assert!(!restricted_literal("8.8.8.8"));
+        assert!(!restricted_literal("172.32.0.1"));
+    }
+
+    #[test]
+    fn an_authority_splits_into_a_host_and_a_port() {
+        assert_eq!(split_authority("crl.example"), Some(("crl.example", None)));
+        assert_eq!(
+            split_authority("crl.example:8080"),
+            Some(("crl.example", Some(8080)))
+        );
+        assert_eq!(split_authority("[::1]:8080"), Some(("::1", Some(8080))));
+        assert_eq!(split_authority("[::1]"), Some(("::1", None)));
+        assert_eq!(split_authority(""), None);
+    }
+}

@@ -254,6 +254,18 @@ pub enum RevocationPolicy {
     /// [`RevocationSource`] as any offline one, and is validated by the same
     /// offline code path before it is believed.
     Online,
+    /// The caller passed `--online`, but no trust anchors were configured, so
+    /// nothing was fetched.
+    ///
+    /// Revocation data is fetched only for certificates that sit on a path to
+    /// a configured anchor: a URL out of a certificate nothing vouches for is
+    /// an attacker-chosen destination, and contacting it would let any dossier
+    /// decide who this tool talks to. With no anchors there is no such path,
+    /// so there is nothing to fetch for and the run is offline in fact. The
+    /// state is distinct from [`Offline`](Self::Offline) because the caller
+    /// asked for something they did not get, and a report that said plain
+    /// `offline` would not tell them why.
+    OnlineNoAnchors,
 }
 
 impl RevocationPolicy {
@@ -262,6 +274,7 @@ impl RevocationPolicy {
             Self::NotChecked => "not_checked",
             Self::Offline => "offline",
             Self::Online => "online",
+            Self::OnlineNoAnchors => "online_no_anchors",
         }
     }
 }
@@ -314,7 +327,11 @@ pub struct MemoryRevocationStore {
     ocsp: Vec<Vec<u8>>,
     online_crls: Vec<Vec<u8>>,
     online_ocsp: Vec<Vec<u8>>,
-    online: bool,
+    /// The policy `--online` left behind, if the caller passed it at all:
+    /// [`RevocationPolicy::Online`] when fetching was permitted, and
+    /// [`RevocationPolicy::OnlineNoAnchors`] when it was asked for but no
+    /// trust anchor made any certificate eligible for it.
+    online: Option<RevocationPolicy>,
 }
 
 impl MemoryRevocationStore {
@@ -324,21 +341,29 @@ impl MemoryRevocationStore {
             ocsp,
             online_crls: Vec::new(),
             online_ocsp: Vec::new(),
-            online: false,
+            online: None,
         }
     }
 
     /// Mark the store as having been filled under `--online`, so the reported
     /// policy says so even when nothing was actually fetched.
     pub fn into_online(mut self) -> Self {
-        self.online = true;
+        self.online = Some(RevocationPolicy::Online);
+        self
+    }
+
+    /// Mark the store as one `--online` was asked of and could fetch nothing
+    /// for, because no trust anchor was configured and so no certificate sat
+    /// on a path to one.
+    pub fn into_online_without_anchors(mut self) -> Self {
+        self.online = Some(RevocationPolicy::OnlineNoAnchors);
         self
     }
 
     /// Add artefacts the CLI fetched, keeping them separate from the offline
     /// tiers so that the report can say an answer came from the network.
     pub fn extend_online(&mut self, crls: Vec<Vec<u8>>, ocsp: Vec<Vec<u8>>) {
-        self.online = true;
+        self.online = Some(RevocationPolicy::Online);
         self.online_crls.extend(crls);
         self.online_ocsp.extend(ocsp);
     }
@@ -346,11 +371,7 @@ impl MemoryRevocationStore {
 
 impl RevocationSource for MemoryRevocationStore {
     fn policy(&self) -> RevocationPolicy {
-        if self.online {
-            RevocationPolicy::Online
-        } else {
-            RevocationPolicy::Offline
-        }
+        self.online.unwrap_or(RevocationPolicy::Offline)
     }
 
     fn crls(&self) -> &[Vec<u8>] {

@@ -60,7 +60,7 @@ mod crl;
 mod ocsp;
 mod tiers;
 
-pub use ocsp::{ResponderModel, ocsp_request};
+pub use ocsp::{ResponderModel, ocsp_cert_id, ocsp_request};
 pub use tiers::RevocationOrigin;
 
 use const_oid::ObjectIdentifier;
@@ -245,6 +245,23 @@ pub struct PathRevocation {
     pub notes: Vec<Check>,
 }
 
+/// The clause every `revocation_status_unknown` carries when `--online` was
+/// asked for and could fetch nothing, because no trust anchor was configured
+/// and revocation data is only fetched for a certificate on a path to one.
+///
+/// It is repeated on each such message rather than left to the policy check
+/// alone: the reader of *this* sentence is the one who has to decide what to
+/// do about the gap, and "nothing was fetched" without "and here is why" is
+/// the report this ticket exists to fix.
+fn unfetched(policy: RevocationPolicy) -> &'static str {
+    match policy {
+        RevocationPolicy::OnlineNoAnchors => {
+            ", and --online fetched nothing because no trust anchors are configured, so no certificate sits on a path to one"
+        }
+        RevocationPolicy::NotChecked | RevocationPolicy::Offline | RevocationPolicy::Online => "",
+    }
+}
+
 /// The check that reports the policy actually applied, so the machine output
 /// shows it whether or not any data was found.
 pub fn policy_check(policy: RevocationPolicy) -> Check {
@@ -259,7 +276,11 @@ pub fn policy_check(policy: RevocationPolicy) -> Check {
         ),
         RevocationPolicy::Online => Check::info(
             CheckCode::RevocationPolicy,
-            "revocation is checked from the signature's own RevocationValues and the revocation store first, and --online allowed CRL distribution points and AIA OCSP responders named by the certificates themselves to be fetched for what they did not cover; every fetched artefact was checked by the same offline rules",
+            "revocation is checked from the signature's own RevocationValues and the revocation store first, and --online allowed CRL distribution points and AIA OCSP responders named by the certificates themselves to be fetched for what they did not cover, but only for certificates on a path to a configured trust anchor; every fetched artefact was checked by the same offline rules",
+        ),
+        RevocationPolicy::OnlineNoAnchors => Check::info(
+            CheckCode::RevocationPolicy,
+            "--online was given but no trust anchors were configured, so nothing was fetched and revocation was checked offline: a URL is only contacted for a certificate that sits on a path to a configured trust anchor, and without anchors no certificate does. Configure --trust-store or --trust-list to allow fetching",
         ),
     }
 }
@@ -345,8 +366,9 @@ pub fn check_path(input: &PathRevocationInput<'_>) -> PathRevocation {
             check: Check::unknown(
                 CheckCode::RevocationStatusUnknown,
                 format!(
-                    "no validated certification path was available, so revocation could not be checked for {}",
-                    role.as_str()
+                    "no validated certification path was available, so revocation could not be checked for {}{}",
+                    role.as_str(),
+                    unfetched(policy)
                 ),
             ),
             notes: Vec::new(),
@@ -509,9 +531,14 @@ pub(crate) fn check_signer_chain(
                 CheckCode::RevocationNotChecked,
                 "revocation checking was switched off by the caller",
             ),
-            RevocationPolicy::Offline | RevocationPolicy::Online => Check::unknown(
+            policy @ (RevocationPolicy::Offline
+            | RevocationPolicy::Online
+            | RevocationPolicy::OnlineNoAnchors) => Check::unknown(
                 CheckCode::RevocationStatusUnknown,
-                "no validated certification path was available, so revocation could not be checked",
+                format!(
+                    "no validated certification path was available, so revocation could not be checked{}",
+                    unfetched(policy)
+                ),
             ),
         });
     } else {

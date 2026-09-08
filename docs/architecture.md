@@ -99,7 +99,9 @@ crates/openszigno-cli/src/
                       #   rollback), output_dir.rs (race-resistant output)
   trust.rs            # --trust-store, --trust-list, and --lotl loading
   revocation_store.rs # --revocation-store loading
-  online.rs           # --online fetching, the only code that opens a socket
+  online/             # --online fetching, the only code that opens a socket
+    mod.rs            #   the trust gate, the gap search, the transport, the cache
+    destination.rs    #   which URLs and addresses may be contacted at all
 ```
 
 Two boundaries are load-bearing rather than tidiness. Every command reaches
@@ -797,6 +799,7 @@ openszigno verify FILE [--json]
     --online                    # fetch what offline data does not cover
     --online-cache DIR          # write what --online fetched, store-shaped
     --online-proxy URL          # the only proxy --online will ever use
+    --online-allow-private      # permit loopback/private --online destinations
     --at <RFC3339>              # validation time; overrides any timestamp
     --allow-legacy-algorithms   # admit SHA-1 for diagnosis only
     --allow-namespace URI       # as on every other command, repeatable
@@ -806,9 +809,10 @@ Offline is the default and `openszigno-verify` is network-free by
 construction: it opens no socket in any mode, and revocation data reaches it
 only through the injected `RevocationSource`. `--online` does not change that.
 It permits the **CLI** to fetch CRLs and OCSP responses that the caller's own
-material does not cover, from the URLs the certificates themselves publish, and
-to hand what comes back to the verifier through the same seam a
-`--revocation-store` file arrives through. See [Online
+material does not cover, from the URLs published by certificates that sit on a
+path to a configured trust anchor, and to hand what comes back to the verifier
+through the same seam a `--revocation-store` file arrives through. With no
+anchor configured nothing is fetched at all. See [Online
 revocation](#online-revocation-fetching).
 
 Reference resolution is strictly same-document in every mode — a `ds:Reference`
@@ -1850,6 +1854,26 @@ dossier that embeds nothing at all. See [trust.md](trust.md).
 `--online` is the only thing that makes openSzigno touch the network, and it
 does so under a fixed policy the caller cannot widen.
 
+**Who a URL may be fetched for.** Only a certificate on a certification path
+the verifier **actually validated to a configured trust anchor** — from
+`--trust-store` or from an ETSI trusted list — for a signature or a timestamp
+it was evaluating. The set is not approximated: under `--online` the CLI runs
+one entirely offline verification pass first, purely to learn it, and
+`VerifyReport::validated_path_certificates` returns the certificates of every
+chain whose own path check passed (`cert_path_ok`, `timestamp_tsa_path_ok`).
+Everything else in the file — including a certificate parked in `ds:KeyInfo`
+that chains perfectly well to the anchor but that no signature needed — is
+outside the set and generates no traffic.
+
+This is the load-bearing rule. A dossier carries its own certificates,
+including the "issuer" that signed the signer, so "an embedded issuer signed
+this" is a statement whoever wrote the dossier wrote on both sides of. Acting
+on a URL out of such a certificate lets any file handed to the tool choose the
+tool's next network destination. **With no anchors configured nothing is
+fetched at all**, `policy.revocation` reads `online_no_anchors`, and both the
+`revocation_policy` check and every `revocation_status_unknown` message say so
+in as many words.
+
 **Where the URLs come from.** Only from the certificates themselves: the
 `cRLDistributionPoints` extension's `fullName` URIs and the
 `authorityInfoAccess` extension's `id-ad-ocsp` access locations. These are
@@ -1867,6 +1891,29 @@ that may run to megabytes. Certificates whose issuer is not to hand are skipped
 — a CRL could not be checked against them anyway — and so are self-signed
 roots, whose revocation is never asked about.
 
+**One request per question.** CRLs are deduplicated by URL: a CRL is a list and
+one copy answers for everyone on it. OCSP is deduplicated by **responder URL
+and `certID` together**, because a response answers about one certificate — two
+certificates issued by the same CA name one responder and are two different
+questions, and deduplicating by URL alone asked the first and silently dropped
+the second, leaving it uncovered for a reason nothing in the report named.
+
+**The destination policy.** The URL is treated as attacker-chosen until the
+trust gate above has been passed, and even then it must name a destination this
+build is willing to open a socket to:
+
+| Rule | Default | Why |
+| --- | --- | --- |
+| Scheme | `http` and `https` only | Every other scheme is refused, never rewritten into one this build speaks. |
+| Userinfo | refused, always | `user:password@host` is a way of writing a URL that reads as one host and names another, and it is credential material this tool has no business sending. `--online-allow-private` does not waive it. |
+| Address | loopback (`127/8`, `::1`), RFC 1918 private (`10/8`, `172.16/12`, `192.168/16`), link-local (`169.254/16`, `fe80::/10`), unique-local (`fc00::/7`), unspecified (`0.0.0.0/8`, `::`), broadcast (`255.255.255.255`) and multicast (`224/4`, `ff00::/8`) are all refused, as are the cloud metadata addresses `169.254.169.254` and `fd00:ec2::254` and the name `localhost` (and `*.localhost`) | Otherwise a dossier could point the verifier at `http://169.254.169.254/` — instance metadata, credentials included — or at a service on the operator's own subnet, turning a signature check into an SSRF primitive. An IPv4-mapped IPv6 address is judged as the IPv4 address it carries, so it is not a way round any of these. The two metadata addresses are named in their own refusal, because that is the one an operator wants to be told about explicitly. |
+| Resolved address | re-checked against the same ranges before connecting | A public name that resolves to `127.0.0.1` is refused on the address, not on the name, so DNS rebinding does not walk past the rule. `ureq` resolves again when it connects, so this is a mitigation and not a proof. |
+| Every hop | the URL the certificate published and **each redirect target** go through the whole policy | A redirect already may not leave the host, but "the same name" and "the same address" are different statements. |
+
+`--online-allow-private` waives the address rules — and only those — for an
+internal CA that really does publish on a private network. This project's own
+test suite passes it, because it serves a synthetic PKI from `127.0.0.1`.
+
 **The transport policy.**
 
 | Rule | Value | Why |
@@ -1874,7 +1921,7 @@ roots, whose revocation is never asked about.
 | Schemes | `http` and `https`, exactly as published | Neither is rewritten. Upgrading `http` to `https` is a guess about a host's configuration. Confidentiality is not the point: these are public documents and every one is signature-checked before it is believed. |
 | Connect timeout | 5 s | |
 | Total timeout | 20 s per fetch | A fetch that exceeds it is a named failure, never a hang. |
-| Size cap | 16 MiB for a CRL, 64 KiB for an OCSP response | Enforced by the reader, so a server that lies about `Content-Length` cannot make the run allocate more. |
+| Size cap | `MAX_REVOCATION_ITEM_BYTES` (16 MiB) for a CRL, 64 KiB for an OCSP response | Enforced by the reader, so a server that lies about `Content-Length` cannot make the run allocate more. The CRL cap is the *verifier's own* limit, re-exported: a download cap larger than what the tier walk will parse meant a CRL could arrive, be stored, and then answer nothing. |
 | Redirects | at most 3, **never to another host** | The authority for a URL is the certificate, and the certificate named one host. The port is part of the host. |
 | Proxy | none, unless `--online-proxy URL` | `HTTP_PROXY` and its relatives are ignored. A verifier that silently routed its revocation traffic through whatever the shell happened to set would hand an attacker who controls that variable a way to feed it chosen bytes. |
 | Requests | `GET` for a CRL; `POST` of an RFC 6960 `OCSPRequest` as `application/ocsp-request` for OCSP | The `certID` uses **SHA-256**, which is inside the pinned allowlist. No nonce is sent: a nonce defends a live request against replay, and the verifier deliberately ignores nonces because it must also read archived responses. |
@@ -1890,7 +1937,11 @@ store, so it can never displace an answer that was already to hand.
 
 **When it fails.** Each failure contributes one `online_fetch_failed` (`info`)
 naming the URL and a failure class: `timeout`, `http status <code>`,
-`too large`, `redirect`, `invalid`, or `transport`. The class is reported
+`too large` (with the limit it exceeded), `redirect`, `invalid`, `transport`,
+`destination_refused` (with the rule that refused it — nothing was contacted at
+all), or `cache_collision` (the artefact was fetched, but `--online-cache`
+already holds a different file under that name and nothing was overwritten).
+The class is reported
 because the remedies differ — a timeout is somebody else's outage, a `404` is a
 stale URL in an old certificate, and "not a CRL" is what a captive portal looks
 like from here. A URL is public CA material, so naming it is safe and is the
@@ -1909,16 +1960,34 @@ deliberately not allowed to decide anything — would drag a dossier whose every
 signature is `valid` down to `indeterminate`.
 
 **Reproducibility.** `--online-cache DIR` writes every fetched artefact into
-`DIR/crls/` and `DIR/ocsp/`, named by the SHA-256 of its own bytes, which is
-the `--revocation-store` layout. A later run with `--revocation-store DIR` and
-no `--online` therefore reaches the same answer with no network at all — the
+`DIR/crls/` and `DIR/ocsp/`, which is the `--revocation-store` layout. A CRL is
+named by the SHA-256 of its own bytes; an **OCSP response is named by the
+SHA-256 of the `certID` it answers about followed by the SHA-256 of its own
+bytes**, so two answers from one responder are two files whose names say which
+is which — the same distinction the request deduplication makes.
+
+The cache is written with the same descriptor-relative machinery as an
+extraction (`extract/output_dir.rs`): the directory is opened once with
+`O_DIRECTORY | O_NOFOLLOW` and walked one component at a time, and each file is
+created with `O_CREAT | O_EXCL | O_NOFOLLOW`. **Nothing is ever truncated or
+replaced.** A name that already holds exactly these bytes is the idempotent
+case — which is also what a concurrent writer looks like — and is left alone; a
+name that holds anything else, or a symlink, is reported as one
+`online_fetch_failed` with the class `cache_collision` and the run continues,
+because a cache is an optimisation and a strange file in it is not a reason to
+fail a verification that has already been done. A later run
+with `--revocation-store DIR` and no `--online` therefore reaches the same
+answer with no network at all — the
 only difference being that the source is reported as `store_crl` rather than
 `online_crl`. Nothing is ever deleted from the cache.
 
 `chain[].revocation.source` reports `online_crl` and `online_ocsp` for answers
-that came from the network, and `policy.revocation` reads `online` for any run
-that was given the flag, whether or not anything was actually fetched.
-`--online` and `--no-revocation` cannot be combined.
+that came from the network. `policy.revocation` reads `online` for a run that
+was given the flag and had at least one trust anchor to gate fetching on,
+whether or not anything was actually fetched, and `online_no_anchors` for a run
+that was given the flag with no anchor configured, where nothing was fetched
+and nothing could have been. `--online` and `--no-revocation` cannot be
+combined.
 
 ### Verify result shape
 
@@ -2302,15 +2371,15 @@ verify), and `revocation_not_checked` (the caller switched revocation off).
 | `cert_basic_constraints_invalid` | `failed` | An issuing certificate is not marked as a CA. |
 | `cert_name_constraint_violation` | `failed` | A certificate violates a name constraint imposed by a CA above it. |
 | `cert_unsupported_critical_extension` | `failed` | A certificate carries a critical extension this validator does not understand. |
-| `revocation_policy` | `info` | Reports the revocation policy actually applied: `offline`, `online` with `--online`, or off with `--no-revocation`. Always emitted, so the policy is visible even when no data was found. |
+| `revocation_policy` | `info` | Reports the revocation policy actually applied: `offline`, `online` with `--online`, `online_no_anchors` when `--online` was given with no trust anchor configured — so nothing was fetched, because revocation data is only fetched for a certificate on a path to an anchor — or off with `--no-revocation`. Always emitted, so the policy is visible even when no data was found. |
 | `revocation_not_checked` | `skipped` | Emitted **only** when the caller passed `--no-revocation`. Blocking, so switching the check off is documented as producing at most `indeterminate`. |
 | `revocation_ok` | `passed` | Every certificate in the path except the trust anchor has fresh, verified, non-revoked status. Emitted once per chain — the signer's and each timestamp authority's — and the message names which. |
 | `cert_revoked` | `failed` | A certificate in the path was revoked at or before the validation time. `certificateHold` counts. |
 | `cert_revoked_after_validation_time` | `info` / `unknown` | A certificate was revoked *after* the instant being validated, so that revocation did not apply then. `info` when the validation time was **proven** by a fully verified signature timestamp, `unknown` when it was merely asserted by `--at` or the clock. Never `passed`: the certificate really was revoked, and the message gives the time and reason. |
 | `revocation_status_unknown` | `unknown` | No usable revocation data covers a certificate in the path, or no path was built to ask about. Blocking. A failed `--online` fetch reaches a verdict through this check and not on its own; see `online_fetch_failed`. |
 | `revocation_data_stale` | `unknown` | The data's `nextUpdate` had passed at the validation time, or it carries none and its `thisUpdate` precedes it. Also the OCSP `unknown` status. |
-| `revocation_data_invalid` | `unknown` | Every source that covered a certificate was found but could not be used: signed by someone unauthorised, a delta or indirect CRL, an unimplemented `issuingDistributionPoint` form, a critical CRL extension this build does not implement, or an OCSP response whose status is not `successful`. The message names the cause. Emitted only after every tier has been tried. `unknown`, not `failed`: unusable data means the tool could not answer. |
-| `online_fetch_failed` | `info` | Under `--online`, one fetch did not produce a usable artefact. The message names the URL and the failure class. Informational: whether the missing data mattered is answered by the chain that needed it, through `revocation_status_unknown`, which blocks. |
+| `revocation_data_invalid` | `unknown` | Every source that covered a certificate was found but could not be used: signed by someone unauthorised, a delta or indirect CRL, an unimplemented `issuingDistributionPoint` form, a critical CRL extension this build does not implement, an OCSP response whose status is not `successful`, or an item larger than `MAX_REVOCATION_ITEM_BYTES`, whose size and limit the message names. The message names the cause. Emitted only after every tier has been tried. `unknown`, not `failed`: unusable data means the tool could not answer. |
+| `online_fetch_failed` | `info` | Under `--online`, one fetch did not produce a usable artefact. The message names the URL and the failure class: `timeout`, `http status <code>`, `too large` with the limit, `redirect`, `invalid`, `transport`, `destination_refused` with the rule that refused the destination before any socket was opened, or `cache_collision` when `--online-cache` already held a different file under an artefact's name and nothing was overwritten. Informational: whether the missing data mattered is answered by the chain that needed it, through `revocation_status_unknown`, which blocks. |
 | `ocsp_responder_trusted` | `info` | An OCSP response was accepted under the RFC 6960 section 2.2 trusted-responder model: the responder is not the issuing CA and that CA did not delegate to it, but its certificate carries `id-kp-OCSPSigning` and chains to a configured anchor. Reported because this rests on the caller's trust store rather than on the issuing CA's word. |
 | `trust_list_loaded` | `info` | A `--trust-list` file was read; the message says how many anchors it contributed. |
 | `trust_list_unverified` | `unknown` | A trusted list was used without `--trust-list-signer`, so its own signature was not checked. Blocking. |
@@ -2694,8 +2763,9 @@ older dossiers, which is the correct trade and must not be misread.
 
 `--online` widens where revocation data may come from and nothing else. It
 never relaxes a rule: a fetched CRL or OCSP response is judged by exactly the
-offline rules, only URLs the certificates themselves publish are contacted, and
-a failed fetch is `revocation_status_unknown`, which blocks. A run that reaches
+offline rules, only URLs published by certificates that reach a configured
+trust anchor are contacted, only destinations the policy permits are opened,
+and a failed fetch is `revocation_status_unknown`, which blocks. A run that reaches
 `valid` with `--online` reached it on evidence that would have supported the
 same verdict had the operator downloaded the same files by hand.
 

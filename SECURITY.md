@@ -98,14 +98,51 @@ that a trust anchor signed. No URL is ever taken from the dossier's XML, no
 reference in a dossier is ever dereferenced with or without the flag, and trust
 anchors and trusted lists are never fetched in any mode.
 
+Two further rules bound that class, because a certificate inside a dossier is
+attacker-supplied until something the operator configured vouches for it:
+
+- **Trust-gated.** A URL is contacted only for a certificate on a
+  certification path openszigno **validated to a configured trust anchor** —
+  from `--trust-store`, or from a trusted list — for a signature or a timestamp
+  it was evaluating. A certificate embedded elsewhere in the XML generates no
+  traffic even when it chains to a configured anchor, because no signature
+  needed it. With no anchors configured **nothing is fetched at all**, and the
+  report says so (`policy.revocation` reads `online_no_anchors`). Without this
+  rule, "an issuer in the dossier signed this certificate" — a statement
+  whoever wrote the dossier wrote on both sides of — was enough to make the
+  tool open a connection of the dossier's choosing.
+- **A destination policy**, applied to the published URL and to every redirect
+  target alike. Only `http` and `https`, exactly as published. A URL carrying
+  userinfo is always refused. Refused unless `--online-allow-private` is given:
+  loopback (`127.0.0.0/8`, `::1`), private (`10.0.0.0/8`, `172.16.0.0/12`,
+  `192.168.0.0/16`), link-local (`169.254.0.0/16`, `fe80::/10`), unique-local
+  (`fc00::/7`), unspecified (`0.0.0.0/8`, `::`), broadcast
+  (`255.255.255.255`), multicast (`224.0.0.0/4`, `ff00::/8`), and the cloud
+  instance metadata addresses `169.254.169.254` and `fd00:ec2::254`, plus the
+  names `localhost` and `*.localhost`. An IPv4-mapped IPv6 address is judged as
+  the IPv4 address it carries. The host's *resolved* addresses are checked
+  against the same list before connecting, so a public name that resolves
+  inwards is refused too. Refusals are reported as `online_fetch_failed`
+  (`info`) with the class `destination_refused`, and nothing is contacted.
+- **The cache is written without following links.** `--online-cache` opens the
+  directory with `O_DIRECTORY | O_NOFOLLOW`, walks it one component at a time,
+  and creates each file with `O_CREAT | O_EXCL | O_NOFOLLOW`. No existing file
+  is ever truncated or replaced, a symlink standing where a cache file would go
+  is refused rather than followed, and two runs caching the same artefact at
+  once both succeed. A name already taken by different bytes is reported as
+  `online_fetch_failed` with the class `cache_collision`.
+
 The requests are `GET` for a CRL and a `POST` of an RFC 6960 `OCSPRequest` for
 OCSP. They carry no data about the dossier beyond the certificate serial number
 the OCSP request necessarily names, which is a privacy consideration worth
 knowing about: it tells the CA's responder that someone is validating that
-certificate now. The transport is bounded — 5 s to connect, 20 s per fetch,
-16 MiB per CRL, 64 KiB per OCSP response, at most three redirects and never to
-another host — and no proxy is taken from the environment; `--online-proxy` is
-the only way to introduce one. Everything fetched is judged by exactly the
+certificate now. Each certificate is asked about once per responder — OCSP
+requests are deduplicated by responder *and* `certID`, not by URL — so a run
+neither repeats a question nor skips one. The transport is bounded — 5 s to
+connect, 20 s per fetch, 16 MiB per CRL (the same limit the verifier will
+parse), 64 KiB per OCSP response, at most three redirects and never to another
+host — and no proxy is taken from the environment; `--online-proxy` is the only
+way to introduce one. Everything fetched is judged by exactly the
 offline rules before it is believed, so `--online` can widen where evidence
 comes from and can never relax a rule.
 [docs/trust.md](docs/trust.md#online-fetching) has the details.
@@ -139,9 +176,15 @@ openSzigno aims to guarantee that a hostile input cannot:
   key or passphrase material to reach stdout, stderr, the JSON envelope, or an
   extracted file;
 - cause openSzigno to make a network connection without `--online`, or, with
-  it, to any destination other than a URL published inside a certificate being
-  validated — including through a redirect, an environment proxy, or a scheme
-  the certificate did not name;
+  it, to any destination other than a URL published inside a certificate that
+  reaches a configured trust anchor — including through a redirect, an
+  environment proxy, a scheme the certificate did not name, userinfo in a URL,
+  a name that resolves to a loopback, private, link-local, unique-local,
+  multicast or cloud-metadata address while `--online-allow-private` is absent,
+  or a certificate no signature or timestamp under evaluation had a validated
+  path to;
+- cause openSzigno to follow a symlink out of an `--online-cache` directory, or
+  to truncate or replace any file already in it;
 - cause `verify` to report a signature as anything better than it is: to
   resolve a reference to a node other than the one the container semantics
   require (signature wrapping), to reach the network or the filesystem while

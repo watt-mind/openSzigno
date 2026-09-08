@@ -3,7 +3,7 @@
 use serde::Serialize;
 
 use crate::certs::{CertificateSummary, ChainEntry};
-use crate::codes::{Check, CheckStatus, Verdict};
+use crate::codes::{Check, CheckCode, CheckStatus, Verdict};
 use crate::policy::{PolicyReport, VerifyLimits};
 use crate::trust::TimeSource;
 use crate::tsa::TimestampReport;
@@ -294,4 +294,62 @@ pub struct VerifyReport {
     /// coverage" section.
     pub documents: Vec<DocumentCoverage>,
     pub signatures: Vec<SignatureReport>,
+}
+
+impl VerifyReport {
+    /// Every certificate on a certification path this run **validated to a
+    /// configured trust anchor**, for a signature or a timestamp it was
+    /// actually evaluating.
+    ///
+    /// It exists for one caller: the CLI's `--online` fetcher, which may
+    /// contact a CRL distribution point or an OCSP responder only for a
+    /// certificate in this set. The narrower the set, the smaller the answer
+    /// to "what can a dossier make this machine connect to" — and this is the
+    /// narrowest honest answer available, because it is drawn from the paths
+    /// the verifier built rather than from the certificates the file happens
+    /// to carry. A certificate embedded somewhere else in the XML, however
+    /// well signed, is not in it and cannot make anything be fetched.
+    ///
+    /// Only a chain whose own path check **passed** contributes: `cert_path_ok`
+    /// for a signer, `timestamp_tsa_path_ok` for a timestamp authority. A path
+    /// that was merely attempted is not a path the run validated.
+    pub fn validated_path_certificates(&self) -> Vec<Vec<u8>> {
+        let mut certificates: Vec<Vec<u8>> = Vec::new();
+        let mut take = |chain: &[crate::certs::ChainEntry], validated: bool| {
+            if !validated {
+                return;
+            }
+            for entry in chain {
+                if !entry.der.is_empty() && !certificates.contains(&entry.der) {
+                    certificates.push(entry.der.clone());
+                }
+            }
+        };
+        for signature in &self.signatures {
+            take(
+                &signature.chain,
+                passed(&signature.checks, CheckCode::CertPathOk),
+            );
+            for timestamp in &signature.timestamps {
+                take(
+                    &timestamp.chain,
+                    passed(&timestamp.checks, CheckCode::TimestampTsaPathOk),
+                );
+            }
+        }
+        for timestamp in &self.timestamps {
+            take(
+                &timestamp.chain,
+                passed(&timestamp.checks, CheckCode::TimestampTsaPathOk),
+            );
+        }
+        certificates
+    }
+}
+
+/// Whether a set of checks carries this code with a `passed` status.
+fn passed(checks: &[Check], code: CheckCode) -> bool {
+    checks
+        .iter()
+        .any(|check| check.code == code && check.status == CheckStatus::Passed)
 }
