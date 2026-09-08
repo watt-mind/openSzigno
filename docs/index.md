@@ -24,3 +24,4 @@ Project policies live at the repository root:
 | [CONTRIBUTING.md](../CONTRIBUTING.md) | Branch model, commit conventions, required checks, and fixture and privacy rules. |
 | [SECURITY.md](../SECURITY.md) | Threat model, what is in and out of scope, and how to report a vulnerability. |
 | [CHANGELOG.md](../CHANGELOG.md) | Release history in Keep a Changelog format. |
+| [skills/openszigno/SKILL.md](../skills/openszigno/SKILL.md) | Agent skill: the workflow, JSON reading rules, exit statuses, trust-material recipe and reporting rules an AI agent follows to use the CLI on a dossier. |

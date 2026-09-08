@@ -175,6 +175,10 @@ lay out all of it.
 - [Trust, revocation, and qualified status](docs/trust.md)
 - [ES3 specification and implementation map](docs/es3-specification.md)
 - [Roadmap and residual risks](docs/roadmap.md)
+- [Agent skill](skills/openszigno/SKILL.md): how an AI agent should drive
+  the CLI to inspect, extract, decrypt and verify dossiers. Copy the
+  `skills/openszigno` directory into `.claude/skills/` (Claude Code) or
+  `.codex/skills/` (Codex) of the project that uses it.
 
 ## Contributing
 
