@@ -443,8 +443,9 @@ openszigno verify dossier.es3 --json \
 - **Only public destinations, by default.** A URL carrying userinfo
   (`http://user:secret@host/…`) is always refused. So is one naming any of
   these, whether it names them directly or *resolves* to them — the resolved
-  addresses are checked before connecting, so DNS rebinding does not walk past
-  the rule, and every redirect target is checked again:
+  addresses are checked before connecting, and **the socket is then opened to
+  exactly those addresses**, so DNS rebinding does not walk past the rule, and
+  every redirect target is checked and pinned again:
 
   | Refused | Range |
   | --- | --- |
@@ -461,6 +462,21 @@ openszigno verify dossier.es3 --json \
   An IPv4-mapped IPv6 address (`::ffff:127.0.0.1`) is judged as the IPv4
   address it carries. `--online-allow-private` waives these address rules, and
   only these, for an internal CA that really does publish on your own network.
+- **The check is bound to the connection.** The addresses the policy approved
+  are the only ones the request may be sent to: they are handed to the HTTP
+  client as the resolution for that host and port, and a name that was not
+  vetted for the fetch in hand does not resolve at all. There is no second
+  lookup that could return something else. Only the address is pinned: the URL
+  is sent as published, so the `Host` header, the TLS SNI value and the
+  certificate host-name verification all still use the name the CA wrote into
+  the certificate. A host the policy cannot turn into an address is a
+  `transport` failure and nothing is contacted.
+- **With `--online-proxy`, the proxy connects.** The destination policy still
+  runs on the URL (scheme, userinfo, the name, and the addresses it resolves
+  to), but the request is sent to the proxy and the proxy resolves the
+  destination for itself, so what the policy vetted is not what opens the
+  socket. That is inherent in delegating the connection, and it is one reason
+  the flag is opt-in and no proxy is ever taken from the environment.
 - **One request per question.** CRLs are deduplicated by URL; OCSP by responder
   URL *and* `certID`, because a response answers about one certificate and two
   certificates behind one responder are two questions.
