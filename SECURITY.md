@@ -140,11 +140,15 @@ and [docs/architecture.md](docs/architecture.md#decryption).
 
 One consequence is worth stating plainly: because a bad key transport is no
 longer distinguishable, a dossier whose wrapped key is unusable is decrypted
-under a synthetic key, and on the rare occasion that the resulting garbage
-happens to carry valid PKCS#7 padding, openSzigno writes that garbage instead
-of failing. Decryption asserts nothing about authenticity in any case, which is
-the point made under "Decryption is not verification either" above; verify a
-signature if you need to know that content is genuine.
+under a synthetic key and the failure surfaces further down. Almost always
+that is the content cipher's PKCS#7 padding, reported as `decryption failed`.
+Roughly once in 256 the padding of garbage is valid by chance, and the answer
+is then `source_size_mismatch`, because the document's declared source size no
+longer matches what came out. Only if that length matched too would openSzigno
+write the garbage, which needs both accidents at once. Decryption asserts
+nothing about authenticity in any case, which is the point made under
+"Decryption is not verification either" above; verify a signature if you need
+to know that content is genuine.
 
 ## Network exposure
 

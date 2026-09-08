@@ -2924,9 +2924,13 @@ would remove the residual, and has no stable release yet. See the
 for the operator-facing statement.
 
 One visible consequence: a dossier whose wrapped key is unusable is decrypted
-under a synthetic key, so on the rare occasion that the resulting garbage
-carries valid PKCS#7 padding, `extract` writes that garbage rather than
-failing. Decryption asserts nothing about authenticity either way; see
+under a synthetic key, so the failure surfaces further down rather than at the
+unwrap. Almost always that is the content cipher's PKCS#7 padding, reported as
+`decrypt_failed`; roughly once in 256 the padding of garbage is valid by
+chance and the answer is `source_size_mismatch` instead, because the decoded
+length no longer matches the document's declared source size. `extract` would
+write the garbage only if that length matched as well. Decryption asserts
+nothing about authenticity either way; see
 [Verification boundary](#verification-boundary).
 
 ## Verification boundary

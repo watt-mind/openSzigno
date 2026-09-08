@@ -55,9 +55,10 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
   and
   [docs/architecture.md](docs/architecture.md#rsa-key-transport-implicit-rejection).
   One consequence: an unusable wrapped key is decrypted under the synthetic
-  key, so in the rare case that the garbage happens to carry valid PKCS#7
-  padding, `extract` writes it rather than failing. Decryption never asserted
-  authenticity.
+  key, so the failure surfaces further down. Almost always that is the content
+  cipher's padding, as `decrypt_failed`; roughly once in 256 the padding of
+  garbage is valid by chance and the answer is `source_size_mismatch` instead.
+  Decryption never asserted authenticity.
 
 ## [0.5.0] - 2026-09-08
 
