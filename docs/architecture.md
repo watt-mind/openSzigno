@@ -832,6 +832,28 @@ meaningless:
    asked about: its revocation is not a question the PKI it roots can answer,
    and asking would invite a self-signed CRL to speak for itself.
 
+### Module map
+
+`openszigno-verify` is organised as the pipeline above, one module per stage.
+The split is internal; the crate's public API is unchanged.
+
+| Module | What it owns |
+| --- | --- |
+| `lib.rs` | The `verify` entry point: the run's `Context`, the per-signature loop through stages A to F, and the dossier-level assembly (container timestamps, coverage, counts, verdict). |
+| `dsig` | The shared `Context` and the small XML helpers every stage is built from, plus re-exports of the items that used to live here. |
+| `references` | One `ds:Reference`: parsing, same-document resolution on the validated ID space, the transform allowlist and its application, and digest recomputation. |
+| `scope` | Placement classification (`Placement`, `placement_of`), the mandated e-dossier reference sets, and `reference_scope_check`. |
+| `countersign` | Countersignature detection, the binding check, and the reported role, parent and `countersigns` set. |
+| `signature` | The per-signature driver: `ds:SignedInfo` parsing, the signature-level algorithm policy, canonicalization of `ds:SignedInfo`, signature-value verification and signer selection (stages A and B). |
+| `coverage` | What a signature's resolved references cover, and the per-document coverage report and its dossier-level checks. |
+| `xades` | Stage C: the XAdES qualifying properties and the signed `SigningCertificate` binding. |
+| `certs` | Stage D: certificate parsing, path building and validation. |
+| `revocation` | Stage E: CRL and OCSP processing for a validated path. |
+| `tsa` | Stage F: RFC 3161 token parsing and verification, for signature and container timestamps alike. |
+| `estimestamp` | The container's own `es:TimeStamp` elements and what they cover. |
+| `trustlist` | ETSI TS 119 612 trusted lists, and the qualified status of a validated chain. |
+| `trust`, `policy`, `codes`, `report`, `c14n`, `embedded` | The injected I/O seams, the pinned algorithm and limit policy, the check codes, the JSON report types, canonicalization, and the whole-document reads the CLI's `--online` fetcher needs. |
+
 ### Reference scope
 
 Because the e-dossier specification mandates *which elements* a signature must
