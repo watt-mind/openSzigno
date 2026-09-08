@@ -27,6 +27,7 @@ mod title;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use openszigno_core::{Limits, MimeType};
 use serde::Serialize;
+use unicode_normalization::UnicodeNormalization;
 
 pub use error::{Error, ErrorCode};
 pub use mime::{NESTED_DOSSIER_EXTENSION, NESTED_DOSSIER_MEDIA_TYPE, NESTED_DOSSIER_SUBTYPE};
@@ -126,6 +127,12 @@ fn check_dossier_title(title: &str) -> Result<(), Error> {
     Ok(())
 }
 
+/// The one composition every title is written in: NFC, exactly what the
+/// extraction sanitizer normalises a filename to.
+fn canonical(title: &str) -> String {
+    title.nfc().collect()
+}
+
 /// Turn a title rejection into the error the caller sees. The message says
 /// which document and why, and never echoes the title itself.
 fn title_error(index: usize, rejection: TitleRejection) -> Error {
@@ -209,7 +216,11 @@ pub fn build(spec: &DossierSpec, limits: &Limits) -> Result<BuiltDossier, Error>
     for (index, document) in spec.documents.iter().enumerate() {
         let title = document.title.trim();
         check_title(title).map_err(|rejection| title_error(index, rejection))?;
-        let mime_type = mime::mime_for(title, document.media_type.as_deref())?;
+        // One canonical composition, the same one the extraction sanitizer
+        // writes a filename in, so the title in the dossier and the name the
+        // payload comes back out under are the same string.
+        let title = canonical(title);
+        let mime_type = mime::mime_for(&title, document.media_type.as_deref())?;
         total = total.saturating_add(document.bytes.len() as u64);
         if total > limits.max_total_decoded_bytes {
             return Err(Error::new(
@@ -224,7 +235,7 @@ pub fn build(spec: &DossierSpec, limits: &Limits) -> Result<BuiltDossier, Error>
         payloads.push(payload);
         documents.push(BuiltDocument {
             index,
-            title: title.to_owned(),
+            title,
             source_size: document.bytes.len() as u64,
             transforms,
             nested_dossier: is_nested_dossier(&mime_type),
@@ -251,7 +262,7 @@ pub fn build(spec: &DossierSpec, limits: &Limits) -> Result<BuiltDossier, Error>
         })
         .collect();
     Ok(BuiltDossier {
-        bytes: render::dossier(spec.title.trim(), &spec.created, &rendered),
+        bytes: render::dossier(&canonical(spec.title.trim()), &spec.created, &rendered),
         documents,
     })
 }

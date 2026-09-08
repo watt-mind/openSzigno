@@ -56,6 +56,16 @@ Variants:
 | `trusted` | `verify --trust-store <anchors> --at 2026-01-02T03:04:05Z`, signed fixtures only |
 | `trusted-in-validity` | The same, at `2027-01-01T00:00:00Z` |
 
+One case is not driven by a fixture. `tests/golden/create/` captures
+`openszigno create` building a dossier from the two committed inputs under
+`tests/fixtures/create/`, in both modes, with `--created` pinned to
+`2026-01-01T00:00:00Z` so the output is byte-identical on every run. It runs
+in its own throwaway working directory and writes the bare relative path
+`created.es3`, because `create` echoes the output path it was given and no
+golden may carry a machine-local path. Its output is committed as
+`tests/fixtures/created.es3`, which the fixture matrix then covers like any
+other fixture.
+
 The commands captured are `inspect`, `list`, `validate-structure`, `verify`
 and `extract` in JSON mode, and `inspect`, `list`, `validate-structure` and
 `verify` in human mode. `extract` writes into a throwaway directory under the

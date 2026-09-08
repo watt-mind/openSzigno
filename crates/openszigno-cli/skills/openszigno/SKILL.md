@@ -1,7 +1,7 @@
 ---
 name: openszigno
 description: >-
-  Inspect, list, extract, decrypt and verify Microsec e-Szigno dossiers
+  Inspect, list, extract, decrypt, verify and create Microsec e-Szigno dossiers
   (.es3, .dosszie, "e-akta") with the openszigno CLI. Use whenever a task
   involves an .es3 file, a Hungarian court or company-registry e-akta, a
   signed or encrypted e-Szigno dossier, XAdES signature or timestamp
@@ -20,7 +20,8 @@ registry and many public bodies deliver documents in. It identifies a
 dossier, lists and extracts the documents inside it (including nested
 dossiers and, given a key, encrypted ones), and verifies XMLDSig/XAdES
 signatures, timestamps, certificate paths and revocation against trust
-material you supply. It never contacts the network unless told to, never
+material you supply, and can build a new, unsigned dossier from files on
+disk. It never contacts the network unless told to, never
 overwrites a file, and never takes key material from the command line.
 
 ## Rules that always apply
@@ -290,6 +291,32 @@ digests, the signature value, the algorithm policy, the XMLDSig structure,
 the `SigningCertificate` binding, the signer's own certificate path, or a
 container timestamp that contradicts the container.
 
+### 6. Create a dossier
+
+Only when the user asks for a dossier to be *built*. `create` writes one
+new, unsigned dossier and nothing else: it signs nothing, so never present
+its output as signed, authentic, or legally valid.
+
+```sh
+openszigno create --output OUT.es3 --title 'Dossier title' \
+  --document path/to/file.pdf --document notes.txt::Notes.txt \
+  [--zip] [--embed existing.es3] [--created 2026-01-01T00:00:00Z] --json
+```
+
+- The output file is never overwritten: an existing path is
+  `output_exists` (exit 5). Choose another name rather than deleting.
+- A document title defaults to the file's basename, and the media type to
+  the one registered for its extension. An unregistered extension is
+  `unknown_mime_type` (exit 4); pass the type as
+  `PATH::TITLE::type/subtype`.
+- A title that could not be written back out as a file is
+  `unsafe_document_title` (exit 4).
+- `--created` makes the run deterministic: the same inputs and the same
+  date produce a byte-identical file. Without it the current time is used.
+- Check the result by reading it back: `list` and `extract` on the new
+  file are the proof it holds what was asked for.
+- Every successful run warns `created_dossier_unsigned`. Pass that on.
+
 ## Reporting to the user
 
 State, in this order and in plain words:
@@ -316,6 +343,8 @@ openszigno validate-structure FILE --json
 openszigno extract FILE --json --output DIR [--document '#N'] [--no-recursive]
 openszigno extract FILE --document '#N' --stdout > payload.bin
 openszigno extract FILE --json --output DIR --decrypt-key K --decrypt-cert C
+openszigno create --output OUT.es3 --title T --document PATH[::TITLE[::MIME]] \
+  [--zip] [--embed DOSSIER.es3] [--created RFC3339] --json
 openszigno verify FILE --json --trust-store DIR [--trust-list TL --lotl LOTL \
   --trust-list-signer CERT] [--online --online-cache DIR | --revocation-store DIR] \
   [--at TIME] [--allow-legacy-algorithms]

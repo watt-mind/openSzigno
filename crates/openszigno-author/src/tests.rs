@@ -180,6 +180,17 @@ fn a_dossier_title_that_is_not_usable_metadata_is_refused() {
     );
 }
 
+/// A title is written in one canonical composition, so the dossier's title
+/// and the filename `extract` writes are the same string.
+#[test]
+fn a_title_is_stored_in_one_canonical_composition() {
+    let dossier = built(vec![document("e\u{301}rte\u{301}s.txt", b"x")]);
+    assert_eq!(dossier.documents[0].title, "\u{e9}rt\u{e9}s.txt");
+    assert!(text_of(&dossier).contains("<es:Title>\u{e9}rt\u{e9}s.txt</es:Title>"));
+    let composed = built(vec![document("\u{e9}rt\u{e9}s.txt", b"x")]);
+    assert_eq!(dossier.bytes, composed.bytes);
+}
+
 #[test]
 fn a_dossier_with_no_document_is_refused() {
     let error = build(&spec(Vec::new()), &Limits::default()).expect_err("refused");

@@ -37,7 +37,7 @@ change per pull request, with its tests.
 ## Commit messages
 
 Use Conventional Commits. The type is required; the scope is optional and is
-`core`, `cli`, or `verify`.
+`core`, `author`, `cli`, or `verify`.
 
 ```text
 <type>(<scope>): <imperative summary, lowercase, no trailing period>
@@ -117,7 +117,7 @@ CI additionally runs, on every pull request:
 | Rustdoc | `cargo doc --workspace --no-deps --locked` with `RUSTDOCFLAGS=-D warnings` |
 | Unused dependencies | `cargo machete` |
 | Licences and advisories | `cargo deny check --all-features` |
-| Crate manifests | `cargo package -p <crate> --no-verify --locked` for all three crates |
+| Crate manifests | `cargo package -p <crate> --no-verify --locked` for all four crates |
 | Release container | `docker build .`, then the CLI subcommands inside the image |
 | Workflow lint | `actionlint` with `SHELLCHECK_OPTS=--severity=warning` |
 | Commit and PR hygiene (pull requests only) | `git log --format=%s origin/<base>..HEAD` through `scripts/commit-msg.sh -`, plus a `Fixes\|Closes\|Refs LAB-<n>` line in the pull request body |
