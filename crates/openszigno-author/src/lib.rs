@@ -2,16 +2,25 @@
 //!
 //! This crate is the writer side of openSzigno. It builds an unsigned
 //! `es:Dossier` in the default e-Szignó 3.0 namespace, in the shape
-//! [`openszigno_core`] parses, and it does nothing else: it signs nothing,
-//! encrypts nothing, reads no file, and consults no clock. A dossier it
-//! produces carries no signature and is not evidence of anything.
+//! [`openszigno_core`] parses, and it does almost nothing else: it signs
+//! nothing, reads no file, and consults no clock. A dossier it produces
+//! carries no signature and is not evidence of anything.
+//!
+//! The one exception is the `encrypt` transform: when a [`DossierSpec`]
+//! names recipients, a document's payload is written as a CMS
+//! `EnvelopedData` addressed to them, which is what
+//! `openszigno extract --decrypt-key` reads back. Encrypting says who can
+//! read a document and nothing about who wrote it.
 //!
 //! Two properties are load-bearing:
 //!
-//! - **Determinism.** The same [`DossierSpec`] always renders the same bytes.
-//!   Element order, indentation, and identifiers are fixed, the identifiers
-//!   are positional (`obj0`, `profile0`, ...), and the creation date comes
-//!   from the caller.
+//! - **Determinism.** The same [`DossierSpec`] always renders the same bytes,
+//!   **unless it asks for encryption**. Element order, indentation, and
+//!   identifiers are fixed, the identifiers are positional (`obj0`,
+//!   `profile0`, ...), and the creation date comes from the caller. A content
+//!   key, an initialisation vector, and key-transport padding must be
+//!   unpredictable, so a spec carrying an [`Encryption`] renders different
+//!   bytes on every run by design.
 //! - **Readability by the reader.** Every bound [`Limits`] places on a dossier
 //!   is checked while building, and every document title is checked against
 //!   the rules `openszigno extract` applies before it writes a file, so a
@@ -19,6 +28,7 @@
 //!   and extract.
 
 mod archive;
+mod encrypt;
 mod error;
 mod mime;
 mod render;
@@ -29,6 +39,7 @@ use openszigno_core::{Limits, MimeType};
 use serde::Serialize;
 use unicode_normalization::UnicodeNormalization;
 
+pub use encrypt::{Encryption, KeyTransport, Recipient};
 pub use error::{Error, ErrorCode};
 pub use mime::{NESTED_DOSSIER_EXTENSION, NESTED_DOSSIER_MEDIA_TYPE, NESTED_DOSSIER_SUBTYPE};
 pub use render::{DOCUMENT_CATEGORY, DOSSIER_CATEGORY};
@@ -51,6 +62,11 @@ pub struct DocumentSpec {
     pub bytes: Vec<u8>,
     /// Store the payload as `zip -> base64` instead of `base64`.
     pub compress: bool,
+    /// Encrypt the payload for the dossier's recipients, when it has any.
+    ///
+    /// Set per document rather than per dossier because an embedded dossier
+    /// is written in the clear: see [`DossierSpec::encryption`].
+    pub encrypt: bool,
 }
 
 /// The dossier to build.
@@ -63,6 +79,12 @@ pub struct DossierSpec {
     pub created: String,
     /// The documents, in the order they are written.
     pub documents: Vec<DocumentSpec>,
+    /// Who every [`DocumentSpec::encrypt`] document is encrypted for, or
+    /// `None` to write every payload in the clear.
+    ///
+    /// A spec that carries this renders different bytes on every run; see the
+    /// determinism note on this crate.
+    pub encryption: Option<Encryption>,
 }
 
 /// One document as it was written.
@@ -77,6 +99,10 @@ pub struct BuiltDocument {
     /// Whether the declared type marks this document as an embedded dossier,
     /// under the same rule the reader applies.
     pub nested_dossier: bool,
+    /// Whether the payload was written as a CMS `EnvelopedData`, so that only
+    /// a recipient's private key can read it back. It says nothing about who
+    /// wrote the document.
+    pub encrypted: bool,
     /// The `ds:Object` `Id` the profile points at, which is also the
     /// `extract --document` selector for it.
     pub object_ref: String,
@@ -155,10 +181,12 @@ fn title_error(index: usize, rejection: TitleRejection) -> Error {
 /// Encode one document's payload, applying the transforms it asked for.
 ///
 /// Returns the Base64 text and the transform chain, in the forward order the
-/// profile declares (`zip? -> base64`).
+/// profile declares (`zip? -> encrypt? -> base64`), which is the order the
+/// specification fixes and the reader reverses.
 fn encode(
     index: usize,
     document: &DocumentSpec,
+    encryption: Option<&Encryption>,
     limits: &Limits,
 ) -> Result<(String, Vec<String>), Error> {
     if document.bytes.len() as u64 > limits.max_decoded_document_bytes {
@@ -170,13 +198,20 @@ fn encode(
             ),
         ));
     }
-    let mut transforms = Vec::with_capacity(2);
-    let payload = if document.compress {
+    let mut transforms = Vec::with_capacity(3);
+    let mut payload = if document.compress {
         transforms.push("zip".to_owned());
         archive::compress(&document.title, &document.bytes, limits)?
     } else {
         document.bytes.clone()
     };
+    // The encryption wraps whatever the ZIP step produced, so under `--zip`
+    // the plaintext of the CMS message is the archive and the reader expands
+    // it after decrypting.
+    if let Some(encryption) = encryption.filter(|_| document.encrypt) {
+        transforms.push("encrypt".to_owned());
+        payload = encrypt::envelope(&payload, encryption)?;
+    }
     transforms.push("base64".to_owned());
     let encoded = STANDARD.encode(&payload);
     if encoded.len() > limits.max_base64_chars {
@@ -231,12 +266,13 @@ pub fn build(spec: &DossierSpec, limits: &Limits) -> Result<BuiltDossier, Error>
                 ),
             ));
         }
-        let (payload, transforms) = encode(index, document, limits)?;
+        let (payload, transforms) = encode(index, document, spec.encryption.as_ref(), limits)?;
         payloads.push(payload);
         documents.push(BuiltDocument {
             index,
             title,
             source_size: document.bytes.len() as u64,
+            encrypted: transforms.iter().any(|transform| transform == "encrypt"),
             transforms,
             nested_dossier: is_nested_dossier(&mime_type),
             mime_type,

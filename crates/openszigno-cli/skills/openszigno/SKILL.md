@@ -300,7 +300,8 @@ its output as signed, authentic, or legally valid.
 ```sh
 openszigno create --output OUT.es3 --title 'Dossier title' \
   --document path/to/file.pdf --document notes.txt::Notes.txt \
-  [--zip] [--embed existing.es3] [--created 2026-01-01T00:00:00Z] --json
+  [--zip] [--embed existing.es3] [--encrypt-for recipient.cert.pem] \
+  [--created 2026-01-01T00:00:00Z] --json
 ```
 
 - The output file is never overwritten: an existing path is
@@ -311,8 +312,17 @@ openszigno create --output OUT.es3 --title 'Dossier title' \
   `PATH::TITLE::type/subtype`.
 - A title that could not be written back out as a file is
   `unsafe_document_title` (exit 4).
+- `--encrypt-for CERT` encrypts every `--document` payload for that
+  recipient certificate (PEM or DER), so only its private key reads it
+  back. Repeatable: any one recipient can decrypt. Embedded dossiers are
+  never encrypted. An unreadable certificate is
+  `invalid_recipient_certificate` and a non-RSA one
+  `unsupported_recipient_key`, both exit 4; an expired one is the
+  `recipient_certificate_expired` warning, not a refusal.
 - `--created` makes the run deterministic: the same inputs and the same
   date produce a byte-identical file. Without it the current time is used.
+  `--encrypt-for` makes it non-deterministic whatever `--created` says,
+  because every document gets a fresh random content key.
 - Check the result by reading it back: `list` and `extract` on the new
   file are the proof it holds what was asked for.
 - Every successful run warns `created_dossier_unsigned`. Pass that on.

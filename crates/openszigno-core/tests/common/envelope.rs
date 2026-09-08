@@ -12,10 +12,14 @@
 //! because the workspace optimizes `rsa` and `num-bigint-dig` even in the dev
 //! profile; unoptimized it would be nearer five seconds.
 //!
-//! Encrypting is a permanent non-goal of the shipped tool, which is exactly
-//! why the encryptor lives here and not in a shipped crate. This file is
-//! included by both the core and the CLI test suites, so it deliberately
-//! stands alone: it refers to nothing outside its own module.
+//! `openszigno-author` now writes the `encrypt` transform, but only the
+//! narrow, correct subset a producer should emit. This encryptor exists
+//! alongside it to build the messages a *reader* must cope with and a
+//! producer must never write: DES-EDE3-CBC, unsupported algorithm
+//! identifiers, and deliberately damaged framing. That is why it stays in
+//! the test suites. This file is included by both the core and the CLI test
+//! suites, so it deliberately stands alone: it refers to nothing outside its
+//! own module.
 #![allow(dead_code)]
 
 use std::sync::LazyLock;

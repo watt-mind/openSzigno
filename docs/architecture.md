@@ -160,12 +160,17 @@ crates/openszigno-author/src/
   mime.rs     # extension to media type, and the caller's own type/subtype
   title.rs    # the title rules extraction and authoring both apply
   archive.rs  # the one-member ZIP a `zip -> base64` document carries
+  encrypt/    # the CMS EnvelopedData an `encrypt` document carries
+    mod.rs      # the message: content cipher, key transport, DER framing
+    recipient.rs # reading a recipient certificate and naming it in CMS
   error.rs    # the stable codes a refused build reports
 ```
 
 The crate reads no file, opens no socket, and calls no clock: the caller
-passes the bytes and the creation date in. See
-[The create command](#the-create-command).
+passes the bytes and the creation date in. Its one non-deterministic corner
+is `encrypt/`, which draws a content key, an initialisation vector, and
+key-transport padding from `OsRng`; without recipients it consults no random
+source at all. See [The create command](#the-create-command).
 
 ## Format scope
 
@@ -837,6 +842,10 @@ I/O and extraction policy.
 | `unknown_mime_type` | author | 4 | No media type is registered for a `create` document's extension and none was given. |
 | `invalid_mime_type` | author | 4 | A `create` document's media type is not a bare `type/subtype`. |
 | `zip_failed` | author | 4 | A `create --zip` payload could not be packed into a ZIP archive. Not reachable through any input this tool accepts. |
+| `invalid_recipient_certificate` | author, CLI | 4 | A `create --encrypt-for` file is not a readable X.509 certificate, in DER or in a PEM `CERTIFICATE` block, or is larger than 1 MiB. |
+| `unsupported_recipient_key` | author | 4 | A `create --encrypt-for` certificate carries a public key that is not RSA, or an RSA key too small to wrap the content-encryption key. |
+| `no_recipients` | author | 4 | Encryption was asked for with no recipient certificate. Unreachable through the CLI, which only builds an encryption request from `--encrypt-for`. |
+| `encrypt_failed` | author | 4 | The CMS `EnvelopedData` could not be built. Not reachable through any input this tool accepts: every value in it is built by this tool and within every bound the DER encoders check. |
 | `invalid_output_path` | CLI | 4 | The `create --output` path does not name a file. |
 | `unsafe_output_name` | CLI | 5 | A document title or declared extension cannot be used as a filename, or the derived `<file>.d` directory name would be too long. |
 | `output_name_collision` | CLI | 5 | Residual: two outputs still map to the same name in one directory after deduplication. |
@@ -872,7 +881,8 @@ Warning codes. Warnings never change the exit status by themselves:
 | `signature_inventory_truncated` | all commands | More than 64 `ds:Signature` or 64 `es:TimeStamp` elements are present, so the inventory describes only the first 64 of that kind. `signatures_present` and `timestamps_present` still count them all. |
 | `output_name_deduplicated` | `extract` | A document's output name was already taken in its directory, so it was renamed. |
 | `nested_dossier_depth_limit` | `extract` | An embedded dossier was kept as a file because `--max-depth` was reached. |
-| `created_dossier_unsigned` | `create` | The dossier that was written carries no signature and no timestamp. Every successful `create` reports it. |
+| `recipient_certificate_expired` | `create` | An `--encrypt-for` certificate has already expired; the document was encrypted for it anyway, because decryption never consults a recipient certificate's validity. The message names the recipient by its position on the command line. |
+| `created_dossier_unsigned` | `create` | The dossier that was written carries no signature and no timestamp. Every successful `create` reports it, last. |
 | `nested_dossier_invalid` | `extract` | An embedded dossier could not be parsed; the raw payload was kept and the run continued. |
 
 ## The `verify` command
@@ -2740,14 +2750,17 @@ in its own right. A TSA certificate that was actually revoked makes the check
 
 `create` is the only command that writes a dossier. It builds one unsigned
 `es:Dossier` from files on disk, in the default e-Szignó 3.0 namespace, and
-does nothing else: it signs nothing, encrypts nothing, and reads no dossier
-except the ones `--embed` names. The writing itself lives in
-`openszigno-author`, which never touches the filesystem;
+does nothing else: it signs nothing, and reads no dossier except the ones
+`--embed` names. With `--encrypt-for` it also encrypts, which is the one
+thing it does beyond writing XML; see
+[Encrypting for a recipient](#encrypting-for-a-recipient). The writing
+itself lives in `openszigno-author`, which never touches the filesystem;
 `openszigno-core` stays read-only.
 
 ```sh
 openszigno create --output FILE.es3 --title TITLE \
   [--document PATH[::TITLE[::MIME]]]... [--zip] [--embed DOSSIER.es3]... \
+  [--encrypt-for CERT]... [--legacy-key-transport] \
   [--created RFC3339] [--json]
 ```
 
@@ -2792,7 +2805,7 @@ run.
 | `es:DocumentProfile` | `Id="profile<index>"`, `OBJREF="obj<index>"`, indexes counted from 0 in the order the documents were given. |
 | `es:MIME-Type` | `type`, `subtype`, and `extension`, the three attributes the reader reads. No `charSet` is written. |
 | `es:SourceSize` | The decoded length in bytes, `sizeUnit="B"`, always present. |
-| `es:BaseTransform` | `base64`, or `zip` then `base64` under `--zip`. |
+| `es:BaseTransform` | `base64`, or `zip` then `base64` under `--zip`; `--encrypt-for` inserts `encrypt` before `base64`. |
 | `ds:Object` | `Id="obj<index>"`, holding the Base64 payload with no line breaks. |
 
 ### Determinism
@@ -2802,6 +2815,14 @@ Element order, indentation, and the identifiers above are fixed, no
 identifier is random, Base64 is unwrapped, and the ZIP a `--zip` document
 carries pins its member's modification time to the ZIP epoch. Only the
 default creation date depends on the clock.
+
+**`--encrypt-for` gives that up, by design.** An encrypted document carries a
+content-encryption key, an initialisation vector, and key-transport padding
+that must all be unpredictable, so two runs over the same inputs with the
+same `--created` produce different bytes. A fixed value anywhere in that list
+would make every document this tool wrote readable by anyone who read the
+source. Without `--encrypt-for` nothing in the writer consults a random
+source and the guarantee above is unchanged.
 
 ### Documents
 
@@ -2831,15 +2852,91 @@ extractable.
 
 `--zip` stores every `--document` payload as `zip -> base64`, in a
 one-member archive named after the document. An embedded dossier is always
-stored as `base64`. A payload that deflates better than
-`max_zip_compression_ratio` is refused as `zip_ratio_limit`, because the
-reader would refuse to expand it.
+stored as `base64`, and is never encrypted either. A payload that deflates
+better than `max_zip_compression_ratio` is refused as `zip_ratio_limit`,
+because the reader would refuse to expand it.
 
 An `--embed` file is parsed before it is embedded, so `create` never writes
 an embedded document this tool cannot read back; a file that does not parse
 fails with the structural code the parser produced. It is titled
 `<stem>.dosszie` and declared `application/nldossier2`, which is what makes
 `list` report it as a nested dossier and `extract` expand it.
+
+### Encrypting for a recipient
+
+`--encrypt-for CERT` encrypts every `--document` payload as a CMS
+`EnvelopedData` addressed to that certificate, which is exactly the form
+[Decryption](#decryption) reads back. It is repeatable: every recipient gets
+its own `KeyTransRecipientInfo`, so any one of their private keys recovers
+the document, and `extract --decrypt-key` reports `decrypted: true`.
+
+An `--embed` dossier is **not** encrypted. It stays `base64`, so `list` can
+still report what is inside it and the documents within keep whatever
+transforms they already carry. Encrypting a whole nested dossier would hide
+its structure behind one opaque blob for no gain, since its own documents can
+be encrypted individually before they are embedded.
+
+The transform chain is written in the forward order the specification fixes,
+which the reader reverses:
+
+| Flags | `es:BaseTransform` | What is encrypted |
+| --- | --- | --- |
+| `--encrypt-for` | `encrypt`, `base64` | The document bytes. |
+| `--encrypt-for --zip` | `zip`, `encrypt`, `base64` | The one-member ZIP archive: the plaintext of the CMS message *is* the ZIP, and the reader expands it after decrypting. |
+
+`es:SourceSize` stays the plaintext length in both cases, because that is
+what the reader compares the fully decoded bytes against.
+
+What is written, and nothing else:
+
+| Layer | Written |
+| --- | --- |
+| Container | A bare DER `ContentInfo` with `id-envelopedData` (RFC 5652 §6), version 0. No MIME wrapper. |
+| Recipient | One `KeyTransRecipientInfo` per `--encrypt-for`, version 0, named by `issuerAndSerialNumber`. Every certificate can be named that way, whereas `subjectKeyIdentifier` needs an extension a certificate need not carry; the reader accepts both. |
+| Key transport | RSAES-OAEP with SHA-256 and MGF1-SHA-256 and the default empty label. `--legacy-key-transport` writes RSAES-PKCS1-v1_5 instead. |
+| Content encryption | AES-256-CBC, with a fresh content-encryption key and initialisation vector for every document. |
+
+**DES-EDE3-CBC is never written.** The reader accepts it behind
+`--allow-legacy-ciphers` because real dossiers carry it, which is a reason to
+read it and not a reason to produce more of it.
+
+`--legacy-key-transport` exists for interoperability with a reader that
+cannot do OAEP. What the sources in this repository actually establish about
+the Microsec reference tool is narrower than the flag's name suggests: its
+documented `-encryptor_symm_alg` option takes OpenSSL cipher names and
+defaults to `des-ede3-cbc`, which is a statement about the *content* cipher
+only. No source available here says which key transport it writes, and it
+documents no option to choose one. RSAES-PKCS1-v1_5 is what an OpenSSL CMS
+backend produces for `rsaEncryption` unless OAEP is asked for explicitly, so
+it is the likely default, but that is inference and not evidence. Prefer
+RSAES-OAEP; reach for the flag only when something on the other side has
+actually refused an OAEP message.
+
+Recipient certificates are public material, so unlike a decryption key they
+are read with the ordinary bounded reader; each is capped at 1 MiB. Nothing
+derived from one reaches the envelope, and a refusal names the recipient by
+its position on the command line and never by path or by subject. **No key
+material of any kind is written or reported**: the content-encryption key
+exists only inside the process and is zeroed when it is dropped, and
+`create` never reads a private key at all.
+
+| Situation | Result |
+| --- | --- |
+| The certificate is not readable X.509, in DER or in a PEM `CERTIFICATE` block, or is over 1 MiB | `invalid_recipient_certificate`, exit 4. |
+| The certificate carries a public key that is not RSA | `unsupported_recipient_key`, exit 4. |
+| The RSA key is too small to wrap a 32-byte content key under the chosen transport | `unsupported_recipient_key`, exit 4. |
+| The certificate has expired | `recipient_certificate_expired` **warning**, exit 0, and the document is encrypted for it anyway. |
+| The file cannot be opened or read | `io_error`, exit 3, as for `--document`. |
+
+Expiry is a warning and not a refusal because nothing in the format or in the
+reader consults a recipient certificate's validity: the private key still
+unwraps the content key the day after the certificate lapses, and refusing
+would make a legitimate "encrypt this for the key I hold" impossible. The
+warning says the operator should check they meant it. Nothing else about the
+certificate is checked either: `create` builds no path, checks no revocation,
+and asserts nothing about who the recipient is. Encrypting says who can read
+a document; it says nothing about who wrote it, and the dossier is still
+unsigned.
 
 ### Writing the output
 
@@ -2875,8 +2972,9 @@ for every other command whose input could not be used.
 | `title` | string | The `es:Title` written. |
 | `mime_type` | object | `media_type`, `subtype`, `extension`, `charset`, as `list` reports them. `charset` is always `null`. |
 | `source_size` | number | The decoded length declared in `es:SourceSize`. |
-| `transforms` | array | `["base64"]`, or `["zip", "base64"]`. |
+| `transforms` | array | `["base64"]`, or `["zip", "base64"]`; with `--encrypt-for`, `["encrypt", "base64"]` or `["zip", "encrypt", "base64"]`. |
 | `nested_dossier` | boolean | Whether the declared type marks the document as an embedded dossier. |
+| `encrypted` | boolean | Whether the payload was written as a CMS `EnvelopedData`, so that only a recipient's private key can read it back. `false` for every document without `--encrypt-for`, and for every `--embed` dossier. |
 | `object_ref` | string | The `ds:Object` `Id`, which is also the `extract --document` selector for it. |
 
 Every successful run warns `created_dossier_unsigned`. Creating a dossier
@@ -2965,9 +3063,13 @@ proves nothing about its contents, and the envelope says so on every run.
 ## Decryption
 
 `extract --decrypt-key` reverses the `encrypt` transform. This is the M4
-milestone. **Decryption is not verification and never becomes it**: reading a
-document proves that a key could unwrap it, not that anybody signed it, and
-not that the signer is who a certificate says. Every statement in
+milestone. The other direction, `create --encrypt-for`, writes a deliberately
+narrow subset of what is described here; see
+[Encrypting for a recipient](#encrypting-for-a-recipient).
+
+**Decryption is not verification and never becomes it**: reading a document
+proves that a key could unwrap it, not that anybody signed it, and not that
+the signer is who a certificate says. Every statement in
 [Verification boundary](#verification-boundary) is unchanged by it, `verify` is
 unaffected, and `signatures_verified` stays `false`.
 

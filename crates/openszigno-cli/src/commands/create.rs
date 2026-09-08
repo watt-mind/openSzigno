@@ -9,7 +9,7 @@ use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
-use openszigno_author::{DocumentSpec, DossierSpec};
+use openszigno_author::{DocumentSpec, DossierSpec, Encryption, KeyTransport, Recipient};
 use openszigno_core::{Limits, ParseOptions};
 use openszigno_verify::{Clock, SystemClock, format_rfc3339};
 use serde_json::json;
@@ -88,6 +88,7 @@ fn document_spec(value: &str, compress: bool, limits: &Limits) -> Result<Documen
         title,
         media_type: media_type.map(str::to_owned),
         compress,
+        encrypt: true,
     })
 }
 
@@ -110,6 +111,10 @@ fn embed_spec(path: &Path, options: &ParseOptions) -> Result<DocumentSpec, CliEr
         media_type: None,
         bytes,
         compress: false,
+        // An embedded dossier is written in the clear, exactly as `--zip`
+        // leaves it uncompressed: `list` can then report what is inside it,
+        // and the documents within carry their own transforms.
+        encrypt: false,
     })
 }
 
@@ -162,6 +167,77 @@ fn write_new_file(path: &Path, bytes: &[u8]) -> Result<(), CliError> {
     Ok(())
 }
 
+/// The largest recipient certificate this tool reads. A certificate is small;
+/// the bound keeps a mistyped path from reading something huge into memory.
+const MAX_RECIPIENT_CERT_BYTES: u64 = 1024 * 1024;
+
+/// Read the `--encrypt-for` certificates, or `None` when there are none.
+///
+/// A certificate is public material, so unlike a decryption key it may be read
+/// with the ordinary bounded reader. Nothing derived from one reaches the
+/// envelope: a refusal names the recipient by position, never by path or by
+/// subject.
+fn encryption(args: &CreateArgs) -> Result<Option<Encryption>, CliError> {
+    if args.encrypt_for.is_empty() {
+        return Ok(None);
+    }
+    let mut recipients = Vec::with_capacity(args.encrypt_for.len());
+    for (index, path) in args.encrypt_for.iter().enumerate() {
+        let bytes = read_bounded(path, MAX_RECIPIENT_CERT_BYTES).map_err(|error| {
+            match error.code {
+                // An over-cap or unreadable file is a bad recipient rather
+                // than a bad document, and gets the recipient's own code.
+                "decoded_too_large" => CliError::invalid(
+                    "invalid_recipient_certificate",
+                    format!(
+                        "recipient certificate {index} is larger than \
+                         {MAX_RECIPIENT_CERT_BYTES} bytes"
+                    ),
+                ),
+                _ => error,
+            }
+        })?;
+        recipients.push(
+            Recipient::from_certificate(&bytes)
+                .map_err(CliError::authoring)
+                .map_err(|error| CliError {
+                    message: format!("{} (recipient {index})", error.message),
+                    ..error
+                })?,
+        );
+    }
+    Ok(Some(Encryption {
+        recipients,
+        key_transport: match args.legacy_key_transport {
+            true => KeyTransport::Pkcs1v15,
+            false => KeyTransport::OaepSha256,
+        },
+    }))
+}
+
+/// One warning per recipient certificate that has already expired.
+///
+/// Expiry is a warning and not a refusal. Nothing in the format or in the
+/// reader consults a recipient certificate's validity: the private key still
+/// unwraps the content key afterwards, and refusing would make a legitimate
+/// "encrypt this for the key I hold" impossible the day a certificate lapses.
+/// The warning says the operator should check they meant it.
+fn expiry_warnings(encryption: Option<&Encryption>, now: i64) -> Vec<Notice> {
+    encryption
+        .into_iter()
+        .flat_map(|encryption| encryption.recipients.iter().enumerate())
+        .filter(|(_, recipient)| recipient.not_after_unix() < now)
+        .map(|(index, _)| Notice {
+            code: "recipient_certificate_expired".to_owned(),
+            message: format!(
+                "recipient certificate {index} has expired; the document was \
+                 encrypted for it anyway, because decryption does not check \
+                 a certificate's validity"
+            ),
+        })
+        .collect()
+}
+
 /// Build the specification the author crate takes, from the command line.
 fn build_spec(args: &CreateArgs, options: &ParseOptions) -> Result<DossierSpec, CliError> {
     let mut documents = Vec::with_capacity(args.document.len() + args.embed.len());
@@ -178,6 +254,7 @@ fn build_spec(args: &CreateArgs, options: &ParseOptions) -> Result<DossierSpec, 
             |created| created.0.clone(),
         ),
         documents,
+        encryption: encryption(args)?,
     })
 }
 
@@ -188,8 +265,13 @@ pub(crate) fn create(args: &CreateArgs) -> CliResult {
 
 fn run(args: &CreateArgs, options: &ParseOptions) -> Result<Success, CliError> {
     let spec = build_spec(args, options)?;
+    let mut warnings = expiry_warnings(spec.encryption.as_ref(), SystemClock.unix_time());
     let dossier = openszigno_author::build(&spec, &options.limits).map_err(CliError::authoring)?;
     write_new_file(&args.output, &dossier.bytes)?;
+    warnings.push(Notice {
+        code: "created_dossier_unsigned".to_owned(),
+        message: "the dossier carries no signature and no timestamp".to_owned(),
+    });
     Ok(Success {
         input: input_info(),
         data: json!({
@@ -198,10 +280,7 @@ fn run(args: &CreateArgs, options: &ParseOptions) -> Result<Success, CliError> {
             "created": spec.created,
             "documents": dossier.documents,
         }),
-        warnings: vec![Notice {
-            code: "created_dossier_unsigned".to_owned(),
-            message: "the dossier carries no signature and no timestamp".to_owned(),
-        }],
+        warnings,
         payload: None,
         exit: 0,
     })

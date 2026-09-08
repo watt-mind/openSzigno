@@ -13,6 +13,7 @@ fn document(title: &str, bytes: &[u8]) -> DocumentSpec {
         media_type: None,
         bytes: bytes.to_vec(),
         compress: false,
+        encrypt: false,
     }
 }
 
@@ -21,6 +22,7 @@ fn spec(documents: Vec<DocumentSpec>) -> DossierSpec {
         title: "Synthetic authoring test".to_owned(),
         created: CREATED.to_owned(),
         documents,
+        encryption: None,
     }
 }
 
@@ -117,6 +119,7 @@ fn an_embedded_dossier_is_recognised_as_nested() {
         media_type: None,
         bytes: inner.bytes.clone(),
         compress: false,
+        encrypt: false,
     }]);
     assert!(outer.documents[0].nested_dossier);
     assert_eq!(
@@ -155,6 +158,7 @@ fn a_dossier_title_that_is_not_usable_metadata_is_refused() {
                 title: title.to_owned(),
                 created: CREATED.to_owned(),
                 documents: vec![document("hello.txt", b"x")],
+                encryption: None,
             },
             &Limits::default(),
         )
@@ -167,6 +171,7 @@ fn a_dossier_title_that_is_not_usable_metadata_is_refused() {
             title: "Kft. <A & B>".to_owned(),
             created: CREATED.to_owned(),
             documents: vec![document("hello.txt", b"x")],
+            encryption: None,
         },
         &Limits::default(),
     )
@@ -289,6 +294,7 @@ fn a_built_document_serialises_the_documented_fields() {
     assert_eq!(
         keys,
         [
+            "encrypted",
             "index",
             "mime_type",
             "nested_dossier",
