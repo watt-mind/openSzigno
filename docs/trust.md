@@ -417,14 +417,17 @@ openszigno verify dossier.es3 --json \
 ### What it will and will not do
 
 - **Only for certificates your trust material vouches for.** A URL is
-  contacted only for a certificate that sits on a path to a trust anchor you
-  configured, with `--trust-store` or through a trusted list. **Without an
-  anchor nothing is fetched at all**: a dossier carries its own certificates,
-  including the "issuer" that signed the signer, so acting on a URL out of one
-  would let any file you were handed choose what your machine connects to.
-  When that happens `policy.revocation` reads `online_no_anchors` and both the
-  `revocation_policy` check and every `revocation_status_unknown` message say
-  so — configure trust material and the same run fetches.
+  contacted only for a certificate on a path openszigno *validated* to a trust
+  anchor you configured — with `--trust-store` or through a trusted list — for
+  a signature or a timestamp it was checking. A certificate sitting elsewhere
+  in the XML generates no traffic even if it chains to your anchor, because
+  nothing was validating it. **Without an anchor nothing is fetched at all**: a
+  dossier carries its own certificates, including the "issuer" that signed the
+  signer, so acting on a URL out of one would let any file you were handed
+  choose what your machine connects to. When that happens `policy.revocation`
+  reads `online_no_anchors` and both the `revocation_policy` check and every
+  `revocation_status_unknown` message say so — configure trust material and the
+  same run fetches.
 - **Only URLs the certificates publish.** The `cRLDistributionPoints` URIs and
   the `authorityInfoAccess` OCSP responders, read out of the certificates
   themselves. Nothing is taken from the dossier's XML, and no reference in the
@@ -438,12 +441,26 @@ openszigno verify dossier.es3 --json \
   fetched, and neither is rewritten. TLS is not what makes the answer
   trustworthy — the artefact's own signature is, and it is checked either way.
 - **Only public destinations, by default.** A URL carrying userinfo
-  (`http://user:secret@host/…`) is always refused. So is one naming a loopback,
-  RFC 1918 private, link-local, unique-local or unspecified address, or the
-  name `localhost` — and so is a public name that *resolves* to one of those,
-  which is checked before connecting so that DNS rebinding does not walk past
-  the rule. `--online-allow-private` waives the address rules, and only those,
-  for an internal CA that really does publish on your own network.
+  (`http://user:secret@host/…`) is always refused. So is one naming any of
+  these, whether it names them directly or *resolves* to them — the resolved
+  addresses are checked before connecting, so DNS rebinding does not walk past
+  the rule, and every redirect target is checked again:
+
+  | Refused | Range |
+  | --- | --- |
+  | loopback | `127.0.0.0/8`, `::1` |
+  | private (RFC 1918) | `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16` |
+  | link-local | `169.254.0.0/16`, `fe80::/10` |
+  | unique-local | `fc00::/7` |
+  | unspecified | `0.0.0.0/8`, `::` |
+  | broadcast | `255.255.255.255` |
+  | multicast | `224.0.0.0/4`, `ff00::/8` |
+  | cloud instance metadata | `169.254.169.254`, `fd00:ec2::254` |
+  | by name | `localhost`, `*.localhost` |
+
+  An IPv4-mapped IPv6 address (`::ffff:127.0.0.1`) is judged as the IPv4
+  address it carries. `--online-allow-private` waives these address rules, and
+  only these, for an internal CA that really does publish on your own network.
 - **One request per question.** CRLs are deduplicated by URL; OCSP by responder
   URL *and* `certID`, because a response answers about one certificate and two
   certificates behind one responder are two questions.
@@ -465,9 +482,11 @@ when the flag was given with no anchor to gate fetching on.
 
 Each failure adds one `online_fetch_failed` naming the URL and the failure
 class — `timeout`, `http status <code>`, `too large` (with the limit it went
-over), `redirect`, `invalid`, `transport`, or `destination_refused` (with the
-rule that refused it, in which case nothing was contacted at all). Nothing
-hangs and nothing panics.
+over), `redirect`, `invalid`, `transport`, `destination_refused` (with the rule
+that refused it, in which case nothing was contacted at all), or
+`cache_collision` (the artefact was fetched and used, but `--online-cache`
+already held a different file under its name). Nothing hangs and nothing
+panics.
 
 That check is `info`, and it is not the thing that decides anything. A fetch
 that did not happen leaves the certificate exactly as uncovered as it was, and
@@ -514,6 +533,15 @@ later verification reproducible and offline. Remember that revocation data
 expires — a cache that was fresh at the validation time you used stays valid
 for *that* validation time, which is the whole point of pinning it. Nothing is
 ever deleted from the cache; pruning is your retention policy, not the tool's.
+
+Nothing in the cache is ever overwritten either. Files are created relative to
+an opened directory descriptor, so a symlink in the path — or standing where a
+cache file would go — is refused rather than followed, and an existing file is
+never truncated: if a name already holds exactly the artefact being cached the
+write is skipped, which is also what two runs caching the same thing at once
+look like, and if it holds anything else the run reports
+`online_fetch_failed` with the class `cache_collision` and leaves the file
+alone. Caching is an optimisation; it never changes a verdict.
 
 ### Proxies
 

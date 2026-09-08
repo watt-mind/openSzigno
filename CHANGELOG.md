@@ -13,23 +13,41 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
 ### Security
 
 - `--online` no longer fetches revocation data for a certificate the run does
-  not trust. A URL is contacted only for a certificate that sits on a path to a
-  **configured trust anchor**, from `--trust-store` or from a trusted list;
-  with no anchors configured nothing is fetched at all. Previously the fetcher
+  not trust. A URL is contacted only for a certificate on a certification path
+  the verifier **validated to a configured trust anchor**, from `--trust-store`
+  or from a trusted list, for a signature or a timestamp under evaluation; the
+  set comes from an offline verification pre-pass
+  (`VerifyReport::validated_path_certificates`), so a certificate embedded
+  elsewhere in the XML generates no traffic even when it chains to an anchor.
+  With no anchors configured nothing is fetched at all. Previously the fetcher
   only checked that an embedded issuer had signed the certificate — a statement
   whoever wrote the dossier wrote on both sides of — so a synthetic dossier
   with no trust store configured was enough to make openszigno open a
   connection of the dossier's choosing.
-- `--online` now applies a destination policy before it opens a socket: `http`
-  and `https` only, no userinfo in a URL, and no loopback, RFC 1918 private,
-  link-local, unique-local or unspecified address, nor the name `localhost`,
-  unless the new `--online-allow-private` is given. The host's resolved
-  addresses are re-checked against the same ranges before connecting, so a
-  public name that resolves inwards — DNS rebinding — is refused too. Refusals
+- `--online` now applies a destination policy before it opens a socket, to the
+  published URL and to every redirect target alike: `http` and `https` only, no
+  userinfo in a URL, and none of loopback, RFC 1918 private, link-local,
+  unique-local, unspecified, broadcast, multicast, the cloud instance metadata
+  addresses `169.254.169.254` and `fd00:ec2::254`, or the names `localhost` and
+  `*.localhost`, unless the new `--online-allow-private` is given. The host's
+  resolved addresses are re-checked against the same list before connecting, so
+  a public name that resolves inwards — DNS rebinding — is refused too, and an
+  IPv4-mapped IPv6 address is judged as the IPv4 address it carries. Refusals
   are reported as `online_fetch_failed` (`info`) with the class
   `destination_refused` and the rule that refused them, and nothing is
   contacted. See [SECURITY.md](SECURITY.md#network-exposure) and
   [docs/trust.md](docs/trust.md#online-fetching).
+- `--online-cache` is written with the same descriptor-relative machinery as
+  `extract`: the directory is opened with `O_DIRECTORY | O_NOFOLLOW` and walked
+  component by component, and every file is created with
+  `O_CREAT | O_EXCL | O_NOFOLLOW`. It previously used `create_dir_all`,
+  `Path::exists` and `fs::write`, which follow symlinked components and final
+  files, check existence separately from writing, and truncate. Nothing is now
+  ever truncated or replaced: a name already holding exactly the artefact being
+  cached is left as it is — which is also what two concurrent runs look like —
+  and a name holding anything else, or a symlink, is reported as
+  `online_fetch_failed` with the class `cache_collision` while the run
+  continues, because caching is an optimisation and never changes a verdict.
 
 ### Fixed
 
