@@ -371,7 +371,7 @@ this environment and are unverified.
 
 The CSC service returns the raw signature value, base64-encoded. XMLDSig
 wants exactly that, base64-encoded, as the text of `ds:SignatureValue`
-([XML Signature Syntax and Processing](https://www.w3.org/TR/xmldsig-core1/)),
+([XML Signature Syntax and Processing](https://www.w3.org/TR/2013/REC-xmldsig-core1-20130411/)),
 so the placement itself is a copy. The work is entirely on the client side,
 and the order matters:
 
@@ -791,3 +791,191 @@ allowed. Second, a timestamp is a second, independent dependency with its
 own account model, and it decides more about what a `sign` command can
 produce than the signer does; an ES3 signature that needs a timestamp
 cannot be completed by a CSC credential alone.
+
+## 5. Hungarian acceptance
+
+This section is research into what Hungarian systems accept. It is not
+legal advice, and nothing in it says that a document openSzigno produces
+would be accepted anywhere. All Hungarian legal texts were read at
+`njt.jog.gov.hu` and `net.jogtar.hu`; `njt.hu` was not reachable from this
+environment.
+
+### 5.1 Courts
+
+Electronic contact with the courts runs through iFORM forms on the
+Personalised Administration Surface, submitted over the citizen, company
+or authority gateway. The court service's own guidance for civil,
+commercial, labour and administrative cases states the accepted attachment
+container formats explicitly:
+
+> Az űrlaphoz .dosszie, .dossier, .es3, .etv, .eak, .et3, .nsack, .pdf,
+> .asic, illetve .asice formátumban csatolható melléklet.
+
+That is, `.dosszie`, `.dossier`, `.es3`, `.etv`, `.eak`, `.et3`, `.nsack`,
+`.pdf`, `.asic` and `.asice`, with a per-file limit of 150 MB and a total
+of 300 MB
+([informatikai segedlet](https://birosag.hu/ugyfeleknek/elektronikus-ugyintezes/elektronikus-kapcsolattartas-birosagokkal/e-per/e-kapcsolattartas-az-egyes-ugytipusokban/polgari-gazdasagi-munkaugyi-es-kozigazgatasi-ugyek/informatikai-segedlet-az-elektronikus-beadvanyok)).
+The same page states that the court sends its own documents back inside a
+`.dosszie` e-akta with an organisational electronic signature, or as a
+PDF, and that opening the e-akta requires Microsec e-Szigno or NetLock
+MOKKA to be installed. That sentence is the clearest single justification
+for this project existing at all.
+
+On the signature itself, the court service's electronic litigation FAQ
+answers question 29 as follows:
+
+> Amennyiben a nyomtatványt és valamennyi mellékletét is minősített vagy
+> minősített tanúsítványon alapuló fokozott biztonságú elektronikus
+> aláírással vagy elektronikus bélyegzővel látta el, úgy nem szükséges
+> egyéb dokumentumhitelesítési szolgáltatással történő hitelesítés.
+
+So a submission is authenticated either by a qualified signature or seal,
+or by an advanced signature or seal based on a qualified certificate, or,
+failing those, by a separate document authentication service
+([e-per GYIK](https://birosag.hu/ugyfeleknek/elektronikus-ugyintezes/elektronikus-kapcsolattartas-birosagokkal/e-per/gyik)).
+The FAQ also says the judge in the case checks whether the signature is
+present and calls for correction if it is not, which means acceptance is
+decided per case rather than by an automated gate.
+
+The procedural framework is the Code of Civil Procedure
+([2016. evi CXXX. torveny](https://njt.jog.gov.hu/jogszabaly/2016-130-00-00));
+its detailed electronic contact rules were not read for this document and
+are unverified.
+
+### 5.2 The company registry
+
+Here the requirement is statutory and strict. Section 36(2) of the
+Companies Act
+([2006. evi V. torveny](https://njt.jog.gov.hu/jogszabaly/2006-5-00-00))
+reads:
+
+> A cégbejegyzési (változásbejegyzési) eljárás során az elektronikus úton
+> küldött okiratokat minősített elektronikus aláírással és minősített
+> időbélyegzővel kell ellátni, oly módon, hogy az időbélyegző alapján a
+> minősített elektronikus aláírás használatára való jogosultság - az okirat
+> aláírásának időpontjában való - fennállása megállapítható legyen.
+
+A qualified electronic signature and a qualified timestamp, both, arranged
+so the right to use the signature can be established as of the signing
+time. The same paragraph allows the legal representative to discharge the
+obligation by signing the registration request itself rather than each
+document, states that a document sent by the company court is a public
+document, and allows an attorney or chamber legal counsel to use the
+signature and seal defined in the Act on attorneys' activities.
+
+The Ministry of Justice company information service's technical page spells
+out what that means in practice. The live page now returns HTTP 400; the
+text below is from the Internet Archive snapshot of 2023-09-23
+([archived page](https://web.archive.org/web/20230923035747/https://www.e-cegjegyzek.hu/e-cegeljaras/e_cegeljaras_technika.htm)):
+
+> A csatolt okiratok formátuma sima szöveg (text) és PDF lehet, vagy olyan
+> ES3 kiterjesztésű elektronikus akta, amelyben az előzőleg felsorolt
+> formátumú iratok szerepelnek.
+>
+> A Ctv. 36. § (2) bekezdés alapján a cégeljárásban az elektronikusan
+> küldött okiratokat minősített elektronikus aláírással és időbélyeggel
+> kell ellátni. Ez XAdES-T típusú aláírást jelent, amit az e-Szignó vagy
+> Mokka aláíró programban kell beállítani. A XAdES-T-nél több információt
+> tartalmazó, a későbbi ellenőrzést megkönnyítő aláírás is alkalmazható
+> (XAdES-X-L és XAdES-A típusú).
+
+Three things follow, and all three are directly relevant to a `sign`
+command. The container is ES3, holding plain text and PDF. The signature
+form is XAdES-T at minimum, with XAdES-X-L and XAdES-A explicitly allowed.
+And a timestamp is not optional, which means a `sign` implementation that
+can only call a CSC service and stops there cannot produce a
+company-registry filing. Whether ASiC is accepted in company proceedings
+is unverified; the archived page lists only text, PDF and ES3, unlike the
+court page above. Whether that page's current replacement still says the
+same is also unverified, since the URL no longer resolves.
+
+### 5.3 Public administration, AVDH and its successors
+
+The identification-based document authentication service AVDH was the way
+a citizen without a certificate could authenticate a document. Its legal
+basis, section 104/B of the electronic administration act
+([2015. evi CCXXII. torveny](https://njt.jog.gov.hu/jogszabaly/2015-222-00-00)),
+is historical: that act was repealed with effect from 1 September 2024 by
+section 121 of the digital citizenship act
+([2023. evi CIII. torveny](https://net.jogtar.hu/jogszabaly?docid=a2300103.tv)).
+Section 109(1) of the new act now defines an electronic private document
+as one the declarant signs with at least an advanced electronic signature
+plus an electronic timestamp, or authenticates with the DAP electronic
+signature service.
+
+Three services now occupy the space AVDH used to fill:
+
+| Service | What it produces | Legal weight | Source |
+| --- | --- | --- | --- |
+| DAP eAlairas | A qualified electronic signature for a natural person, free of charge, certifying no role or capacity | Qualified signature | [hiteles.gov.hu](https://hiteles.gov.hu/cikk/165/dap_ealairas_szolgaltatas), [services.gov.hu](https://services.gov.hu/dap-keretszolgaltatasok/ealairas) |
+| FEDOR | An attestation of the user's identity attached to the document, then sealed with an advanced electronic seal on a qualified certificate plus a qualified timestamp | Authentic but explicitly not a private document of full probative force | [szeusz.gov.hu](https://szeusz.gov.hu/szeusz/FEDOR), [322/2024. (XI. 6.) Korm. rendelet](https://net.jogtar.hu/jogszabaly?docid=A2400322.KOR) |
+| AVDH, organisation-side remnant | Authentication by an organisation's own staff | Section 113(4) of 451/2016 makes it a public document when issued by a court, notary, prosecutor or authority | [451/2016. (XII. 19.) Korm. rendelet](https://njt.jog.gov.hu/jogszabaly/2016-451-20-22) |
+
+The FEDOR service page states the downgrade in plain terms:
+
+> A FEDOR-ral hitelesített elektronikus dokumentum hiteles, de nem minősül
+> teljes bizonyító erejű magánokiratnak.
+
+Sections 72/A and 72/B of 322/2024 add that the FEDOR attestation proves
+the user's right to make the declaration but does not extend to proving
+authority to represent anyone. Citizen AVDH ended on the personalised
+administration surface at the end of 2024 and continued only through the
+ePapir service until 31 October 2025, under the sunset clause in section
+119(2) of the digital citizenship act
+([kormanyhivatalok.hu notice](https://kormanyhivatalok.hu/hirek/januar-1-tol-az-avdh-hitelesites-az-epapir-szolgaltatasban-erheto-el)).
+The exact entry into force of section 72/A is unverified.
+
+For openSzigno the practical reading is this. DAP eAlairas is a qualified
+signature and is free, which makes it the most likely thing a Hungarian
+natural person will hold, but it is delivered through a mobile application
+and there is no evidence of a third-party API; that is unverified rather
+than ruled out. FEDOR is a seal applied by a government service, not
+something a client tool participates in. Neither is a CSC endpoint.
+
+### 5.4 Formats
+
+| Format | Where it appears | Source |
+| --- | --- | --- |
+| ES3 and `.dosszie` e-akta | Accepted as a court attachment container; the only container besides text and PDF named for company proceedings; the container the courts send their own documents in | court IT guidance; archived company registry page |
+| XAdES-T | The signature form the company registry page equates with the statutory requirement | archived company registry page |
+| XAdES-X-L, XAdES-A | Explicitly allowed alternatives in company proceedings | archived company registry page |
+| PDF, so PAdES in practice | Accepted everywhere alongside the e-akta containers | court IT guidance |
+| ASiC (`.asic`, `.asice`) | Accepted as a court attachment container | court IT guidance |
+| CAdES | Not named on either page | unverified |
+
+The pattern is consistent: XAdES inside an ES3 dossier is the Hungarian
+native form, ASiC is accepted by the courts, and the company registry is
+the strictest consumer.
+
+### 5.5 Cross-border acceptance under eIDAS
+
+Article 25 of Regulation (EU) No 910/2014
+([original text](https://eur-lex.europa.eu/legal-content/EN/TXT/HTML/?uri=CELEX:32014R0910))
+reads:
+
+> 1. An electronic signature shall not be denied legal effect and
+>    admissibility as evidence in legal proceedings solely on the grounds
+>    that it is in an electronic form or that it does not meet the
+>    requirements for qualified electronic signatures.
+> 2. A qualified electronic signature shall have the equivalent legal
+>    effect of a handwritten signature.
+> 3. A qualified electronic signature based on a qualified certificate
+>    issued in one Member State shall be recognised as a qualified
+>    electronic signature in all other Member States.
+
+Paragraph 3 is the one that matters here: a qualified signature from a
+qualified trust service provider in any Member State is, as a matter of
+law, a qualified signature in Hungary. So there is no legal reason a
+signature made through PrimeSign in Austria or Cleverbase in the
+Netherlands could not satisfy the qualified-signature requirement in
+section 36(2) of the Companies Act.
+
+The friction is not legal but formal, and it is real. Section 36(2) also
+requires a qualified timestamp, and the company registry expects XAdES-T
+inside an ES3 dossier produced by e-Szigno or MOKKA. A foreign qualified
+signature delivered as a PAdES PDF or an ASiC container does not meet that
+shape, whatever Article 25 says about the signature itself. Whether any
+Hungarian system additionally filters by the issuer's trusted list country
+could not be established from any primary source and is unverified; no
+such rule was found, and the absence of a found rule is not evidence of
+its absence.
