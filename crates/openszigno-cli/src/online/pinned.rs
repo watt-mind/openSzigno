@@ -380,7 +380,7 @@ mod socket_tests {
     }
 
     /// The finding, over a socket. The agent is asked for a host the system
-    /// resolves without any DNS at all — a loopback literal — while the pinned
+    /// resolves without any DNS at all (a loopback literal) while the pinned
     /// map holds a different endpoint. Nothing connects: the listener never
     /// accepts anything.
     #[test]
