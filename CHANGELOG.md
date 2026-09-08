@@ -10,6 +10,17 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
 
 ## [Unreleased]
 
+### Added
+
+- `docs/remote-signing.md`, research for the planned `create` and `sign`
+  commands: the Cloud Signature Consortium API versions and the hash-signing
+  flow a client would run, the EUDI Wallet rQES reference components and how
+  to run one locally, a remote QSCD provider table, RFC 3161 timestamp
+  authorities and whether they need an account, what Hungarian courts and the
+  company registry accept, a recommended first backend, and everything that
+  could not be verified. Indexed in `docs/index.md` and `docs/references.md`.
+  Documentation only; no behaviour changes.
+
 ## [0.6.0] - 2026-09-08
 
 ### Added
