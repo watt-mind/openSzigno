@@ -1,0 +1,117 @@
+[package]
+name = "openszigno-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+# Deliberately outside the workspace (see the root Cargo.toml's
+# `[workspace] exclude`): cargo-fuzz needs nightly and `-Z build-std`-style
+# sanitizer instrumentation that must never leak into the stable MSRV build
+# the rest of the workspace is held to. This package has its own lockfile.
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+openszigno-core = { path = "../crates/openszigno-core" }
+openszigno-verify = { path = "../crates/openszigno-verify" }
+base64 = "0.23.1"
+# `decrypt_cms` generates its synthetic RSA recipient key at run time, from a
+# fixed seed, exactly like `crates/openszigno-core/tests/common/envelope.rs`:
+# no private key of any kind is committed to this repository. See that file's
+# doc comment and SECURITY.md.
+rsa = "0.9.8"
+rand_chacha = "0.3.1"
+rand_core = "0.6.4"
+rcgen = { version = "0.14.10", features = ["x509-parser"] }
+
+[profile.release]
+debug = 1
+
+# `decrypt_cms` generates a 2048-bit RSA key once per process; unoptimized
+# bignum arithmetic (`num-bigint-dig`, which `rsa` builds on) makes that
+# noticeably slower. cargo-fuzz builds in release by default, where these are
+# already optimized, but pin it explicitly (as the root Cargo.toml does for
+# the workspace's dev profile) so `cargo +nightly fuzz build -D` stays fast
+# too.
+[profile.dev.package.num-bigint-dig]
+opt-level = 3
+
+[profile.dev.package.rsa]
+opt-level = 3
+
+[profile.release.package.num-bigint-dig]
+opt-level = 3
+
+[profile.release.package.rsa]
+opt-level = 3
+
+[[bin]]
+name = "parse_dossier"
+path = "fuzz_targets/parse_dossier.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "sniff"
+path = "fuzz_targets/sniff.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "decode_payload"
+path = "fuzz_targets/decode_payload.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "decrypt_cms"
+path = "fuzz_targets/decrypt_cms.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "c14n"
+path = "fuzz_targets/c14n.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "crl_parse"
+path = "fuzz_targets/crl_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ocsp_parse"
+path = "fuzz_targets/ocsp_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "tsa_token"
+path = "fuzz_targets/tsa_token.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "trustlist_parse"
+path = "fuzz_targets/trustlist_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "certificate_parse"
+path = "fuzz_targets/certificate_parse.rs"
+test = false
+doc = false
+bench = false
