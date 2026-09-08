@@ -301,6 +301,35 @@ git push origin --delete vX.Y.Z-rc.1
 `dist plan` locally, and any pull request, exercise the planning stage
 without touching a release at all.
 
+## Semver checks
+
+The CI `semver` job runs `cargo-semver-checks` for `openszigno-core` and
+`openszigno-verify` against the version of each crate already published on
+crates.io. The tool reads the crate's current `Cargo.toml` version to decide
+what kind of change is allowed before comparing: with the version unchanged
+from what is published, any API-breaking change fails; with the version
+bumped, it checks against the bump actually being big enough for the change
+found.
+
+Both crates are pre-1.0 (`0.x`), where SemVer treats a bump to the second
+component (`0.4.0` -> `0.5.0`) as the breaking-change slot; `cargo-semver-checks`
+understands this and requires exactly that minor bump, not a major bump, to
+clear a breaking change on a `0.x` crate. So a pull request that changes a
+`0.x` crate's public API in a breaking way needs a `0.(x+1).0` bump in that
+crate's `Cargo.toml`, in the same pull request, for the job to pass; a bump
+without a breaking change, or a patch-level fix, needs no bump at all to
+stay green.
+
+`openszigno-verify` on `develop` already carries breaking changes relative to
+its published `0.4.0` (new public fields on `SignatureCoverage` and
+`ChainEntry`, a new `RevocationPolicy` variant, and a renamed
+`SignatureCoverage` field) with no version bump yet to cover them. Bumping
+the version is a release decision, not something to make inside an
+unrelated change, so the job's `openszigno-verify` step runs with
+`continue-on-error: true` until the next version bump accounts for those
+changes; `openszigno-core` has no pending breaking changes and its step
+blocks normally.
+
 ## Required secrets and one-time setup
 
 | Name | Kind | Used by | Needed for |

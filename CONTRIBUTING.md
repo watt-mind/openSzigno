@@ -97,6 +97,7 @@ CI additionally runs, on every pull request:
 | Workflow lint | `actionlint` with `SHELLCHECK_OPTS=--severity=warning` |
 | Source file length | `python3 scripts/check-file-length.py` |
 | Golden output contract | `python3 scripts/golden.py check --bin target/release/openszigno` |
+| Semver checks (`openszigno-core`, `openszigno-verify` against crates.io) | `cargo semver-checks -p <crate>` |
 | Coverage quality gate | `python3 scripts/coverage_gate.py --lcov lcov.info --base origin/develop` |
 | Mutation testing (nightly, not a required check) | `cargo mutants -p <crate> --timeout-multiplier 2 -j 2` then `python3 scripts/mutants_gate.py --dir mutants.out --crate <crate>` |
 
