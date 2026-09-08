@@ -822,6 +822,90 @@ fn hex(bytes: &[u8]) -> String {
     text
 }
 
+/// Stage F: verify every `xades:SignatureTimeStamp` this signature carries.
+///
+/// A TSA's issuing CA is often carried in the enclosing signature's
+/// `xades:CertificateValues` rather than inside the token, so the token's own
+/// certificate set, the signature's candidates, and the trust store's
+/// intermediates are offered together. All three are untrusted path
+/// candidates; only the trust store supplies anchors.
+///
+/// Returns the `genTime` of every token that verified in full, which is the
+/// only thing that may move this signature's validation time.
+pub(crate) fn verify_signature_timestamps(
+    context: &crate::Context<'_, '_, '_, '_>,
+    timestamps: &[crate::dsig::TimestampSource],
+    extra_certificates: &[ParsedCertificate],
+    claimed_signing_time: Option<UnixTime>,
+    revocation_data: crate::revocation::RevocationData<'_>,
+    report: &mut crate::report::SignatureReport,
+) -> Vec<UnixTime> {
+    let mut timestamp_candidates = extra_certificates.to_vec();
+    timestamp_candidates.extend(context.store_intermediates.iter().cloned());
+    let timestamp_candidates = crate::certs::dedup(timestamp_candidates);
+    let mut verified_gen_times: Vec<UnixTime> = Vec::new();
+    for source in timestamps {
+        if let Some(reason) = &source.unsupported {
+            let check = Check::skipped(CheckCode::TimestampNotChecked, reason.clone());
+            report.checks.push(check.clone());
+            report.timestamps.push(TimestampReport {
+                kind: source.kind,
+                document_index: None,
+                gen_time: None,
+                accuracy_seconds: None,
+                serial_hex: None,
+                imprint_algorithm: None,
+                tsa_certificate: None,
+                chain: Vec::new(),
+                verified: false,
+                checks: vec![check],
+            });
+            continue;
+        }
+        let token = verify_token(&TokenInput {
+            kind: source.kind,
+            document_index: None,
+            token: source.token.clone(),
+            imprint_input: source.imprint_input.clone(),
+            anchors: &context.anchors,
+            extra_certificates: &timestamp_candidates,
+            limits: &context.options.limits,
+            allow_legacy_algorithms: context.options.allow_legacy_algorithms,
+            revocation: revocation_data,
+            revocation_policy: context.revocation_policy,
+            claimed_signing_time,
+        });
+        report.checks.push(summary_check(&token.report.checks));
+        // The TSA chain's own revocation answer belongs to this signature's
+        // verdict too: a timestamp signed under a revoked TSA certificate must
+        // not leave a signature looking clean.
+        if let Some(check) = revocation_check(&token.report.checks) {
+            report.checks.push(check.clone());
+        }
+        if token.report.verified
+            && let Some(gen_time) = token.gen_time
+        {
+            verified_gen_times.push(gen_time);
+        }
+        report.timestamps.push(token.report);
+    }
+    if report.timestamps.is_empty() {
+        report.checks.push(Check::unknown(
+            CheckCode::SignatureTimestampAbsent,
+            "the signature carries no xades:SignatureTimeStamp, so nothing proves when it existed",
+        ));
+    } else {
+        // Informational: what a present timestamp is worth is decided by its
+        // own checks, which are folded in above. Saying "present" is a
+        // statement about the document, not an unresolved question.
+        report.checks.push(Check::info(
+            CheckCode::SignatureTimestampPresent,
+            "the signature carries at least one xades:SignatureTimeStamp; a timestamp proves existence, not validity",
+        ));
+    }
+    verified_gen_times
+}
+
 #[cfg(test)]
 mod tests {
     //! White-box tests for the refusal paths.
