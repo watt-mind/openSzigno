@@ -1130,3 +1130,212 @@ actually fails:
 No primary source was found for any Hungarian system rejecting foreign
 trusted-list issuers, and none was found asserting one either. The absence
 of a found rule is not evidence that none exists.
+
+## 6. Recommendation
+
+### 6.1 Build one backend: CSC API v2, hash signing only
+
+openSzigno should implement a single remote signing backend speaking CSC
+API v2 `signatures/signHash`, and nothing else, for four reasons.
+
+1. It is the only protocol with more than one independent server-side
+   implementation reachable without a contract. Section 3.5 shows two live
+   sandboxes from different vendors, plus the EUDI reference deployment,
+   all answering `info` today.
+2. It is the protocol the EU wallet ecosystem is standardising on. The
+   reference QTSP, both mobile rQES kits, and both wallet-role client
+   libraries are CSC clients (section 2.1), and the ARF defines a Remote
+   Signing or Sealing Interface for exactly this role (section 2.5).
+3. `signHash` keeps the document on the user's machine. Only a digest
+   leaves. That matches this project's existing posture, where a dossier is
+   private data and the tool is offline by default.
+4. It leaves openSzigno owning the XAdES construction, which is the part
+   that has to be right anyway for `create`, rather than delegating it to
+   `signatures/signDoc` on a server whose XAdES output the project cannot
+   control or test.
+
+The corollary is what not to build. No `signatures/signDoc`, because the
+server would then decide the XAdES profile, and section 5.3 shows the
+profile is exactly what Hungarian practice constrains. No CSC v1 support in
+the first release: `info` reports `specs`, so a v1 service can be detected
+and refused with a clear message rather than half-supported. No
+vendor-specific protocols, which would mean one adapter per provider with no
+shared surface.
+
+### 6.2 The target output shape
+
+Section 5 settles what `sign` has to produce for Hungarian use, and it is
+more than a signature. The target is a XAdES-T or higher frame signature
+over an e-akta, with a qualified certificate and a qualified timestamp.
+Three consequences follow:
+
+- A CSC credential alone is not enough. Without a timestamp there is no
+  XAdES-T, and without XAdES-T there is no company-registry filing. The
+  timestamp backend is not a later refinement; it is half the feature.
+- The frame signature model, one signature over the whole e-akta rather
+  than one per document, is what section 36(2) of the Companies Act permits
+  and what the CEGSZOLG channel expects. It is also the cheaper thing to
+  build, since it needs one `signHash` call rather than one per attachment.
+- ASiC output would be accepted by the courts and rejected by the company
+  registry. If only one container is built, it should be the e-akta.
+
+### 6.3 Which services to test against
+
+Test against three, in this order.
+
+| Target | Why | Cost of setup |
+| --- | --- | --- |
+| EUDI reference QTSP, run locally with `docker compose` | The reference implementation of the flow, Apache-2.0, inspectable when something disagrees | MySQL plus an OpenID4VP verifier; the heaviest of the three |
+| PrimeSign test service | `specs` 2.1.0.1, `supportsRar` true, `dtbsr` hashes, RSASSA-PSS and ECDSA; the closest match to what a European signer would meet at a commercial QTSP | Request access codes from the vendor |
+| Cleverbase testbed | `specs` 2.2.0.0, `supportsRar` false, hash type given as an OID; the deliberate opposite of PrimeSign on every discovery field | Vendor onboarding, extent unknown |
+
+Two commercial sandboxes rather than one is not redundancy. PrimeSign and
+Cleverbase disagree on `supportsRar` and on the encoding of
+`supportedHashTypes`, so a client that works against both has actually
+exercised its discovery logic instead of hard-coding one vendor's answers.
+
+For the timestamp half, `https://bteszt.e-szigno.hu/tsa` with `test` /
+`test` is the right fixture: Microsec's own test unit, unambiguously not
+qualified, and reachable by any contributor. `https://freetsa.org/tsr` is
+the least encumbered non-Hungarian alternative.
+
+Hungarian signing providers are not on this list, because neither Microsec
+nor NetLock publishes an API a client could be written against (section
+3.2). That is a finding, not an oversight. If openSzigno is to sign for
+Hungarian use, someone has to ask Microsec directly whether their remote
+signing is reachable over CSC or any other third-party API, and ask the
+same about DAP eAlairas, which is the qualified signature most Hungarian
+natural persons will actually hold.
+
+### 6.4 What a sandbox test needs
+
+- A registered OAuth 2.0 client. The EUDI reference host has no dynamic
+  client registration, and its authorize endpoint rejects an unknown
+  `client_id` (section 2.3), so every target needs credentials obtained out
+  of band.
+- A loopback redirect listener bound to `127.0.0.1` on an ephemeral port,
+  in the RFC 8252 native-application style, plus PKCE with S256.
+- A way to open a browser and a way to work without one. A signer on a
+  headless machine still needs to see the consent screen, so the fallback
+  is to print the authorize URL and read the redirect back from the user.
+- A test dossier from `tests/fixtures/` and a synthetic hash path, so the
+  first end-to-end run signs something the project already knows how to
+  parse.
+- A recorded transcript. The `info` response of every target should be
+  captured as a fixture, because the whole design branches on it and it
+  changes without notice: the EUDI QTSP's README says CSC v2.0 while the
+  deployment reports `2.2.0.0`.
+- A verification step that closes the loop. A signature is evidence that
+  the flow worked only if `openszigno verify` can be pointed at the result.
+  Until the produced XAdES verifies against the existing pipeline, a
+  successful `signatures/signHash` call proves only that the network call
+  succeeded.
+
+### 6.5 Open risks
+
+| Risk | Why it matters | What reduces it |
+| --- | --- | --- |
+| Canonicalisation error under `dtbsr` | The service signs the digest handed to it and never sees the document, so a C14N mistake yields a syntactically perfect signature over the wrong bytes | Verify every signature the tool produces with the project's own verifier before reporting success; treat an unverifiable output as a failure of `sign`, not a warning |
+| Discovery drift | `specs`, `supportsRar` and `supportedHashTypes` vary per vendor and change per deployment | Branch on `info` at run time; never compile a vendor profile into the code |
+| No Hungarian backend | The format is Microsec's, but no Microsec or NetLock API is documented, and DAP eAlairas has no known third-party interface | Ask the vendors and the authority; do not design around an assumed API |
+| Qualified status cannot be asserted by this tool | Producing a signature through a qualified provider does not let openSzigno claim the result is a qualified signature, and this project's rules forbid claiming validity that is not proven in code | Report what the service returned and what the verifier checked, and nothing more |
+| SAD scope | A credential authorisation not bound to the real hashes authorises signing anything for its lifetime | Always send the actual hashes, and `numSignatures` equal to the number of signatures being produced |
+| Timestamping is a second dependency | Without it there is no XAdES-T, and without XAdES-T there is no company-registry filing; production Hungarian timestamping needs a client certificate or an account | Decide the TSA before the signer, not after |
+| Trusted list format change | EU trusted lists move to TLv6 on 2026-04-29 with no transition, and the Hungarian list moves to HTTPS | Track it as a verify-path item independent of signing; see section 5.1 |
+| Legacy AVDH structures persist | Documents authenticated with AVDH up to 2024-12-31 keep full probative force indefinitely | Nothing on the read path may treat AVDH structures as obsolete |
+
+## What was not verified
+
+Marked in place above, collected here.
+
+On the CSC API:
+
+- The text of CSC API V2.1.0.1 and V2.2. Both are behind a form on the
+  consortium's download page and were not read.
+- The algorithm tables in the CSC API V2.0.0.2 PDF. The PDF could not be
+  converted to text in this environment, so the SHA-384 and SHA-512 rows in
+  section 1.4 are standard registry values rather than values read from the
+  specification.
+- Which CSC API version ETSI TS 119 432 V1.3.1 references. Only the
+  V1.1.1 text and secondary reporting on V1.2.1 were consulted.
+
+On the EUDI reference implementation:
+
+- Whether the operators of `walletcentric.signer.eudiw.dev` will register a
+  third-party OAuth 2.0 client, and whether the host is intended to remain
+  available. Only the open `info` endpoint and the rejection of an unknown
+  `client_id` were observed.
+- Whether the ARF binds a specific CSC API version, and whether the section
+  numbers 2.4, 3.9 and 4.3.3 still apply in ARF v3.0.0. The chapter pages
+  were read at `eudi.dev/latest`, the section numbering at the 2.4.0
+  rendering.
+- No EUDI code was run, built, or audited. Every statement about these
+  repositories comes from their README files and, for the deployed
+  instance, from its `info` response.
+
+On providers:
+
+- Whether Microsec offers any third-party remote signing API. No public
+  developer documentation for one was found. The MicroSigner proxy server
+  documentation was not found on a Microsec domain.
+- NetLock's REST API documentation, its CSC conformance, its sandbox terms,
+  and the figures in its price list.
+- Exact CSC version numbers for InfoCert, Namirial, Intesi Group, D-Trust,
+  Certinomis, certSIGN, Trans Sped, TrustPro and Digidentity, and whether
+  Entrust's Remote Signing Service has moved beyond CSC 0.1.7.9.
+- Sandbox availability for InfoCert, D-Trust, Entrust, GlobalSign,
+  Certinomis, Digidentity and most Iberian and Romanian providers.
+- Published pricing for every provider except D-Trust portal coins,
+  TrustPro and Camerfirma.
+- Whether SK ID Solutions is a Cloud Signature Consortium member. A member
+  subpage was reported but the name was not on the members index that was
+  fetched.
+- Beyond `info`, no authenticated CSC call was made against any service.
+  No credential was obtained, and no hash was signed.
+
+On timestamp authorities:
+
+- Endpoint URLs for NETLOCK, D-Trust, GlobalSign qualified, Certum
+  qualified, TrustPro and Buypass. None publishes one.
+- Microsec's production policy OIDs, and the URL paths on the `tsa2`,
+  `tsa3`, `atsa` and `timestamp.e-szigno.hu` hosts named in the vendor's
+  service address list.
+- SwissSign's terms of use, which returned HTTP 403.
+- Whether `timestamp.actalis.com` issues qualified or only code-signing
+  timestamps.
+- Timestamp-specific terms of use for DigiCert and Sectigo. Neither
+  publishes any, so their free endpoints are recorded as unknown rather
+  than permitted.
+- Rate limits for every service except Sectigo and WoTrus, both of which
+  document a 15 second interval.
+
+On Hungarian acceptance:
+
+- The exact entry into force of section 72/A of 322/2024, the FEDOR rule.
+  1 November 2025 is inferred from the AVDH sunset.
+- The text of 320/2024. (XI. 6.) Korm. rendelet designating the FEDOR
+  provider.
+- Whether ASiC is accepted in company proceedings. The company information
+  service's page lists only text, PDF, ES3 and DOSSZIE.
+- Whether foreign-issued qualified certificates pass the company
+  information service's certificate profile in practice, and whether any
+  Hungarian system filters by the issuer's trusted-list country. No primary
+  source was found either way.
+- The field-level content of that certificate profile PDF; its text
+  extraction was lossy.
+- How the Companies Act's demand for a qualified signature is reconciled
+  with the CEGSZOLG channel page allowing an advanced one. No source
+  reconciling the two was found.
+- Any express provision excluding AVDH from company proceedings. The
+  exclusion is inferred.
+- The current status and profile of the eID card's signing certificate.
+- The content of the government offices' notice on the end of AVDH in
+  ePapir, which returns HTTP 403. The dates come from the statute instead.
+- The current replacement for the company registry technical page, whose
+  URL now returns HTTP 400; its text was read from a 2023 archive snapshot.
+- The detailed electronic contact rules of the Code of Civil Procedure
+  beyond sections 605, 608, 618, 325 and 634.
+
+Finally, nothing in this document has been tested against a real signing
+service end to end, and no claim here should be read as saying that any
+signature, timestamp, certificate or dossier is valid.
