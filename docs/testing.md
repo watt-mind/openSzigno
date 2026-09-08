@@ -90,6 +90,85 @@ after this gate. See
 [CONTRIBUTING.md](../CONTRIBUTING.md#coverage-quality-gate) for the ratchet
 rule and how to update the floors file after a legitimate coverage change.
 
+## Mutation testing
+
+Coverage says a line ran; it says nothing about whether a test would notice
+if the line did the wrong thing. `.github/workflows/mutants.yml` runs
+[cargo-mutants](https://mutants.rs/) nightly to measure that instead: it
+rewrites `openszigno-core` and `openszigno-verify`, one small change at a
+time (`>` to `>=`, `&&` to `||`, a function body to a fixed placeholder, and
+so on), rebuilds, and runs the crate's test suite against each mutated copy.
+A mutant the suite still passes against is a **survivor**: some behaviour
+changed and no test caught it.
+
+This is deliberately not a pull-request check. A full run is tens of minutes
+even at `-j 2` (roughly 8 minutes for `openszigno-core`'s 559 mutants on the
+host this was seeded on; `openszigno-verify`'s 1,601 mutants extrapolate to
+about 45 minutes), which is too slow and too resource-hungry to run on every
+push. It runs nightly instead, plus on manual dispatch, and a gate failure
+opens or refreshes a tracking issue rather than blocking a merge, so a
+declining mutation score is never simply lost.
+
+### Running it locally
+
+```sh
+cargo install cargo-mutants --locked
+cargo mutants -p openszigno-core --timeout-multiplier 2 -j 2 --output mutants-core
+cargo mutants -p openszigno-verify --timeout-multiplier 2 -j 2 --output mutants-verify
+```
+
+`--output <dir>` writes a `mutants.out` subdirectory there with a log per
+mutant, `caught.txt`/`missed.txt`/`timeout.txt`/`unviable.txt` listings, and
+`outcomes.json`, which the gate script below reads. On a memory- or
+time-constrained machine, `--shard 1/4` (or `--file crates/.../src/foo.rs`)
+bounds a single crate's run to a slice of its mutants; `cargo mutants --list
+-p <crate>` shows how many mutants a crate currently has without running any
+of them.
+
+`.cargo/mutants.toml` sets the default `timeout_multiplier` (a mutant is
+killed once it runs past that multiple of the unmutated baseline's time,
+which is how an infinite-loop mutant is caught rather than hung forever) and
+`exclude_re`, a short, individually justified list of mutants that are
+trivially uncatchable rather than gaps in the tests. It excludes exactly one
+entry today: `C14nError`'s `Display` impl, which only formats two fixed
+sentences of human-readable prose (see the comment in the file for the
+reasoning). A survivor is a prompt to strengthen a test, never a reason to
+add to that list.
+
+### Reading survivors
+
+```sh
+python3 scripts/mutants_gate.py --dir mutants-core/mutants.out --crate openszigno-core
+```
+
+prints a Markdown table of every surviving (missed) mutant: its file, line,
+and the mutation applied (for example, "replace > with >= in decode_base64"
+means the test suite passed whether or not that comparison used `>` or
+`>=`, which is worth a boundary-value test). Timeouts and unviable mutants
+(ones whose mutated code did not even compile) are reported separately and
+do not count as either caught or missed.
+
+### Updating the floors
+
+`scripts/mutants-floors.txt` records each crate's caught percentage
+(`caught / (caught + missed)`) the way `scripts/coverage-floors.txt` records
+coverage: a nightly run fails if a crate drops more than 2.0 points below
+its recorded value. After a change that legitimately raises or lowers a
+crate's mutation score, rerun `cargo mutants` for that crate and update its
+floor:
+
+```sh
+cargo mutants -p openszigno-core --timeout-multiplier 2 -j 2 --output mutants-core
+python3 scripts/mutants_gate.py --dir mutants-core/mutants.out --crate openszigno-core --update-floors
+```
+
+Commit the updated `scripts/mutants-floors.txt` alongside the change that
+caused the shift. CI never rewrites this file itself. The `openszigno-verify`
+floor seeded in this repository today was measured from a quarter of that
+crate's mutants (`--shard 1/4`), not a full run, because of the host time
+budget available when it was seeded; the first nightly run replaces it with
+the true value, and the ratchet tolerance absorbs the difference until then.
+
 ## Public fixtures
 
 The repository contains only synthetic, redistributable test dossiers. They
