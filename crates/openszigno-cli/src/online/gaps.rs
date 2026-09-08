@@ -238,7 +238,15 @@ impl Fetcher {
                     if !ocsp_tried.insert((url.clone(), cert_id.clone())) {
                         continue;
                     }
-                    match self.fetch(&url, Some(&request), MAX_OCSP_BYTES) {
+                    match self.fetch(
+                        &url,
+                        Some(super::Post {
+                            media_type: "application/ocsp-request",
+                            accept: "application/ocsp-response",
+                            bytes: &request,
+                        }),
+                        MAX_OCSP_BYTES,
+                    ) {
                         Ok(bytes) => match classify(&bytes) {
                             Ok((RevocationItemKind::Ocsp, der)) => {
                                 fetched.push_ocsp(der, cert_id.clone());

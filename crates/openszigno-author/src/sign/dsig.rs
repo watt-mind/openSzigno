@@ -200,7 +200,7 @@ impl<'input> Lookup<'input> {
     /// dossier chose and this module never guesses at spelling.
     pub(crate) fn insert_offset(&self, node: Node<'_, 'input>) -> Result<usize, SignError> {
         node.children()
-            .last()
+            .next_back()
             .map(|last| last.range().end)
             .ok_or_else(|| {
                 SignError::failed("the element a signature would be written into is empty")

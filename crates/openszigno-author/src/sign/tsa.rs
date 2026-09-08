@@ -163,7 +163,7 @@ mod tests {
         assert!(parsed.cert_req);
         assert_eq!(
             parsed.message_imprint.hashed_message.as_bytes(),
-            Sha256::digest(b"octets").as_slice()
+            &Sha256::digest(b"octets")[..]
         );
         assert_eq!(
             parsed.message_imprint.hash_algorithm.oid.to_string(),

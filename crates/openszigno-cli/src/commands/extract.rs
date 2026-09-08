@@ -5,7 +5,6 @@
 //! the dossier is touched, so an unusable key fails the run having decoded
 //! nothing.
 
-use std::fs;
 use std::path::Path;
 
 use openszigno_core::{
@@ -13,7 +12,6 @@ use openszigno_core::{
     decode_document_with,
 };
 use serde_json::{Value, json};
-use zeroize::Zeroizing;
 
 use crate::args::ExtractArgs;
 use crate::commands::dossier_warnings_with;
@@ -23,6 +21,7 @@ use crate::extract::plan::{Plan, skip_notice};
 use crate::extract::select::{Selected, resolve_selection};
 use crate::extract::write::Writer;
 use crate::input::{InputInfo, load, valid_input};
+use crate::key_material::{passphrase, read_file};
 use crate::response::{CliError, CliResult, Success, failure};
 
 pub(crate) fn extract<'a>(
@@ -228,19 +227,6 @@ fn extract_to_stdout(
     })
 }
 
-/// The environment variable an encrypted key's passphrase may come from.
-///
-/// A passphrase must never be a command-line argument: `argv` is readable by
-/// every process on most systems and lands in shell history. A file is the
-/// documented way; this variable exists for callers that have no place to put
-/// one, and `--decrypt-passphrase-file` wins when both are present.
-const PASSPHRASE_ENV: &str = "OPENSZIGNO_DECRYPT_PASSPHRASE";
-
-/// The largest decryption-material file this tool reads. A key, a certificate,
-/// and a passphrase are all small; the bound keeps a mistyped path from
-/// reading something huge into memory.
-const MAX_DECRYPT_FILE_BYTES: u64 = 1024 * 1024;
-
 /// Load the recipient key `extract` was given, or `None` when it was given
 /// none.
 ///
@@ -252,13 +238,16 @@ pub(crate) fn load_recipient_key(args: &ExtractArgs) -> Result<Option<RecipientK
     let Some(key_path) = args.decrypt_key.as_deref() else {
         return Ok(None);
     };
-    let key = read_decrypt_file(key_path, "decryption key")?;
+    let key = read_file(key_path, "decryption key")?;
     let certificate = args
         .decrypt_cert
         .as_deref()
-        .map(|path| read_decrypt_file(path, "decryption certificate"))
+        .map(|path| read_file(path, "decryption certificate"))
         .transpose()?;
-    let passphrase = passphrase(args)?;
+    let passphrase = passphrase(
+        args.decrypt_passphrase_file.as_deref(),
+        "decryption passphrase",
+    )?;
     RecipientKey::load(
         &key,
         passphrase.as_deref().map(|bytes| &bytes[..]),
@@ -266,55 +255,4 @@ pub(crate) fn load_recipient_key(args: &ExtractArgs) -> Result<Option<RecipientK
     )
     .map(Some)
     .map_err(CliError::decrypt_material)
-}
-
-/// The passphrase for an encrypted key: the file if one was named, otherwise
-/// the environment variable, otherwise none.
-///
-/// A file's single trailing newline is stripped, because that is what an
-/// editor or `echo` leaves behind and no user means it to be part of the
-/// secret. Nothing else is trimmed: a passphrase may legitimately begin or end
-/// with a space.
-fn passphrase(args: &ExtractArgs) -> Result<Option<Zeroizing<Vec<u8>>>, CliError> {
-    if let Some(path) = args.decrypt_passphrase_file.as_deref() {
-        let mut bytes = read_decrypt_file(path, "decryption passphrase")?;
-        if bytes.last() == Some(&b'\n') {
-            bytes.pop();
-            if bytes.last() == Some(&b'\r') {
-                bytes.pop();
-            }
-        }
-        return Ok(Some(bytes));
-    }
-    Ok(std::env::var_os(PASSPHRASE_ENV).map(|value| {
-        #[cfg(unix)]
-        let bytes = {
-            use std::os::unix::ffi::OsStrExt as _;
-            value.as_os_str().as_bytes().to_vec()
-        };
-        #[cfg(not(unix))]
-        let bytes = value.to_string_lossy().into_owned().into_bytes();
-        Zeroizing::new(bytes)
-    }))
-}
-
-/// Read one small decryption-material file.
-///
-/// `what` names the kind of file in the error, never the path's contents. The
-/// buffer zeroes itself when it is dropped, so key and passphrase bytes do not
-/// linger in freed memory.
-fn read_decrypt_file(path: &Path, what: &str) -> Result<Zeroizing<Vec<u8>>, CliError> {
-    let metadata = fs::symlink_metadata(path)
-        .map_err(|_| CliError::io(format!("the {what} file could not be inspected")))?;
-    if !metadata.is_file() {
-        return Err(CliError::io(format!(
-            "the {what} path is not a regular file"
-        )));
-    }
-    if metadata.len() > MAX_DECRYPT_FILE_BYTES {
-        return Err(CliError::io(format!("the {what} file is too large")));
-    }
-    fs::read(path)
-        .map(Zeroizing::new)
-        .map_err(|_| CliError::io(format!("the {what} file could not be read")))
 }
