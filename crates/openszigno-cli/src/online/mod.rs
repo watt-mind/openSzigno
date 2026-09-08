@@ -311,8 +311,9 @@ impl Fetcher {
     /// material carry; the issuer of each is looked up among them, because a
     /// certificate whose issuer is not to hand cannot have a CRL or an OCSP
     /// response checked against it anyway. Being in that pool is *not* a
-    /// licence to fetch: only `request.eligible` is, and that is the set the
-    /// verifier's own offline pre-pass says it validated a path for.
+    /// licence to fetch: only `request.eligible` is, and that is the set this
+    /// round's own offline-style pass says the verifier validated a path for,
+    /// with the times those paths were evaluated at.
     pub fn fill_gaps(&self, request: &GapRequest<'_>) -> Fetched {
         let GapRequest {
             certificates,
