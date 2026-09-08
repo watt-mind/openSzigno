@@ -32,6 +32,10 @@ der = { version = "0.7.10", features = ["alloc", "derive", "oid"] }
 # under `--allow-legacy-ciphers`; it is never accepted by default.
 des = "0.8.1"
 encoding_rs = "0.8.40"
+# HMAC-SHA-256, used only to derive the deterministic synthetic
+# content-encryption key PKCS#1 v1.5 implicit rejection substitutes for an
+# unusable padding block (`openszigno-core`'s `decrypt/keytrans.rs`).
+hmac = "0.12.1"
 p256 = { version = "0.13.2", default-features = false, features = ["ecdsa", "std", "pkcs8"] }
 p384 = { version = "0.13.1", default-features = false, features = ["ecdsa", "std", "pkcs8"] }
 pem-rfc7468 = { version = "0.7.0", features = ["std"] }
@@ -45,12 +49,19 @@ rand_chacha = "0.3.1"
 rand_core = { version = "0.6.4", features = ["getrandom"] }
 rcgen = "0.14.10"
 roxmltree = "0.21.1"
-rsa = "0.9.8"
+# `hazmat` exposes `rsa_decrypt_and_check`, the lowest-level *blinded* RSA
+# private operation this version offers. `decrypt/keytrans.rs` needs the raw
+# plaintext block so it can unpad PKCS#1 v1.5 in constant time and reject
+# implicitly instead of returning a distinguishable error.
+rsa = { version = "0.9.8", features = ["hazmat"] }
 rustix = { version = "1.1", default-features = false, features = ["fs", "std"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
 sha1 = { version = "0.10.6", features = ["oid"] }
 sha2 = { version = "0.10.9", features = ["oid"] }
+# Constant-time primitives (`Choice`, `ConditionallySelectable`,
+# `ConstantTimeEq`) for the PKCS#1 v1.5 unpadding in `decrypt/keytrans.rs`.
+subtle = "2.6.1"
 tempfile = "3.23.0"
 thiserror = "2.0.17"
 unicode-normalization = "0.1"
