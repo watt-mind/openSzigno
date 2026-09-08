@@ -147,7 +147,7 @@ the URLs the certificates themselves publish.
 | `validate-structure FILE` | Apply the strict structural rules and report `valid_structure` and any conformance warnings. | 0, 2, 3, 4 |
 | `extract FILE --output DIR` | Decode supported payloads into `DIR`, expanding embedded dossiers, never overwriting a file. `--document SEL --stdout` writes one payload to stdout instead. | 0, 2, 3, 4, 5 |
 | `verify FILE` | Verify every `ds:Signature` against the trust material you supply and report a per-signature verdict of `valid`, `invalid`, or `indeterminate`. | 0, 2, 3, 4, 6, 7 |
-| `create --output FILE --title TITLE` | Build one new, unsigned dossier from files on disk, with `--document`, `--zip`, `--embed`, and `--created`. Never overwrites the output. | 0, 2, 3, 4, 5 |
+| `create --output FILE --title TITLE` | Build one new, unsigned dossier from files on disk, with `--document`, `--zip`, `--embed`, `--encrypt-for`, and `--created`. Never overwrites the output. | 0, 2, 3, 4, 5 |
 | `skill` | Write the embedded agent skill (`SKILL.md`) to stdout and nothing else. Takes no `FILE` and no `--json`. | 0, 2, 3 |
 
 `create` is the writing side: it builds a new dossier from files on disk,
@@ -155,9 +155,12 @@ in the shape this tool reads back, and does nothing else to it. The output
 is deterministic, so the same inputs with the same `--created` produce a
 byte-identical file; every limit that bounds reading bounds writing too; an
 existing output file is an error rather than an overwrite; and the dossier
-it writes carries no signature, which every run says out loud. Signing,
-timestamping, and encrypting are not implemented; see
-[docs/roadmap.md](docs/roadmap.md).
+it writes carries no signature, which every run says out loud.
+`--encrypt-for CERT.pem` encrypts every `--document` payload for that
+recipient certificate as CMS EnvelopedData, which `extract --decrypt-key`
+reads back; it is the one thing that makes the output non-deterministic,
+because a content key must be random. Signing and timestamping are not
+implemented; see [docs/roadmap.md](docs/roadmap.md).
 
 Every command except `create` and `skill` takes `-` in place of the path and
 reads the dossier from standard input. Every flag, the JSON envelope, the stable

@@ -5,6 +5,7 @@
     "created": "2026-01-01T00:00:00Z",
     "documents": [
       {
+        "encrypted": false,
         "index": 0,
         "mime_type": {
           "charset": null,
@@ -21,6 +22,7 @@
         ]
       },
       {
+        "encrypted": false,
         "index": 1,
         "mime_type": {
           "charset": null,

@@ -16,7 +16,10 @@ ignore = [
   # does, in `openszigno-core::decrypt`. There the RSA ciphertext being
   # decrypted is the CMS `RecipientInfo`'s encrypted content-encryption key,
   # which comes from the dossier under analysis, i.e. attacker-controlled
-  # input, not from the operator.
+  # input, not from the operator. `create --encrypt-for` also links `rsa`,
+  # in `openszigno-author`, but only for the *public* key-transport wrap. A
+  # public operation has no secret exponent to leak and is outside this
+  # advisory entirely.
   #
   # Mitigation taken: **implicit rejection**, in `decrypt/keytrans.rs`, the
   # same defence OpenSSL 3.2+ ships as `RSA_PKCS1_IMPLICIT_REJECTION`, Go's

@@ -96,7 +96,7 @@ ES3_TEST_CORPUS_DIR=/private/corpus cargo test \
 | Path | What lives there |
 | :--- | :--- |
 | `crates/openszigno-core/src/` | `lib.rs`, `parse.rs`, `xml.rs`, `model.rs`, `sniff.rs`, `scan.rs`, `decode.rs`, `decrypt/`, `inventory.rs`, `error.rs` |
-| `crates/openszigno-author/src/` | The writer side, used only by `create`: `lib.rs` (spec and limit checks), `render.rs` (the XML text), `mime.rs`, `title.rs`, `archive.rs`, `error.rs`. Reads no file and calls no clock. |
+| `crates/openszigno-author/src/` | The writer side, used only by `create`: `lib.rs` (spec and limit checks), `render.rs` (the XML text), `mime.rs`, `title.rs`, `archive.rs`, `encrypt/` (the CMS `EnvelopedData` an `encrypt` document carries), `error.rs`. Reads no file and calls no clock; only `encrypt/` draws on a random source. |
 | `crates/openszigno-verify/src/` | `lib.rs`, `c14n.rs`, `dsig.rs`, `references.rs`, `scope.rs`, `countersign.rs`, `signature/`, `coverage.rs`, `xades.rs`, `certs/`, `revocation/`, `tsa/`, `estimestamp.rs`, `trustlist/`, `policy.rs`, `codes.rs`, `trust.rs`, `report.rs`, `embedded.rs` |
 | `crates/openszigno-verify/tests/` | Synthetic PKI and the in-tests XMLDSig signer (`common/`), which must never move into a shipped crate |
 | `crates/openszigno-cli/src/` | `main.rs` (dispatch), `args.rs`, `input.rs`, `response.rs`, `render/`, `commands/` (`inspect`, `list`, `extract`, `validate`, `verify`, `skill`), `extract/` (planning, naming, `output_dir.rs`), `trust.rs`, `revocation_store.rs`, `online/` (`mod.rs` transport and cache, `gaps.rs` what to fetch and for whom, `destination.rs`, `pinned.rs`) |

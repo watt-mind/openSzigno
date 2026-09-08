@@ -43,6 +43,22 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
 - `tests/fixtures/created.es3`, the dossier `create` builds from the two new
   synthetic inputs under `tests/fixtures/create/`, plus a `create` case in
   the golden matrix.
+- `openszigno create --encrypt-for CERT`, repeatable, which writes every
+  `--document` payload as a CMS `EnvelopedData` addressed to each recipient
+  certificate (PEM or DER), the forward direction of
+  `extract --decrypt-key`. AES-256-CBC content encryption with a fresh
+  content key and initialisation vector per document, and RSAES-OAEP with
+  SHA-256 and MGF1-SHA-256 key transport per recipient, named by
+  `issuerAndSerialNumber`; `--legacy-key-transport` writes RSAES-PKCS1-v1_5
+  instead. DES-EDE3-CBC is never written. `--zip` under encryption makes the
+  ZIP the plaintext (`zip -> encrypt -> base64`); an `--embed` dossier stays
+  in the clear. `create` output is not deterministic with `--encrypt-for`,
+  because a content key must be unpredictable. Each `create` document now
+  reports `encrypted` in the JSON envelope, and the new codes are the errors
+  `invalid_recipient_certificate`, `unsupported_recipient_key`,
+  `no_recipients`, and `encrypt_failed` (exit 4) and the warning
+  `recipient_certificate_expired`. Additive: `schema_version` stays `1`.
+  See [Encrypting for a recipient](docs/architecture.md#encrypting-for-a-recipient).
 
 ### Changed
 

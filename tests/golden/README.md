@@ -66,6 +66,13 @@ golden may carry a machine-local path. Its output is committed as
 `tests/fixtures/created.es3`, which the fixture matrix then covers like any
 other fixture.
 
+`create --encrypt-for` is deliberately **not** in the matrix. Every encrypted
+document carries a fresh random content-encryption key, initialisation
+vector, and key-transport padding, so no two runs produce the same bytes and
+there is nothing stable to capture. It is covered by integration tests
+instead: `crates/openszigno-cli/tests/create_encrypt.rs` and
+`crates/openszigno-author/tests/encryption.rs`.
+
 The commands captured are `inspect`, `list`, `validate-structure`, `verify`
 and `extract` in JSON mode, and `inspect`, `list`, `validate-structure` and
 `verify` in human mode. `extract` writes into a throwaway directory under the

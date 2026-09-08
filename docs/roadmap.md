@@ -464,8 +464,8 @@ dependency tree of a caller who only reads stays as it is, and so that
 
 | Ticket | Scope | State |
 | --- | --- | --- |
-| LAB-288 | `create`: build an unsigned dossier from files on disk, deterministically, bounded by the same limits, never overwriting the output. | In progress |
-| LAB-289 | `encrypt-for`: write a document as `encrypt -> base64` for one or more recipient certificates, the forward direction of `extract --decrypt-key`. | Planned |
+| LAB-288 | `create`: build an unsigned dossier from files on disk, deterministically, bounded by the same limits, never overwriting the output. | Done |
+| LAB-289 | `--encrypt-for`: write a document as `encrypt -> base64` for one or more recipient certificates, the forward direction of `extract --decrypt-key`. AES-256-CBC content encryption, RSAES-OAEP with SHA-256 key transport by default and RSAES-PKCS1-v1_5 under `--legacy-key-transport`. | Done |
 | LAB-290 | `sign` with a software key: XMLDSig over the dossier's own reference scope, with the XAdES signed properties `verify` already checks. | Planned |
 | LAB-291 | A CSC (Cloud Signature Consortium) remote signing backend, so the key never reaches this process at all. | Planned |
 | LAB-292 | Timestamping what was signed: an RFC 3161 request to a configured TSA, and the `es:TimeStamp` or `xades:SignatureTimeStamp` that carries the token. | Planned |
@@ -482,6 +482,12 @@ Open questions this milestone must answer rather than assume:
 - What a signature this project writes must cover for the reference tool to
   accept it, which is the same reference-scope question `verify` answers from
   the reading side.
+- Which key transport the Microsec reference tool writes. Its documented
+  `-encryptor_symm_alg` option covers the content cipher only and defaults to
+  `des-ede3-cbc`; no source available here names a key-transport default or
+  an option to choose one. `--legacy-key-transport` exists so that
+  RSAES-PKCS1-v1_5 can be produced when interop needs it, but which one the
+  reference tool actually wants is a LAB-293 question.
 
 ## Field observations from the private corpus
 
