@@ -298,6 +298,37 @@ pub(crate) fn write_human_success(command: &str, response: &Response) -> io::Res
                 display_json_string(&data["policy"]["revocation"])
             )?;
         }
+        "create" => {
+            writeln!(
+                out,
+                "Created {} ({} B, {} document(s)).",
+                display_json_string(&response.data["output"]),
+                response.data["bytes"],
+                response.data["documents"].as_array().map_or(0, Vec::len)
+            )?;
+            for document in response.data["documents"].as_array().into_iter().flatten() {
+                let nested = if document["nested_dossier"] == Value::Bool(true) {
+                    " | nested dossier"
+                } else {
+                    ""
+                };
+                writeln!(
+                    out,
+                    "[{}] {} | {}/{} | {} B | {}{}",
+                    document["index"],
+                    display_json_string(&document["title"]),
+                    display_json_string(&document["mime_type"]["media_type"]),
+                    display_json_string(&document["mime_type"]["subtype"]),
+                    display_source_size(&document["source_size"]),
+                    document["transforms"],
+                    nested
+                )?;
+            }
+            writeln!(
+                out,
+                "The dossier is unsigned: creating it proves nothing about its contents."
+            )?;
+        }
         "validate-structure" => {
             writeln!(
                 out,

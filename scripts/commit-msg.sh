@@ -1,6 +1,6 @@
 #!/bin/sh
 # commit-msg hook: enforce the Conventional Commits shape documented in
-# CONTRIBUTING.md (type required, scope optional, `core`, `cli`, or `verify`).
+# CONTRIBUTING.md (type required, scope optional, `core`, `author`, `cli`, or `verify`).
 #
 # Usage:
 #   scripts/commit-msg.sh          # hook mode: reads .git/COMMIT_EDITMSG,
@@ -28,7 +28,7 @@ else
   subject=$(grep -v '^#' "$msg_file" | grep -v '^[[:space:]]*$' | head -n 1)
 fi
 
-if printf '%s' "$subject" | grep -Eq '^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\((core|cli|verify)\))?(!)?: [a-z].*[^.]$'; then
+if printf '%s' "$subject" | grep -Eq '^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\((core|author|cli|verify)\))?(!)?: [a-z].*[^.]$'; then
   exit 0
 fi
 
@@ -39,7 +39,7 @@ Commit subject must be Conventional Commits, e.g.:
   feat(cli): report the detected namespace in inspect output
   ci: add a weekly Gitleaks scan
 
-Type is required, scope (if present) is \`core\`, \`cli\`, or \`verify\`, the summary is
+Type is required, scope (if present) is \`core\`, \`author\`, \`cli\`, or \`verify\`, the summary is
 imperative, lowercase, with no trailing period. See CONTRIBUTING.md.
 
 Offending subject: $subject

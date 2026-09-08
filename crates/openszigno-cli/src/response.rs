@@ -1,6 +1,7 @@
 //! The JSON envelope and the error type behind it: what every command
 //! returns, and the exit status each failure maps to.
 
+use openszigno_author::Error as AuthorError;
 use openszigno_core::Error as CoreError;
 use serde::Serialize;
 use serde_json::Value;
@@ -63,6 +64,17 @@ impl CliError {
     /// the dossier. Exit 4 is the "the inputs to this run are unusable"
     /// status; nothing about the dossier has been judged.
     pub(crate) fn decrypt_material(error: CoreError) -> Self {
+        Self {
+            code: error.code().as_str(),
+            message: error.message().to_owned(),
+            exit: 4,
+        }
+    }
+
+    /// A refusal from `openszigno-author`: the caller asked for a dossier
+    /// that cannot be built. Exit 4 is the "the inputs to this run are
+    /// unusable" status; nothing has been written.
+    pub(crate) fn authoring(error: AuthorError) -> Self {
         Self {
             code: error.code().as_str(),
             message: error.message().to_owned(),

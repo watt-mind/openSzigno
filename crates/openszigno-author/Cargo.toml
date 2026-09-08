@@ -1,0 +1,27 @@
+[package]
+name = "openszigno-author"
+description = "Deterministic writer for Microsec e-Szigno dossiers, bounded by the openszigno-core limits"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+readme = "../../README.md"
+homepage = "https://github.com/watt-mind/openSzigno"
+documentation = "https://docs.rs/openszigno-author"
+keywords = ["e-szigno", "es3", "dossier", "xml", "microsec"]
+categories = ["parser-implementations", "encoding"]
+
+[lints]
+workspace = true
+
+[dependencies]
+base64.workspace = true
+openszigno-core = { version = "0.6.0", path = "../openszigno-core" }
+serde.workspace = true
+thiserror.workspace = true
+unicode-normalization.workspace = true
+zip.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

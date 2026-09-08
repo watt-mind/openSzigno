@@ -1,8 +1,8 @@
 # openSzigno
 
 A safe, agent-friendly command-line tool for inspecting, listing, structurally
-validating, verifying, and extracting Hungarian Microsec e-Szignó e-dossiers
-(`.es3`).
+validating, verifying, extracting, and creating Hungarian Microsec e-Szignó
+e-dossiers (`.es3`).
 
 [![CI](https://github.com/watt-mind/openSzigno/actions/workflows/ci.yml/badge.svg?branch=develop)](https://github.com/watt-mind/openSzigno/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
@@ -147,10 +147,20 @@ the URLs the certificates themselves publish.
 | `validate-structure FILE` | Apply the strict structural rules and report `valid_structure` and any conformance warnings. | 0, 2, 3, 4 |
 | `extract FILE --output DIR` | Decode supported payloads into `DIR`, expanding embedded dossiers, never overwriting a file. `--document SEL --stdout` writes one payload to stdout instead. | 0, 2, 3, 4, 5 |
 | `verify FILE` | Verify every `ds:Signature` against the trust material you supply and report a per-signature verdict of `valid`, `invalid`, or `indeterminate`. | 0, 2, 3, 4, 6, 7 |
+| `create --output FILE --title TITLE` | Build one new, unsigned dossier from files on disk, with `--document`, `--zip`, `--embed`, and `--created`. Never overwrites the output. | 0, 2, 3, 4, 5 |
 | `skill` | Write the embedded agent skill (`SKILL.md`) to stdout and nothing else. Takes no `FILE` and no `--json`. | 0, 2, 3 |
 
-Every command except `skill` takes `-` in place of the path and reads the
-dossier from standard input. Every flag, the JSON envelope, the stable
+`create` is the writing side: it builds a new dossier from files on disk,
+in the shape this tool reads back, and does nothing else to it. The output
+is deterministic, so the same inputs with the same `--created` produce a
+byte-identical file; every limit that bounds reading bounds writing too; an
+existing output file is an error rather than an overwrite; and the dossier
+it writes carries no signature, which every run says out loud. Signing,
+timestamping, and encrypting are not implemented; see
+[docs/roadmap.md](docs/roadmap.md).
+
+Every command except `create` and `skill` takes `-` in place of the path and
+reads the dossier from standard input. Every flag, the JSON envelope, the stable
 error, warning and check codes, the exit statuses, and the parser limits
 are specified in [docs/architecture.md](docs/architecture.md).
 

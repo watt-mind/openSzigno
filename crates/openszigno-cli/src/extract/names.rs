@@ -2,8 +2,9 @@
 //! filesystem, and keeping two documents from claiming one name.
 
 use std::collections::HashSet;
-use std::path::{Component, Path};
+use std::path::Path;
 
+use openszigno_author::{TitleRejection, check_title};
 use openszigno_core::DetectedType;
 use unicode_normalization::UnicodeNormalization;
 
@@ -65,37 +66,6 @@ pub(crate) fn fallback_extension(
     detected.preferred_extension()
 }
 
-/// Characters that carry no visible glyph but can reorder, hide, or spoof the
-/// rest of a filename: soft hyphen, bidi controls and isolates, zero-width
-/// characters, line/paragraph separators, byte order mark, interlinear
-/// annotation, tag characters, and the noncharacters at the end of the BMP.
-fn is_invisible_or_formatting(character: char) -> bool {
-    matches!(
-        character,
-        '\u{00AD}'
-            | '\u{061C}'
-            | '\u{180E}'
-            | '\u{200B}'..='\u{200F}'
-            | '\u{2028}'..='\u{202E}'
-            | '\u{2060}'..='\u{2064}'
-            | '\u{2066}'..='\u{2069}'
-            | '\u{FEFF}'
-            | '\u{FFF9}'..='\u{FFFB}'
-            | '\u{FFFE}'
-            | '\u{FFFF}'
-            | '\u{E0000}'..='\u{E007F}'
-    )
-}
-
-/// Private Use Area code points render differently on every system, so they
-/// cannot be shown to a user as a trustworthy filename.
-fn is_private_use(character: char) -> bool {
-    matches!(
-        character,
-        '\u{E000}'..='\u{F8FF}' | '\u{F0000}'..='\u{FFFFD}' | '\u{100000}'..='\u{10FFFD}'
-    )
-}
-
 /// Derive the output filename from the document title.
 ///
 /// `fallback` is the extension suggested by content sniffing; it is used only
@@ -105,73 +75,20 @@ pub(crate) fn safe_output_name(
     fallback: Option<&str>,
 ) -> Result<String, CliError> {
     let title = document.title.trim();
-    if title.is_empty()
-        || title == "."
-        || title == ".."
-        || title.starts_with(['.', '-'])
-        || title.chars().any(|character| {
-            character.is_control()
-                || (character.is_whitespace() && character != ' ')
-                || is_invisible_or_formatting(character)
-                || is_private_use(character)
-                || matches!(
-                    character,
-                    '/' | '\\' | '<' | '>' | ':' | '"' | '|' | '?' | '*'
-                )
-        })
-        || title.ends_with(['.', ' '])
-        || title.len() > 240
-    {
-        return Err(CliError::unsafe_output(
+    // The rules live in `openszigno-author`, so that a title this command
+    // would refuse to write is one `openszigno create` refuses to put into a
+    // dossier in the first place.
+    check_title(title).map_err(|rejection| {
+        let reason = match rejection {
+            TitleRejection::UnsafeTitle => "has an unsafe output title",
+            TitleRejection::UnsafePath => "has an unsafe output path",
+            TitleRejection::ReservedName => "uses a reserved output title",
+        };
+        CliError::unsafe_output(
             "unsafe_output_name",
-            format!("document {} has an unsafe output title", document.index),
-        ));
-    }
-    let path = Path::new(title);
-    if path.is_absolute()
-        || path.components().count() != 1
-        || !matches!(path.components().next(), Some(Component::Normal(_)))
-    {
-        return Err(CliError::unsafe_output(
-            "unsafe_output_name",
-            format!("document {} has an unsafe output path", document.index),
-        ));
-    }
-    let stem = title
-        .split('.')
-        .next()
-        .unwrap_or(title)
-        .to_ascii_uppercase();
-    if matches!(
-        stem.as_str(),
-        "CON"
-            | "PRN"
-            | "AUX"
-            | "NUL"
-            | "COM1"
-            | "COM2"
-            | "COM3"
-            | "COM4"
-            | "COM5"
-            | "COM6"
-            | "COM7"
-            | "COM8"
-            | "COM9"
-            | "LPT1"
-            | "LPT2"
-            | "LPT3"
-            | "LPT4"
-            | "LPT5"
-            | "LPT6"
-            | "LPT7"
-            | "LPT8"
-            | "LPT9"
-    ) {
-        return Err(CliError::unsafe_output(
-            "unsafe_output_name",
-            format!("document {} uses a reserved output title", document.index),
-        ));
-    }
+            format!("document {} {reason}", document.index),
+        )
+    })?;
 
     // Write one canonical spelling, so that two differently composed titles
     // cannot resolve to the same file behind our back.

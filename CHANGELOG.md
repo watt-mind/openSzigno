@@ -20,6 +20,37 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
   company registry accept, a recommended first backend, and everything that
   could not be verified. Indexed in `docs/index.md` and `docs/references.md`.
   Documentation only; no behaviour changes.
+- `openszigno create`, the first command that writes a dossier: it builds one
+  new, unsigned `es:Dossier` from files on disk, with
+  `--document PATH[::TITLE[::MIME]]`, `--zip`, `--embed`, `--created`, and
+  `--json`. Output is deterministic (fixed element order, positional
+  `obj<n>`/`profile<n>` identifiers, a pinned ZIP modification time), so the
+  same inputs with the same `--created` produce a byte-identical file. Every
+  parser limit bounds it, every document title is checked against the rules
+  `extract` applies to a filename, an existing output file is `output_exists`
+  rather than an overwrite, and every run warns `created_dossier_unsigned`.
+  See [The create command](docs/architecture.md#the-create-command).
+- `openszigno-author`, a new published crate holding that writer. It reads no
+  file, opens no socket, and calls no clock; `openszigno-core` stays
+  read-only. `openszigno-cli` depends on it, so it is published after
+  `openszigno-core` and before `openszigno-cli`.
+- Stable codes for authoring: the errors `no_documents`,
+  `unsafe_document_title`, `invalid_dossier_title`, `unknown_mime_type`,
+  `invalid_mime_type`, `zip_failed`, and `invalid_output_path`, and the
+  warning `created_dossier_unsigned`. `too_many_documents`,
+  `decoded_too_large`, `total_size_limit`, and `zip_ratio_limit` are reused
+  with their existing meanings. Additive: `schema_version` stays `1`.
+- `tests/fixtures/created.es3`, the dossier `create` builds from the two new
+  synthetic inputs under `tests/fixtures/create/`, plus a `create` case in
+  the golden matrix.
+
+### Changed
+
+- The extraction title sanitizer takes its rules from `openszigno-author`, so
+  a title `create` refuses is exactly a title `extract` would refuse. No
+  behaviour of `extract` changed.
+- `author` is an accepted Conventional Commits scope
+  (`scripts/commit-msg.sh`, `CONTRIBUTING.md`).
 
 ## [0.6.0] - 2026-09-08
 

@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand};
 use openszigno_core::{KNOWN_COMPATIBLE_NAMESPACES, Limits, ParseOptions};
-use openszigno_verify::parse_rfc3339;
+use openszigno_verify::{format_rfc3339, parse_rfc3339};
 
 /// Nesting levels `--max-depth` can never exceed, whatever the caller asks
 /// for. A flag must not be able to disable a bound.
@@ -35,6 +35,8 @@ pub(crate) enum Command {
     ValidateStructure(InputArgs),
     /// Verify XMLDSig/XAdES signatures, certificate paths, and revocation.
     Verify(VerifyArgs),
+    /// Build a new, unsigned dossier from files on disk.
+    Create(CreateArgs),
     /// Print the agent skill (SKILL.md) that teaches an AI agent this CLI.
     Skill,
 }
@@ -142,6 +144,63 @@ pub(crate) struct VerifyArgs {
 }
 
 impl VerifyArgs {
+    pub(crate) fn parse_options(&self) -> ParseOptions {
+        parse_options(&self.allow_namespace)
+    }
+}
+
+/// A creation date from `--created`, already normalised to the RFC 3339 UTC
+/// seconds form the dossier is written with.
+#[derive(Clone, Debug)]
+pub(crate) struct CreationDate(pub(crate) String);
+
+/// Parse `--created` during command-line parsing, so an unusable value is a
+/// usage error (exit 2) rather than a half-written dossier.
+fn parse_creation_date(value: &str) -> Result<CreationDate, String> {
+    parse_rfc3339(value)
+        .map(|unix| CreationDate(format_rfc3339(unix)))
+        .ok_or_else(|| "expected an RFC 3339 timestamp".to_owned())
+}
+
+#[derive(Clone, Debug, Args)]
+pub(crate) struct CreateArgs {
+    /// The dossier to write. An existing file is never overwritten.
+    #[arg(short, long, value_name = "FILE")]
+    pub(crate) output: PathBuf,
+    /// The dossier's own title.
+    #[arg(long, value_name = "TITLE")]
+    pub(crate) title: String,
+    /// A document to place in the dossier, as `PATH`, `PATH::TITLE`, or
+    /// `PATH::TITLE::TYPE/SUBTYPE`. The title defaults to the file's
+    /// basename and the media type to the one registered for its extension.
+    /// Repeatable; documents are written in the order given.
+    #[arg(long = "document", value_name = "PATH[::TITLE[::MIME]]")]
+    pub(crate) document: Vec<String>,
+    /// Store every `--document` payload as `zip -> base64` instead of
+    /// `base64`. Embedded dossiers are always stored as `base64`.
+    #[arg(long)]
+    pub(crate) zip: bool,
+    /// An existing dossier to embed as one document. It is parsed first, and
+    /// is titled `<stem>.dosszie` so that the reader treats it as an
+    /// embedded dossier. Repeatable; embedded dossiers follow the
+    /// `--document` list.
+    #[arg(long = "embed", value_name = "FILE")]
+    pub(crate) embed: Vec<PathBuf>,
+    /// The creation date to write, as an RFC 3339 timestamp, normalised to
+    /// UTC seconds. Without it the current time is used, which makes the
+    /// output depend on the clock.
+    #[arg(long, value_name = "TIME", value_parser = parse_creation_date)]
+    pub(crate) created: Option<CreationDate>,
+    /// Emit one stable JSON object on stdout.
+    #[arg(long)]
+    pub(crate) json: bool,
+    /// Also accept an `--embed` dossier whose root Dossier element is in this
+    /// namespace, in addition to the known-compatible ones. Repeatable.
+    #[arg(long = "allow-namespace", value_name = "URI")]
+    pub(crate) allow_namespace: Vec<String>,
+}
+
+impl CreateArgs {
     pub(crate) fn parse_options(&self) -> ParseOptions {
         parse_options(&self.allow_namespace)
     }

@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<es:Dossier xmlns:es="https://www.microsec.hu/ds/e-szigno30#" xmlns:ds="http://www.w3.org/2000/09/xmldsig#">
+  <es:DossierProfile Id="dossier" OBJREF="documents">
+    <es:Title>Synthetic created dossier</es:Title>
+    <es:E-category>electronic dossier</es:E-category>
+    <es:CreationDate>2026-01-01T00:00:00Z</es:CreationDate>
+  </es:DossierProfile>
+  <es:Documents Id="documents">
+    <es:Document>
+      <es:DocumentProfile Id="profile0" OBJREF="obj0">
+        <es:Title>hello.txt</es:Title>
+        <es:E-category>electronic data</es:E-category>
+        <es:CreationDate>2026-01-01T00:00:00Z</es:CreationDate>
+        <es:Format><es:MIME-Type type="text" subtype="plain" extension="txt"/></es:Format>
+        <es:SourceSize sizeValue="54" sizeUnit="B"/>
+        <es:BaseTransform><es:Transform Algorithm="base64"/></es:BaseTransform>
+      </es:DocumentProfile>
+      <ds:Object Id="obj0">SGVsbG8gZnJvbSBhbiBvcGVuU3ppZ25vIHN5bnRoZXRpYyBhdXRob3JpbmcgZml4dHVyZS4K</ds:Object>
+    </es:Document>
+    <es:Document>
+      <es:DocumentProfile Id="profile1" OBJREF="obj1">
+        <es:Title>note.txt</es:Title>
+        <es:E-category>electronic data</es:E-category>
+        <es:CreationDate>2026-01-01T00:00:00Z</es:CreationDate>
+        <es:Format><es:MIME-Type type="text" subtype="plain" extension="txt"/></es:Format>
+        <es:SourceSize sizeValue="62" sizeUnit="B"/>
+        <es:BaseTransform><es:Transform Algorithm="base64"/></es:BaseTransform>
+      </es:DocumentProfile>
+      <ds:Object Id="obj1">QSBzZWNvbmQgc3ludGhldGljIGlucHV0LCBzbyB0aGUgZml4dHVyZSBob2xkcyB0d28gZG9jdW1lbnRzLgo=</ds:Object>
+    </es:Document>
+  </es:Documents>
+</es:Dossier>

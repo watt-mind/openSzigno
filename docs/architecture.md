@@ -36,9 +36,14 @@ checked.
 - CMS recipient forms other than `KeyTransRecipientInfo`, and content
   encryption outside the subset in [Decryption](#decryption).
 
+Authoring is no longer a non-goal: `create` writes a new, unsigned dossier,
+and signing, timestamping, and encrypting one are planned in
+[roadmap.md](roadmap.md). None of them exists yet, and nothing below is
+softened by that plan.
+
 Permanent non-goals for this tool:
 
-- creating, editing, signing, timestamping, or encrypting dossiers;
+- editing a dossier in place, or rewriting one it did not build;
 - declaring a dossier legally valid, which is a legal judgement rather than a
   cryptographic result;
 - silently accepting arbitrary XML that merely has an `.es3` suffix.
@@ -48,11 +53,14 @@ Permanent non-goals for this tool:
 ```text
 crates/
   openszigno-core/    # XML model, bounded decoding, transforms, stable codes
+  openszigno-author/  # deterministic dossier writing: XML, MIME, ZIP, titles
   openszigno-verify/  # canonicalization, XMLDSig, certificate paths
   openszigno-cli/     # clap commands, human output, JSON protocol, exit codes
 ```
 
-`openszigno-core` does not write files or print output. The CLI owns all
+`openszigno-core` does not write files or print output, and it never writes a
+dossier either: `openszigno-author` is the only crate that builds one, and it
+does that in memory. The CLI owns all
 filesystem policy and serialisation. This keeps the parser testable and makes
 future library use possible without weakening CLI safety.
 
@@ -93,7 +101,7 @@ crates/openszigno-cli/src/
   response.rs         # the JSON envelope, CliError, and its exit statuses
   render/             # writing the envelope (json.rs) and the summary (human.rs)
   commands/           # one module per command: inspect, list, validate,
-                      #   extract, verify, skill
+                      #   extract, verify, create, skill
   extract/            # select.rs (--document), plan.rs (decode, names, nesting),
                       #   names.rs (filename safety), write.rs (writing and
                       #   rollback), output_dir.rs (race-resistant output)
@@ -142,6 +150,22 @@ re-exported from `decrypt::mod` at their original path.
 | `cms` | `ContentInfo` / `EnvelopedData` / `RecipientInfo` parsing and validation, and unwrapping the content-encryption key (RSAES-PKCS1-v1_5, RSAES-OAEP). |
 | `ciphers` | Content-encryption algorithm identification and AES-128/192/256-CBC and DES-EDE3-CBC decryption. |
 | `keys` | Loading the recipient's PKCS#8 private key (DER or PEM, plain or passphrase-protected), PEM scanning, and certificate matching by `issuerAndSerialNumber` or `subjectKeyIdentifier`. |
+
+### Module map: `openszigno-author`
+
+```text
+crates/openszigno-author/src/
+  lib.rs      # DossierSpec/DocumentSpec, the limit checks, and build()
+  render.rs   # the XML text: element order, escaping, fixed whitespace
+  mime.rs     # extension to media type, and the caller's own type/subtype
+  title.rs    # the title rules extraction and authoring both apply
+  archive.rs  # the one-member ZIP a `zip -> base64` document carries
+  error.rs    # the stable codes a refused build reports
+```
+
+The crate reads no file, opens no socket, and calls no clock: the caller
+passes the bytes and the creation date in. See
+[The create command](#the-create-command).
 
 ## Format scope
 
@@ -371,8 +395,9 @@ decoded text, the tree, and the decoded payloads are all held at once).
 ## Limits
 
 The limits are compile-time defaults, reported verbatim by `inspect --json`
-under `data.limits`. They are not yet configurable on the command line; see
-[roadmap.md](roadmap.md).
+under `data.limits`. They bound writing as well as reading: `create` refuses
+to build a dossier that would exceed any of them. They are not yet
+configurable on the command line; see [roadmap.md](roadmap.md).
 
 | Limit | Default | Enforced by | Purpose |
 | --- | --- | --- | --- |
@@ -380,7 +405,7 @@ under `data.limits`. They are not yet configurable on the command line; see
 | `max_documents` | 256 | core | `es:Document` elements per dossier. |
 | `max_base64_chars` | 100663296 (96 MiB) | core | Base64 characters in one payload after whitespace removal. |
 | `max_decoded_document_bytes` | 67108864 (64 MiB) | core | Decoded size of one document. |
-| `max_total_decoded_bytes` | 268435456 (256 MiB) | CLI | Aggregate decoded size of one extraction, across the whole embedded-dossier tree. |
+| `max_total_decoded_bytes` | 268435456 (256 MiB) | CLI, author | Aggregate decoded size of one extraction, across the whole embedded-dossier tree, and of one `create` run. |
 | `max_zip_members` | 16 | core | Members in a `zip` transform archive; the format stores exactly one, so this is defence in depth. |
 | `max_zip_expanded_bytes` | 67108864 (64 MiB) | core | Expanded size of the ZIP member. |
 | `max_zip_compression_ratio` | 100 | core | Expanded/compressed ratio, checked on actual decoded bytes. |
@@ -398,11 +423,14 @@ under `data.limits`. They are not yet configurable on the command line; see
 | `extract FILE --decrypt-key KEY` | The same, additionally decrypting documents whose transform chain contains `encrypt`. See [Decryption](#decryption). | No |
 | `validate-structure FILE` | Apply the project's strict structural rules without validating signatures. | No |
 | `verify FILE` | Verify every `ds:Signature`: canonicalization, reference digests, the signature value, the e-dossier reference-scope rules, the XAdES signed `SigningCertificate` binding, RFC 3161 signature timestamps, the certificate path, and revocation. Reports a per-signature verdict of `valid`, `invalid`, or `indeterminate`. | No |
+| `create --output FILE --title TITLE` | Build one new, unsigned dossier from files on disk, without overwriting anything. The only command that writes a dossier. See [The create command](#the-create-command). | No: it reads its inputs only |
 | `skill` | Write the agent skill the binary embeds (`crates/openszigno-cli/skills/openszigno/SKILL.md`) to stdout, byte for byte and with nothing added. Reads no dossier and emits no envelope. | No |
 
-In every command except `skill` `FILE` is either a path to a regular file or
+In every command except `create` and `skill` `FILE` is either a path to a
+regular file or
 `-`, which reads the dossier from standard input; see
-[Reading from stdin](#reading-from-stdin). `skill` takes no `FILE` and no
+[Reading from stdin](#reading-from-stdin). `create` reads no dossier and
+takes no `FILE`. `skill` takes no `FILE` and no
 flags of its own; see [The skill command](#the-skill-command).
 
 These flags apply to every command that reads a dossier:
@@ -429,6 +457,18 @@ These flags apply to every command that reads a dossier:
 | `--decrypt-cert <FILE>` | The certificate belonging to `--decrypt-key`, PEM or DER. Optional when the key file is PEM and carries the certificate too. Requires `--decrypt-key`. |
 | `--decrypt-passphrase-file <FILE>` | Read the passphrase of an encrypted key from this file. Requires `--decrypt-key`. |
 | `--allow-legacy-ciphers` | Also decrypt DES-EDE3-CBC content. Requires `--decrypt-key`. |
+
+`create` takes no `FILE` and accepts:
+
+| Flag | Meaning |
+| --- | --- |
+| `-o`, `--output <FILE>` | The dossier to write. Required. An existing file is never overwritten. |
+| `--title <TITLE>` | The dossier's own title. Required. |
+| `--document <PATH[::TITLE[::MIME]]>` | One document to place in the dossier. Repeatable. |
+| `--zip` | Store every `--document` payload as `zip -> base64`. |
+| `--embed <FILE>` | An existing dossier to embed as one document. Repeatable. |
+| `--created <TIME>` | The creation date, as an RFC 3339 timestamp. Without it the current time is used. |
+| `--allow-namespace <URI>` | Also accept an `--embed` dossier rooted in this namespace. Repeatable. |
 
 In JSON mode, stdout contains exactly one JSON object and diagnostics go to
 stderr. Document ordering is the source XML order. No command writes XML
@@ -532,7 +572,7 @@ The envelope fields are always present:
 | --- | --- | --- |
 | `schema_version` | number | Currently `1`. |
 | `ok` | boolean | `false` on any failure. |
-| `command` | string | `inspect`, `list`, `extract`, `validate-structure`, `verify`, or `usage`. `skill` never appears: it emits no envelope. |
+| `command` | string | `inspect`, `list`, `extract`, `validate-structure`, `verify`, `create`, or `usage`. `skill` never appears: it emits no envelope. |
 | `input` | object | `format` is `"microsec-es3"` or `null`; `bytes` is the input size or `null`. |
 | `data` | object or null | Command-specific; `null` on failure. |
 | `warnings` | array | Objects with stable `code` and human `message`. |
@@ -602,6 +642,7 @@ writes one compact line; this is pretty-printed:
 | `list` | `dossier`, plus `documents`: an array in source order with `index`, `title`, `creation_date`, `mime_type` (`media_type`, `subtype`, `extension`, `charset`), `source_size`, `object_ref`, `transforms`, and `nested_dossier`. `source_size` is `null` when the profile omits `SourceSize`. |
 | `extract` | `extracted` (array of `document_index`, `dossier_path`, `filename`, `path`, `bytes`, `detected_type`, `declared_type`, `decrypted`), `extracted_count`, `skipped_count`, `nested_dossiers_extracted`, `selected`. |
 | `validate-structure` | `valid_structure`, `documents`, `conformance_warnings`, `cryptographic_verification_performed` (always `false`). |
+| `create` | `output`, `bytes`, `created`, and `documents`: an array in the order written with `index`, `title`, `mime_type`, `source_size`, `transforms`, `nested_dossier`, and `object_ref`. See [The create command](#the-create-command). |
 | `verify` | `verdict`, `verification_time`, `policy`, `limits`, `counts`, `checks`, `documents`, `signatures`, `timestamps`. `documents` is the per-document coverage inventory and `timestamps` the container `es:TimeStamp` reports; both are always present, as empty arrays when there is nothing to report. See [The `verify` command](#the-verify-command). |
 
 `valid_structure` stays `true` whenever parsing succeeded;
@@ -774,14 +815,14 @@ I/O and extraction policy.
 | `invalid_attribute` | core | 4 | A required attribute is absent or malformed. |
 | `duplicate_id` | core | 4 | An XML ID is empty or repeated. |
 | `unresolved_objref` | core | 4 | An `OBJREF` does not resolve to exactly one ID, or not to the expected element. |
-| `too_many_documents` | core | 4 | More than `max_documents` documents. |
-| `decoded_too_large` | core | 4 or 5 | A declared or decoded payload exceeds a size limit (4 when detected during parsing, 5 during extraction). |
+| `too_many_documents` | core, author | 4 | More than `max_documents` documents, read or written. |
+| `decoded_too_large` | core, author, CLI | 4 or 5 | A declared or decoded payload exceeds a size limit (4 when detected during parsing or while building a dossier, 5 during extraction). `create` also reports it for an input file over `max_decoded_document_bytes`. |
 | `invalid_base64` | core | 5 | Payload is not canonical Base64. |
 | `source_size_mismatch` | core | 5 | Decoded length differs from the declared `SourceSize`. |
 | `invalid_zip` | core | 5 | ZIP payload is malformed or cannot be expanded. |
 | `zip_member_limit` | core | 5 | The archive does not contain exactly one member. |
 | `zip_size_limit` | core | 5 | The ZIP member exceeds the expanded-size limit. |
-| `zip_ratio_limit` | core | 5 | The ZIP member exceeds the compression-ratio limit. |
+| `zip_ratio_limit` | core, author | 4 or 5 | The ZIP member exceeds the compression-ratio limit (4 when `create --zip` refuses to write one, 5 when extraction refuses to expand one). |
 | `unsafe_zip_member` | core | 5 | The member is a directory, a symlink, or has a non-basename path. |
 | `unsupported_zip_member` | core | 5 | The member uses encryption or an unsupported compression method. |
 | `invalid_decryption_key` | core | 4 | `--decrypt-key` is not an RSA private key in PKCS#8 DER or PEM form, or its passphrase is missing or wrong. The two are deliberately not told apart. |
@@ -790,6 +831,13 @@ I/O and extraction policy.
 | `decryption_key_mismatch` | core | 4 | The certificate's public key is not the given key's public key. |
 | `invalid_cms` | core | 5 | An encrypted payload is not a well-formed CMS `EnvelopedData` `ContentInfo`, carries no encrypted content, or has a malformed initialisation vector or block length. |
 | `decrypt_failed` | core | 5 | Decryption failed. The message is exactly `decryption failed` and never says which step failed. |
+| `no_documents` | author | 4 | `create` was given no `--document` and no `--embed`. |
+| `unsafe_document_title` | author | 4 | A `create` document title fails the rules extraction applies to a filename, so the dossier would not be extractable. |
+| `invalid_dossier_title` | author | 4 | The `create --title` value is empty, over 1024 bytes, or holds a control character. |
+| `unknown_mime_type` | author | 4 | No media type is registered for a `create` document's extension and none was given. |
+| `invalid_mime_type` | author | 4 | A `create` document's media type is not a bare `type/subtype`. |
+| `zip_failed` | author | 4 | A `create --zip` payload could not be packed into a ZIP archive. Not reachable through any input this tool accepts. |
+| `invalid_output_path` | CLI | 4 | The `create --output` path does not name a file. |
 | `unsafe_output_name` | CLI | 5 | A document title or declared extension cannot be used as a filename, or the derived `<file>.d` directory name would be too long. |
 | `output_name_collision` | CLI | 5 | Residual: two outputs still map to the same name in one directory after deduplication. |
 | `output_exists` | CLI | 5 | A destination file already exists or cannot be created safely. |
@@ -803,7 +851,7 @@ I/O and extraction policy.
 | `online_options_invalid` | CLI | 3 | The `--online` transport could not be built, which today means `--online-proxy` is not a usable proxy URL. |
 | `online_cache_invalid` | CLI | 3 | The `--online-cache` directory could not be opened safely, or a cache file could not be written. A name inside it that already holds something else is not this error; that is one `online_fetch_failed` with the class `cache_collision`, and the run continues. |
 | `unsafe_output_directory` | CLI | 5 | The output path contains a symlink or reparse point, or is not a real directory. |
-| `total_size_limit` | CLI | 5 | Aggregate decoded size exceeds `max_total_decoded_bytes`. |
+| `total_size_limit` | CLI, author | 4 or 5 | Aggregate decoded size exceeds `max_total_decoded_bytes` (4 when `create` refuses to write, 5 during extraction). |
 
 Warning codes. Warnings never change the exit status by themselves:
 
@@ -824,6 +872,7 @@ Warning codes. Warnings never change the exit status by themselves:
 | `signature_inventory_truncated` | all commands | More than 64 `ds:Signature` or 64 `es:TimeStamp` elements are present, so the inventory describes only the first 64 of that kind. `signatures_present` and `timestamps_present` still count them all. |
 | `output_name_deduplicated` | `extract` | A document's output name was already taken in its directory, so it was renamed. |
 | `nested_dossier_depth_limit` | `extract` | An embedded dossier was kept as a file because `--max-depth` was reached. |
+| `created_dossier_unsigned` | `create` | The dossier that was written carries no signature and no timestamp. Every successful `create` reports it. |
 | `nested_dossier_invalid` | `extract` | An embedded dossier could not be parsed; the raw payload was kept and the run continued. |
 
 ## The `verify` command
@@ -2687,6 +2736,152 @@ because the token's revocation check is folded into the signature's check list
 in its own right. A TSA certificate that was actually revoked makes the check
 `failed`, which sinks both.
 
+## The create command
+
+`create` is the only command that writes a dossier. It builds one unsigned
+`es:Dossier` from files on disk, in the default e-Szignó 3.0 namespace, and
+does nothing else: it signs nothing, encrypts nothing, and reads no dossier
+except the ones `--embed` names. The writing itself lives in
+`openszigno-author`, which never touches the filesystem;
+`openszigno-core` stays read-only.
+
+```sh
+openszigno create --output FILE.es3 --title TITLE \
+  [--document PATH[::TITLE[::MIME]]]... [--zip] [--embed DOSSIER.es3]... \
+  [--created RFC3339] [--json]
+```
+
+### What it writes
+
+The layout is fixed. A dossier with one text document is exactly this, with
+the payload Base64 on one line:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<es:Dossier xmlns:es="https://www.microsec.hu/ds/e-szigno30#" xmlns:ds="http://www.w3.org/2000/09/xmldsig#">
+  <es:DossierProfile Id="dossier" OBJREF="documents">
+    <es:Title>Synthetic created dossier</es:Title>
+    <es:E-category>electronic dossier</es:E-category>
+    <es:CreationDate>2026-01-01T00:00:00Z</es:CreationDate>
+  </es:DossierProfile>
+  <es:Documents Id="documents">
+    <es:Document>
+      <es:DocumentProfile Id="profile0" OBJREF="obj0">
+        <es:Title>hello.txt</es:Title>
+        <es:E-category>electronic data</es:E-category>
+        <es:CreationDate>2026-01-01T00:00:00Z</es:CreationDate>
+        <es:Format><es:MIME-Type type="text" subtype="plain" extension="txt"/></es:Format>
+        <es:SourceSize sizeValue="54" sizeUnit="B"/>
+        <es:BaseTransform><es:Transform Algorithm="base64"/></es:BaseTransform>
+      </es:DocumentProfile>
+      <ds:Object Id="obj0">SGVsbG8gLi4uCg==</ds:Object>
+    </es:Document>
+  </es:Documents>
+</es:Dossier>
+```
+
+`tests/fixtures/created.es3` is that output for the two committed inputs
+under `tests/fixtures/create/`, and the golden matrix rebuilds it on every
+run.
+
+| Element | Value |
+| --- | --- |
+| `es:DossierProfile` | `Id="dossier"`, `OBJREF="documents"`, so the profile resolves to the one `es:Documents` element. |
+| `es:E-category` | `electronic dossier` on the dossier, `electronic data` on every document. Not configurable. |
+| `es:CreationDate` | `--created`, normalised to RFC 3339 UTC seconds, on the dossier and on every document alike. Without `--created` it is the current time in the same form, which is the only thing that makes two runs differ. |
+| `es:DocumentProfile` | `Id="profile<index>"`, `OBJREF="obj<index>"`, indexes counted from 0 in the order the documents were given. |
+| `es:MIME-Type` | `type`, `subtype`, and `extension`, the three attributes the reader reads. No `charSet` is written. |
+| `es:SourceSize` | The decoded length in bytes, `sizeUnit="B"`, always present. |
+| `es:BaseTransform` | `base64`, or `zip` then `base64` under `--zip`. |
+| `ds:Object` | `Id="obj<index>"`, holding the Base64 payload with no line breaks. |
+
+### Determinism
+
+The same inputs with the same `--created` produce a byte-identical file.
+Element order, indentation, and the identifiers above are fixed, no
+identifier is random, Base64 is unwrapped, and the ZIP a `--zip` document
+carries pins its member's modification time to the ZIP epoch. Only the
+default creation date depends on the clock.
+
+### Documents
+
+`--document PATH[::TITLE[::MIME]]` names one document, and is repeatable.
+`--embed DOSSIER.es3` names one existing dossier to embed, and is repeatable
+too. Documents are written in the order given, every `--document` first and
+every `--embed` after them.
+
+| Part | Default |
+| --- | --- |
+| `TITLE` | The file's basename. It becomes `es:Title`, and it is the name `extract` writes the payload under. |
+| `MIME` | The `type/subtype` registered for the title's extension. A title whose extension has no registered type is refused as `unknown_mime_type` rather than guessed; pass the type to write it anyway. |
+
+The declared `extension` is the title's own suffix, when that suffix is a
+short ASCII alphanumeric one; otherwise no extension is declared and the
+reader falls back to content sniffing.
+
+Titles are written in one canonical Unicode composition (NFC), the same one
+the extraction sanitizer writes a filename in, so the title in the dossier
+and the name the payload comes back out under are the same string.
+
+A title is checked against exactly the rules
+[Extraction policy](#extraction-policy) applies before writing a file, using
+one shared implementation in `openszigno-author`. A title `extract` would
+refuse is `unsafe_document_title` here, so a created dossier is always
+extractable.
+
+`--zip` stores every `--document` payload as `zip -> base64`, in a
+one-member archive named after the document. An embedded dossier is always
+stored as `base64`. A payload that deflates better than
+`max_zip_compression_ratio` is refused as `zip_ratio_limit`, because the
+reader would refuse to expand it.
+
+An `--embed` file is parsed before it is embedded, so `create` never writes
+an embedded document this tool cannot read back; a file that does not parse
+fails with the structural code the parser produced. It is titled
+`<stem>.dosszie` and declared `application/nldossier2`, which is what makes
+`list` report it as a nested dossier and `extract` expand it.
+
+### Writing the output
+
+The output file is created with `O_EXCL` through the same descriptor-relative
+machinery `extract` uses, so the same rules hold: an existing destination is
+`output_exists`, a path component that is a symlink or is not a directory is
+`unsafe_output_directory`, and missing parent directories are created. The
+whole dossier is rendered in memory and checked before the file is created,
+and a failed write removes what this run created, so a run either writes a
+complete dossier or leaves the destination untouched.
+
+Every [limit](#limits) that bounds reading bounds writing too: the document
+count, one document's decoded size, the aggregate decoded size, the Base64
+character count, and the ZIP compression ratio.
+
+### The JSON shape
+
+`input` describes the format, not a file that was read: `format` is
+`"microsec-es3"`, the format this command writes, and `bytes` is `null`
+because `create` reads no dossier. On failure both are `null`, as they are
+for every other command whose input could not be used.
+
+| `data` field | Type | Meaning |
+| --- | --- | --- |
+| `output` | string | The output path exactly as the caller gave it. It is never resolved or made absolute. |
+| `bytes` | number | The size of the file written. |
+| `created` | string | The creation date written, RFC 3339 UTC seconds. |
+| `documents` | array | One entry per document written, in source order. |
+
+| `documents[]` field | Type | Meaning |
+| --- | --- | --- |
+| `index` | number | Position in the dossier, from 0. |
+| `title` | string | The `es:Title` written. |
+| `mime_type` | object | `media_type`, `subtype`, `extension`, `charset`, as `list` reports them. `charset` is always `null`. |
+| `source_size` | number | The decoded length declared in `es:SourceSize`. |
+| `transforms` | array | `["base64"]`, or `["zip", "base64"]`. |
+| `nested_dossier` | boolean | Whether the declared type marks the document as an embedded dossier. |
+| `object_ref` | string | The `ds:Object` `Id`, which is also the `extract --document` selector for it. |
+
+Every successful run warns `created_dossier_unsigned`. Creating a dossier
+proves nothing about its contents, and the envelope says so on every run.
+
 ## Extraction policy
 
 - Decode Base64 as bytes, never by treating a dossier as locale-dependent
@@ -2978,8 +3173,9 @@ trusted list whose own signature was not checked yields `indeterminate` too.
 output states the verdict and the revocation policy it was reached under on
 every run.
 
-The rule for the other four commands is unchanged: `inspect`, `list`,
-`extract`, and `validate-structure` verify nothing, `signatures_verified` and
+The rule for the other five commands is unchanged: `inspect`, `list`,
+`extract`, `validate-structure`, and `create` verify nothing,
+`signatures_verified` and
 `cryptographic_verification_performed` stay `false`, and the warning
 `cryptographic_verification_not_performed` keeps its meaning for them. The
 signature inventory `inspect` and `list` report changes nothing about that
@@ -2989,6 +3185,8 @@ line, and a richer inventory is not weaker evidence or stronger evidence but no
 evidence at all. See [Signature inventory](#signature-inventory). It is
 deliberately *not* emitted by `verify`, which reports what it actually did.
 
+Creating a dossier says nothing about its contents either: `create` signs
+nothing, and every run of it warns `created_dossier_unsigned`.
 Extracting a document is never proof that it was signed or that the signature
 is valid, and neither is decrypting one: `--decrypt-key` shows that a key could
 unwrap a payload, which says nothing about who produced it. A rejection is

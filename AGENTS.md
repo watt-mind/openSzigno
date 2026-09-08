@@ -1,10 +1,11 @@
 # openSzigno
 
 openSzigno is an open-source, agent-first Rust CLI for inspecting, listing,
-structurally validating, extracting, and verifying the signatures of Hungarian
-Microsec e-Szignó `.es3` e-dossiers. Three-crate workspace:
+structurally validating, extracting, creating, and verifying the signatures of
+Hungarian Microsec e-Szignó `.es3` e-dossiers. Four-crate workspace:
 `crates/openszigno-core` (bounded XML parsing, dossier model, Base64/ZIP
-decoding, limits), `crates/openszigno-verify` (canonicalization, XMLDSig,
+decoding, limits), `crates/openszigno-author` (the deterministic writer
+behind `create`), `crates/openszigno-verify` (canonicalization, XMLDSig,
 certificate paths; no I/O except through injected traits), and
 `crates/openszigno-cli` (the `openszigno` binary, human + stable `--json`
 output, safe extraction). See `README.md`, `docs/architecture.md`,
@@ -45,8 +46,9 @@ before anything else.
   `--online`), and trusted lists with qualified status. It reports `valid`
   only when every required check passed against
   the trust material the caller supplied, and any unperformed required check
-  caps the verdict at `indeterminate`. The other four commands verify nothing
-  at all. Never claim validity outside that path, never let a change relax a
+  caps the verdict at `indeterminate`. The other five commands verify nothing
+  at all, `create` included: it writes an unsigned dossier and says so.
+  Never claim validity outside that path, never let a change relax a
   check without tests, and never present a `valid` verdict as a statement of
   legal effect (see `docs/architecture.md#verification-boundary`).
 - **Synthetic fixtures only.** Public fixtures under `tests/fixtures/` are
@@ -94,6 +96,7 @@ ES3_TEST_CORPUS_DIR=/private/corpus cargo test \
 | Path | What lives there |
 | :--- | :--- |
 | `crates/openszigno-core/src/` | `lib.rs`, `parse.rs`, `xml.rs`, `model.rs`, `sniff.rs`, `scan.rs`, `decode.rs`, `decrypt/`, `inventory.rs`, `error.rs` |
+| `crates/openszigno-author/src/` | The writer side, used only by `create`: `lib.rs` (spec and limit checks), `render.rs` (the XML text), `mime.rs`, `title.rs`, `archive.rs`, `error.rs`. Reads no file and calls no clock. |
 | `crates/openszigno-verify/src/` | `lib.rs`, `c14n.rs`, `dsig.rs`, `references.rs`, `scope.rs`, `countersign.rs`, `signature/`, `coverage.rs`, `xades.rs`, `certs/`, `revocation/`, `tsa/`, `estimestamp.rs`, `trustlist/`, `policy.rs`, `codes.rs`, `trust.rs`, `report.rs`, `embedded.rs` |
 | `crates/openszigno-verify/tests/` | Synthetic PKI and the in-tests XMLDSig signer (`common/`), which must never move into a shipped crate |
 | `crates/openszigno-cli/src/` | `main.rs` (dispatch), `args.rs`, `input.rs`, `response.rs`, `render/`, `commands/` (`inspect`, `list`, `extract`, `validate`, `verify`, `skill`), `extract/` (planning, naming, `output_dir.rs`), `trust.rs`, `revocation_store.rs`, `online/` (`mod.rs` transport and cache, `gaps.rs` what to fetch and for whom, `destination.rs`, `pinned.rs`) |

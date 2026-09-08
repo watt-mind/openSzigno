@@ -1,0 +1,17 @@
+{
+  "command": "validate-structure",
+  "data": {
+    "conformance_warnings": 0,
+    "cryptographic_verification_performed": false,
+    "documents": 2,
+    "valid_structure": true
+  },
+  "errors": [],
+  "input": {
+    "bytes": 1693,
+    "format": "microsec-es3"
+  },
+  "ok": true,
+  "schema_version": 1,
+  "warnings": []
+}
