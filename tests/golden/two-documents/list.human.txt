@@ -1,0 +1,4 @@
+Unsigned synthetic two-document fixture
+[0] first.txt | text/plain | 25 B | ["base64"]
+[1] second.txt | text/plain | 26 B | ["base64"]
+Signatures/timestamps are listed by presence only; none were verified.

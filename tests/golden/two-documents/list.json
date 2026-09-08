@@ -1,0 +1,66 @@
+{
+  "command": "list",
+  "data": {
+    "documents": [
+      {
+        "creation_date": "2026-01-01T00:00:00Z",
+        "index": 0,
+        "mime_type": {
+          "charset": "UTF-8",
+          "extension": "txt",
+          "media_type": "text",
+          "subtype": "plain"
+        },
+        "nested_dossier": false,
+        "object_ref": "DocumentObjectA",
+        "source_size": 25,
+        "title": "first.txt",
+        "transforms": [
+          "base64"
+        ]
+      },
+      {
+        "creation_date": "2026-01-01T00:00:00Z",
+        "index": 1,
+        "mime_type": {
+          "charset": "UTF-8",
+          "extension": "txt",
+          "media_type": "text",
+          "subtype": "plain"
+        },
+        "nested_dossier": false,
+        "object_ref": "DocumentObjectB",
+        "source_size": 26,
+        "title": "second.txt",
+        "transforms": [
+          "base64"
+        ]
+      }
+    ],
+    "dossier": {
+      "category": "electronic dossier",
+      "creation_date": "2026-01-01T00:00:00Z",
+      "documents": 2,
+      "namespace": "https://www.microsec.hu/ds/e-szigno30#",
+      "nested_dossiers": 0,
+      "signature_inventory": {
+        "signatures": [],
+        "timestamps": [],
+        "verified": false
+      },
+      "signatures_present": 0,
+      "signatures_verified": false,
+      "timestamps_present": 0,
+      "title": "Unsigned synthetic two-document fixture",
+      "xml_encoding": "UTF-8"
+    }
+  },
+  "errors": [],
+  "input": {
+    "bytes": 1721,
+    "format": "microsec-es3"
+  },
+  "ok": true,
+  "schema_version": 1,
+  "warnings": []
+}

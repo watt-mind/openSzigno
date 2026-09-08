@@ -1,0 +1,3 @@
+Unsigned traversal-title fixture
+[0] ../escape.txt | text/plain | 1 B | ["base64"]
+Signatures/timestamps are listed by presence only; none were verified.

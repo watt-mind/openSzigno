@@ -1,0 +1,3 @@
+openSzigno OpenSSL vector
+[0] openSzigno OpenSSL vector | text/plain | 5 B | ["base64"]
+Signatures/timestamps are listed by presence only; none were verified.

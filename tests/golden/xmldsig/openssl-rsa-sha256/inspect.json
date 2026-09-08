@@ -1,0 +1,83 @@
+{
+  "command": "inspect",
+  "data": {
+    "capabilities": {
+      "base64_extraction": true,
+      "cryptographic_verification": false,
+      "encrypted_extraction": "with_key",
+      "structural_validation": true,
+      "zip_base64_extraction": true
+    },
+    "dossier": {
+      "category": null,
+      "creation_date": "2026-01-01T00:00:00Z",
+      "documents": 1,
+      "namespace": "https://www.microsec.hu/ds/e-szigno30#",
+      "nested_dossiers": 0,
+      "signature_inventory": {
+        "signatures": [
+          {
+            "canonicalization_method": "http://www.w3.org/2001/10/xml-exc-c14n#",
+            "claimed_signing_time": null,
+            "digest_methods": [
+              "http://www.w3.org/2001/04/xmlenc#sha256"
+            ],
+            "document_index": 0,
+            "evidence": {
+              "archive_timestamps": 0,
+              "certificates": 0,
+              "crls": 0,
+              "ocsp_responses": 0,
+              "signature_timestamps": 0
+            },
+            "id": "sig0",
+            "key_info_certificates": 1,
+            "parent_signature_id": null,
+            "placement": "document",
+            "reference_count": 3,
+            "reference_uris": [
+              "#obj0",
+              "#prof0",
+              "#sigobj0"
+            ],
+            "signature_method": "http://www.w3.org/2001/04/xmldsig-more#rsa-sha256",
+            "xades_namespace": null,
+            "xades_properties": []
+          }
+        ],
+        "timestamps": [],
+        "verified": false
+      },
+      "signatures_present": 1,
+      "signatures_verified": false,
+      "timestamps_present": 0,
+      "title": "openSzigno OpenSSL vector",
+      "xml_encoding": "UTF-8"
+    },
+    "limits": {
+      "max_base64_chars": 100663296,
+      "max_decoded_document_bytes": 67108864,
+      "max_documents": 256,
+      "max_input_bytes": 67108864,
+      "max_total_decoded_bytes": 268435456,
+      "max_xml_depth": 128,
+      "max_xml_nodes": 1000000,
+      "max_zip_compression_ratio": 100,
+      "max_zip_expanded_bytes": 67108864,
+      "max_zip_members": 16
+    }
+  },
+  "errors": [],
+  "input": {
+    "bytes": 4280,
+    "format": "microsec-es3"
+  },
+  "ok": true,
+  "schema_version": 1,
+  "warnings": [
+    {
+      "code": "cryptographic_verification_not_performed",
+      "message": "signature and timestamp material was counted but not verified"
+    }
+  ]
+}

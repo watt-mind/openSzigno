@@ -1,0 +1,17 @@
+{
+  "command": "extract",
+  "data": null,
+  "errors": [
+    {
+      "code": "unsafe_output_name",
+      "message": "document 0 has an unsafe output title"
+    }
+  ],
+  "input": {
+    "bytes": 843,
+    "format": "microsec-es3"
+  },
+  "ok": false,
+  "schema_version": 1,
+  "warnings": []
+}

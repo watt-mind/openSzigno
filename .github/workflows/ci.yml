@@ -86,6 +86,28 @@ jobs:
           test "$(cat ci-out/plain/hello.txt)" = "Hello from openSzigno synthetic fixture."
           test "$(cat ci-out/zip/zipped.txt)" = "Zipped openSzigno synthetic fixture."
 
+  golden:
+    name: Golden output contract
+    # The goldens under tests/golden/ are the machine-checked form of the
+    # JSON envelope, the human renderer's lines, and the exit statuses. A
+    # diff here is a change to what every consumer parses, so it fails the
+    # pull request and is reviewed under the schema_version rule rather
+    # than regenerated to make the build green.
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable branch @ 2026-09-03
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Build the release binary
+        run: cargo build --release --locked -p openszigno-cli
+      - name: Check the golden output contract
+        run: python3 scripts/golden.py check --bin target/release/openszigno
+
   msrv:
     name: Minimum supported Rust (1.88)
     runs-on: ubuntu-latest

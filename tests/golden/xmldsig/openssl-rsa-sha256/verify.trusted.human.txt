@@ -1,0 +1,29 @@
+Verification verdict: invalid
+Validation time: <MASKED-TIME>
+Signatures: 1
+  signature_count_within_limits: passed
+  revocation_policy: info
+  documents_all_covered: info
+document 0: covered_unverified by signature 0 direct
+[0] document signature: invalid
+  validation time: 2026-01-02T03:04:05Z (source: at_flag)
+  sig_structure: passed
+  sig_placement: passed
+  c14n_method_allowed: passed
+  signature_algorithm_allowed: passed
+  digest_algorithm_allowed: passed
+  transforms_allowed: passed
+  references_same_document: passed
+  references_resolve: passed
+  reference_scope_complete: passed
+  reference_digest_ok: passed
+  signedinfo_canonicalization: passed
+  signing_certificate_available: passed
+  signature_value_ok: passed
+  xades_absent: skipped
+  xades_signing_certificate_absent: unknown
+  signing_time_present: info
+  signature_timestamp_absent: unknown
+  cert_not_yet_valid: failed
+  revocation_status_unknown: unknown
+Revocation policy: offline. A verdict of `valid` means every check passed at the stated validation time; it is not a legal opinion.

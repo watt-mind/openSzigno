@@ -1,0 +1,17 @@
+{
+  "command": "validate-structure",
+  "data": null,
+  "errors": [
+    {
+      "code": "unsafe_xml",
+      "message": "DTD and entity declarations are not allowed"
+    }
+  ],
+  "input": {
+    "bytes": 366,
+    "format": null
+  },
+  "ok": false,
+  "schema_version": 1,
+  "warnings": []
+}

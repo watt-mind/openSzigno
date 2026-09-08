@@ -96,6 +96,7 @@ CI additionally runs, on every pull request:
 | Release container | `docker build .`, then the CLI subcommands inside the image |
 | Workflow lint | `actionlint` with `SHELLCHECK_OPTS=--severity=warning` |
 | Source file length | `python3 scripts/check-file-length.py` |
+| Golden output contract | `python3 scripts/golden.py check --bin target/release/openszigno` |
 | Coverage quality gate | `python3 scripts/coverage_gate.py --lcov lcov.info --base origin/develop` |
 | Mutation testing (nightly, not a required check) | `cargo mutants -p <crate> --timeout-multiplier 2 -j 2` then `python3 scripts/mutants_gate.py --dir mutants.out --crate <crate>` |
 
@@ -103,6 +104,35 @@ Any of these can be reproduced locally with the same command. The
 container job runs `inspect`, `list`, `validate-structure`, `extract`, and
 `verify` against `tests/fixtures/` inside the scratch image, so a change
 that breaks the shipped image fails on the pull request.
+
+### Golden output contract
+
+`tests/golden/` holds the captured stdout and exit status of every command
+over every fixture in `tests/fixtures/`, in both `--json` and human mode.
+The CI `golden` job builds the release binary and compares; a difference
+fails the pull request.
+
+```sh
+cargo build --release --locked -p openszigno-cli
+python3 scripts/golden.py check --bin target/release/openszigno
+```
+
+A diff is not a broken test. It is a change to what every consumer parses,
+so decide what kind of change it is before accepting it: an added field,
+warning code, check code, or human line is additive and keeps
+`schema_version` at `1`; a removed or renamed field, a changed type, or a
+changed exit status for an existing outcome needs a `schema_version` bump
+and an update to [docs/architecture.md](docs/architecture.md#json-envelope).
+Either way the change gets a `CHANGELOG.md` entry under Unreleased. Then
+regenerate:
+
+```sh
+python3 scripts/golden.py update --bin target/release/openszigno
+```
+
+The script masks exactly two values, both times that cannot be stable; the
+rules are in [tests/golden/README.md](tests/golden/README.md). Never widen
+the masking to hide a real difference.
 
 When changing anything under `.github/workflows/`, pin every third-party
 action to a full commit SHA with a `# vX.Y.Z` comment after it. Dependabot

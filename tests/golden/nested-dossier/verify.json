@@ -1,0 +1,110 @@
+{
+  "command": "verify",
+  "data": {
+    "checks": [
+      {
+        "code": "signature_count_within_limits",
+        "message": "the number of signatures is within the verification limits",
+        "status": "passed"
+      },
+      {
+        "code": "revocation_policy",
+        "message": "revocation is checked offline, from the signature's own RevocationValues and the revocation store",
+        "status": "info"
+      },
+      {
+        "code": "no_signatures",
+        "message": "the dossier carries no ds:Signature, so there is nothing that could be valid",
+        "status": "unknown"
+      },
+      {
+        "code": "documents_uncovered",
+        "message": "1 of 1 modelled document(s) are covered by no signature; indexes: 0",
+        "status": "unknown"
+      }
+    ],
+    "counts": {
+      "documents_covered": 0,
+      "documents_uncovered": 1,
+      "documents_undetermined": 0,
+      "signatures": 0,
+      "signatures_indeterminate": 0,
+      "signatures_invalid": 0,
+      "signatures_valid": 0,
+      "timestamps": 0,
+      "timestamps_verified": 0
+    },
+    "documents": [
+      {
+        "coverage": "uncovered",
+        "covered_by": [],
+        "index": 0,
+        "nested_dossier": true,
+        "object_ref": "DocumentObject1",
+        "reason": "no signature's resolved references include this document; this document is an embedded dossier; it is covered like any other payload and its own inner signatures are not verified by this run"
+      }
+    ],
+    "limits": {
+      "max_certificates": 64,
+      "max_chain_length": 8,
+      "max_paths": 32,
+      "max_references_per_signature": 32,
+      "max_revocation_items": 256,
+      "max_signatures": 64,
+      "max_timestamps_per_signature": 8,
+      "max_transforms_per_reference": 8
+    },
+    "policy": {
+      "c14n_algorithms": [
+        "http://www.w3.org/TR/2001/REC-xml-c14n-20010315",
+        "http://www.w3.org/TR/2001/REC-xml-c14n-20010315#WithComments",
+        "http://www.w3.org/2001/10/xml-exc-c14n#",
+        "http://www.w3.org/2001/10/xml-exc-c14n#WithComments"
+      ],
+      "digest_algorithms": [
+        "sha256",
+        "sha384",
+        "sha512"
+      ],
+      "legacy_algorithms_allowed": false,
+      "revocation": "offline",
+      "signature_algorithms": [
+        "rsa-pkcs1-sha256",
+        "rsa-pkcs1-sha384",
+        "rsa-pkcs1-sha512",
+        "rsa-pss-sha256",
+        "rsa-pss-sha384",
+        "rsa-pss-sha512",
+        "ecdsa-sha256",
+        "ecdsa-sha384"
+      ],
+      "transforms": [
+        "http://www.w3.org/2000/09/xmldsig#enveloped-signature",
+        "http://www.w3.org/2000/09/xmldsig#base64",
+        "http://www.w3.org/TR/2001/REC-xml-c14n-20010315",
+        "http://www.w3.org/TR/2001/REC-xml-c14n-20010315#WithComments",
+        "http://www.w3.org/2001/10/xml-exc-c14n#",
+        "http://www.w3.org/2001/10/xml-exc-c14n#WithComments"
+      ],
+      "trust_lists": [],
+      "trust_snapshot": null,
+      "trust_store": "absent"
+    },
+    "signatures": [],
+    "timestamps": [],
+    "verdict": "indeterminate",
+    "verification_time": {
+      "effective": "<MASKED-TIME>",
+      "requested": null,
+      "source": "system_clock"
+    }
+  },
+  "errors": [],
+  "input": {
+    "bytes": 2077,
+    "format": "microsec-es3"
+  },
+  "ok": true,
+  "schema_version": 1,
+  "warnings": []
+}

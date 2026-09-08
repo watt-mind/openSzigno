@@ -73,6 +73,12 @@ jobs:
           "$BIN" extract tests/fixtures/zip-base64.es3 --output smoke-out/zip --json
           test "$(cat smoke-out/plain/hello.txt)" = "Hello from openSzigno synthetic fixture."
           test "$(cat smoke-out/zip/zipped.txt)" = "Zipped openSzigno synthetic fixture."
+      - name: Check the golden output contract
+        # The same check the CI `golden` job runs, but against the packaged
+        # binary rather than one built from this checkout: the bytes a user
+        # downloads must produce the documented envelope, not merely a
+        # binary built the same way.
+        run: python3 scripts/golden.py check --bin "$BIN"
       - name: Verify an unsigned fixture (expects exit 7)
         run: |
           set -euo pipefail
