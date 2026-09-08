@@ -12,15 +12,12 @@ use x509_cert::ext::pkix::name::{DistributionPointName, GeneralName};
 
 use crate::certs::ParsedCertificate;
 use crate::codes::{Check, CheckCode};
-use crate::policy::VerifyLimits;
+use crate::policy::{MAX_REVOCATION_ITEM_BYTES, VerifyLimits};
 use crate::trust::{RevocationPolicy, UnixTime, format_rfc3339};
 
 use super::crl::crl_answer;
 use super::ocsp::{ResponderModel, ocsp_answer};
 use super::{CertificateRevocation, PathRevocationInput, RevocationData, RevocationStatus};
-
-/// The largest CRL or OCSP response this build will parse.
-const MAX_ITEM_BYTES: usize = 8 * 1024 * 1024;
 
 /// The largest number of CRL distribution point URLs repeated in a message.
 const MAX_HINTED_URLS: usize = 2;
@@ -262,10 +259,17 @@ fn message_for(
             } else {
                 "neither the signature's own RevocationValues nor the revocation store covers it"
             };
-            let source = if input.policy == RevocationPolicy::Online {
-                &format!("{source}, and nothing usable was fetched online either")
-            } else {
-                source
+            let source = match input.policy {
+                RevocationPolicy::Online => {
+                    &format!("{source}, and nothing usable was fetched online either")
+                }
+                // The gap is the *reason* nothing was fetched, so it is named
+                // here rather than left to the policy check alone: a reader of
+                // this sentence is the one who has to act on it.
+                RevocationPolicy::OnlineNoAnchors => &format!(
+                    "{source}, and --online fetched nothing because no trust anchors are configured, so no certificate sits on a path to one"
+                ),
+                RevocationPolicy::NotChecked | RevocationPolicy::Offline => source,
             };
             format!(
                 "in {chain}, no usable revocation data covers {what}: {source}{}",
@@ -334,10 +338,18 @@ pub(super) fn check_certificate(
     // is a very ordinary thing to meet, and the CRL two tiers down answers the
     // same question — but it must stay visible, whether or not something later
     // rescued the certificate.
-    let mut refused: Option<(RevocationOrigin, &'static str)> = None;
+    let mut refused: Option<(RevocationOrigin, String)> = None;
     for (origin, items) in tiers {
         for item in items.iter().take(limits.max_revocation_items) {
-            if item.len() > MAX_ITEM_BYTES {
+            // Oversized evidence is refused *and named*. Skipping it silently
+            // is what made a large CRL load, sit in the store, and answer
+            // nothing.
+            if item.len() > MAX_REVOCATION_ITEM_BYTES {
+                let reason = format!(
+                    "it is {} bytes, over the {MAX_REVOCATION_ITEM_BYTES}-byte limit on one CRL or OCSP response",
+                    item.len()
+                );
+                record_refusal(&mut refused, &mut fallback, origin, reason);
                 continue;
             }
             let answer = match origin {
@@ -355,21 +367,7 @@ pub(super) fn check_certificate(
             match answer {
                 Answer::NotApplicable => continue,
                 Answer::Invalid(reason) => {
-                    if refused.is_none() {
-                        refused = Some((origin, reason));
-                    }
-                    fallback.get_or_insert_with(|| {
-                        let mut entry = CertificateRevocation::plain(
-                            RevocationStatus::Unknown,
-                            CheckCode::RevocationDataInvalid,
-                        );
-                        entry.source = Some(origin);
-                        entry.detail = Some(format!(
-                            "{} was refused because {reason}",
-                            origin.describe()
-                        ));
-                        entry
-                    });
+                    record_refusal(&mut refused, &mut fallback, origin, reason.to_owned());
                 }
                 Answer::Stale => {
                     let mut entry = CertificateRevocation::plain(
@@ -396,7 +394,7 @@ pub(super) fn check_certificate(
                     entry.next_update = next_update.map(format_rfc3339);
                     entry.produced_at = produced_at.map(format_rfc3339);
                     entry.responder_model = responder_model;
-                    entry.detail = superseded(refused, origin);
+                    entry.detail = superseded(refused.as_ref(), origin);
                     return entry;
                 }
                 Answer::Revoked {
@@ -423,7 +421,7 @@ pub(super) fn check_certificate(
                     entry.next_update = next_update.map(format_rfc3339);
                     entry.produced_at = produced_at.map(format_rfc3339);
                     entry.responder_model = responder_model;
-                    entry.detail = superseded(refused, origin);
+                    entry.detail = superseded(refused.as_ref(), origin);
                     return entry;
                 }
             }
@@ -437,9 +435,34 @@ pub(super) fn check_certificate(
     })
 }
 
+/// Remember one refused source: the first refusal is what the report names,
+/// and it stays visible whether or not a later tier answered.
+fn record_refusal(
+    refused: &mut Option<(RevocationOrigin, String)>,
+    fallback: &mut Option<CertificateRevocation>,
+    origin: RevocationOrigin,
+    reason: String,
+) {
+    if refused.is_none() {
+        *refused = Some((origin, reason.clone()));
+    }
+    fallback.get_or_insert_with(|| {
+        let mut entry = CertificateRevocation::plain(
+            RevocationStatus::Unknown,
+            CheckCode::RevocationDataInvalid,
+        );
+        entry.source = Some(origin);
+        entry.detail = Some(format!(
+            "{} was refused because {reason}",
+            origin.describe()
+        ));
+        entry
+    });
+}
+
 /// The sentence recording that something was refused before `used` answered.
 fn superseded(
-    refused: Option<(RevocationOrigin, &'static str)>,
+    refused: Option<&(RevocationOrigin, String)>,
     used: RevocationOrigin,
 ) -> Option<String> {
     let (origin, reason) = refused?;

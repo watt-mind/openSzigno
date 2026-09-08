@@ -340,6 +340,38 @@ fn responder_names(responder: &ResponderId, certificate: &ParsedCertificate) -> 
     }
 }
 
+/// The RFC 6960 `CertID` naming one certificate, as DER.
+///
+/// It is what a request is *about*, and it is exposed because deduplication
+/// needs it: two certificates issued by the same CA share one responder URL,
+/// and a fetcher that deduplicated by URL alone would ask about the first and
+/// silently never ask about the second. The URL says where to ask; this says
+/// what was asked. It is also what names a cached response on disk, so two
+/// answers from one responder cannot be mistaken for one another.
+pub fn ocsp_cert_id(subject: &ParsedCertificate, issuer: &ParsedCertificate) -> Option<Vec<u8>> {
+    cert_id(subject, issuer)?.to_der().ok()
+}
+
+fn cert_id(subject: &ParsedCertificate, issuer: &ParsedCertificate) -> Option<x509_ocsp::CertId> {
+    use der::asn1::OctetString;
+
+    let key = issuer
+        .certificate
+        .tbs_certificate
+        .subject_public_key_info
+        .subject_public_key
+        .as_bytes()?;
+    Some(x509_ocsp::CertId {
+        hash_algorithm: x509_cert::spki::AlgorithmIdentifierOwned {
+            oid: OID_SHA256,
+            parameters: Some(der::Any::null()),
+        },
+        issuer_name_hash: OctetString::new(Sha256::digest(subject.issuer_der()).to_vec()).ok()?,
+        issuer_key_hash: OctetString::new(Sha256::digest(key).to_vec()).ok()?,
+        serial_number: subject.certificate.tbs_certificate.serial_number.clone(),
+    })
+}
+
 /// Build an RFC 6960 `OCSPRequest` asking about one certificate.
 ///
 /// This is DER assembly, not networking: the crate still opens no socket, and
@@ -361,23 +393,7 @@ fn responder_names(responder: &ResponderId, certificate: &ParsedCertificate) -> 
 /// nonces because it must also read responses archived years ago; adding one
 /// would defend nothing and would make some responders refuse outright.
 pub fn ocsp_request(subject: &ParsedCertificate, issuer: &ParsedCertificate) -> Option<Vec<u8>> {
-    use der::asn1::OctetString;
-
-    let key = issuer
-        .certificate
-        .tbs_certificate
-        .subject_public_key_info
-        .subject_public_key
-        .as_bytes()?;
-    let cert_id = x509_ocsp::CertId {
-        hash_algorithm: x509_cert::spki::AlgorithmIdentifierOwned {
-            oid: OID_SHA256,
-            parameters: Some(der::Any::null()),
-        },
-        issuer_name_hash: OctetString::new(Sha256::digest(subject.issuer_der()).to_vec()).ok()?,
-        issuer_key_hash: OctetString::new(Sha256::digest(key).to_vec()).ok()?,
-        serial_number: subject.certificate.tbs_certificate.serial_number.clone(),
-    };
+    let cert_id = cert_id(subject, issuer)?;
     let request = x509_ocsp::OcspRequest {
         tbs_request: x509_ocsp::TbsRequest {
             version: x509_ocsp::Version::V1,

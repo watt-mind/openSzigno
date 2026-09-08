@@ -52,7 +52,7 @@ use openszigno_core::{Error as CoreError, Limits, ParseOptions, XmlSource, id_ma
 pub use c14n::{C14nAlgorithm, C14nBackend, C14nError, NodeSet, RoxmltreeC14n};
 pub use codes::{Check, CheckCode, CheckStatus, Verdict};
 pub use embedded::{EmbeddedRevocationValues, embedded_certificates, embedded_revocation_values};
-pub use policy::{PolicyReport, TrustListSnapshot, VerifyLimits};
+pub use policy::{MAX_REVOCATION_ITEM_BYTES, PolicyReport, TrustListSnapshot, VerifyLimits};
 pub use report::{
     CoverageState, CoverageVia, CoveringSignature, DocumentCoverage, SignatureReport,
     SignatureRole, SignatureScope, SigningCertificateBinding, ValidationTimeSource, VerifyReport,
