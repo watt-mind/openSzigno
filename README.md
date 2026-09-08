@@ -483,6 +483,7 @@ Outside the current plan altogether:
 ## Documentation
 
 - [Documentation index](docs/index.md)
+- [ES3 specification and implementation map](docs/es3-specification.md)
 - [Architecture and CLI contract](docs/architecture.md)
 - [Research and source register](docs/research.md)
 - [Testing and fixture policy](docs/testing.md)
@@ -496,6 +497,33 @@ Open pull requests against `develop`. See [CONTRIBUTING.md](CONTRIBUTING.md)
 for the branch model, commit conventions, and required checks, and
 [SECURITY.md](SECURITY.md) for the threat model and how to report a
 vulnerability.
+
+## LEGAL
+
+openSzigno independently implements the publicly documented
+[Microsec e-dossier format](https://srv.e-szigno.hu/edossier) for
+interoperability. Its purpose is to let users inspect and process their
+documents with an open-source tool.
+
+EU copyright law distinguishes a program's protected expression from its
+functionality and underlying ideas. In
+[SAS Institute v World Programming (C-406/10)](https://eur-lex.europa.eu/legal-content/EN/ALL/?uri=CELEX%3A62010CA0406),
+the Court of Justice held that functionality and data-file formats are not,
+as such, protected by copyright in computer programs. This supports
+independent compatible implementations; it is not blanket permission to copy
+another program's source code, documentation, or other protected material.
+
+Third-party specifications, schemas, reference documents, and software remain
+subject to their own rights and applicable licenses. Public availability
+does not itself grant redistribution rights, and this project's MIT license
+does not relicense third-party material.
+
+This section provides general information, not legal advice or a guarantee
+of legal clearance in any jurisdiction. openSzigno does not determine a
+document's legal effect or provide a certified validation service. In this
+release, signature verification can report only `invalid` or
+`indeterminate`, never `valid`; see the
+[verification boundary](docs/architecture.md#verification-boundary).
 
 ## License and trademarks
 
