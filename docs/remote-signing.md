@@ -687,3 +687,107 @@ curl -s -X POST https://qs.primesign-test.com/csc/v2/info \
 curl -s -X POST https://signing.lab.cleverbase.io/csc/v2/info \
   -H 'Content-Type: application/json' -d '{"lang":"en"}'
 ```
+
+## 4. Timestamp authorities
+
+### 4.1 What "qualified" means operationally
+
+Under eIDAS a timestamp authority is qualified only if a Member State's
+trusted list carries a `QTST` service entry for it with status `granted`.
+That list, not a vendor page, is the authority. The machine-readable
+entry points are the
+[EU list of trusted lists](https://ec.europa.eu/tools/lotl/eu-lotl.xml),
+the
+[trusted list browser](https://eidas.ec.europa.eu/efda/trust-services/browse/eidas/tls)
+with its
+[Hungarian view](https://eidas.ec.europa.eu/efda/trust-services/browse/eidas/tls/tl/HU),
+and the Hungarian list published by the supervisory body NMHH at
+[HU_TL.xml](https://www.nmhh.hu/tl/pub/HU_TL.xml) (also as
+[HU_TL.pdf](https://www.nmhh.hu/tl/pub/HU_TL.pdf)). This matches the trust
+material model already described in [trust.md](trust.md).
+
+Parsing the Hungarian list gives exactly four providers with granted
+qualified timestamp services: Microsec, NETLOCK, Magyar Telekom and NISZ.
+
+### 4.2 Endpoints
+
+Every "granted" or HTTP status below was observed on 2026-09-09 by posting
+a real RFC 3161 `TimeStampReq` with `Content-Type:
+application/timestamp-query`. "Granted" means the response carried
+`Status: Granted`; it says nothing about whether the token would satisfy
+any particular legal requirement.
+
+Qualified and EU services:
+
+| TSA | Country | Qualified | Endpoint | Credentials | Observed |
+| --- | --- | --- | --- | --- | --- |
+| Microsec e-Szigno, client certificate | HU | Yes, HU trusted list | `https://tsa.e-szigno.hu/tsa` | TLS client certificate | Handshake failure without a client certificate |
+| Microsec e-Szigno, basic auth | HU | Yes | `https://btsa.e-szigno.hu/tsa` | Account | HTTP 401 anonymously |
+| Microsec e-Szigno test service | HU | No, test unit | `https://bteszt.e-szigno.hu/tsa` | `test` / `test` | Granted; policy `1.3.6.1.4.1.21528.2.2.99`, unit `CN=Test e-Szigno TSA 2025 01` |
+| NETLOCK | HU | Yes | Not published | Paid contract; URL issued on signing | Not reachable to test |
+| Magyar Telekom, NISZ | HU | Yes | Not published | Contract | Not reachable to test |
+| Sectigo qualified | ES, UK | Yes | `http://timestamp.sectigo.com/qualified` | None | Granted; policy `0.4.0.2023.1.1` |
+| FPS BOSA | BE | Yes | `http://tsa.belgium.be/connect` | None | Granted; policy `2.16.56.13.6.3.1.1000`; terms restrict it to non-commercial use |
+| DigiCert Europe (QuoVadis) | NL | Yes | `http://ts.quovadisglobal.com/eu` | Docs ask for IP registration | Granted anonymously in the probe |
+| APED | GR | Yes | `https://timestamp.aped.gov.gr/qtss` | None | Granted; policy `1.2.300.0.110001.2.1.2` |
+| ACCV | ES | Yes | `http://tss.accv.es:8318/tsa` | None | Granted; policy `1.3.6.1.4.1.8149.3.100.2.0` |
+| Izenpe | ES | Yes | `http://tsa.izenpe.com` | None documented | Granted; policy `1.3.6.1.4.1.14777.300.1` |
+| Cartao de Cidadao | PT | Yes | `http://ts.cartaodecidadao.pt/tsa/server` | None | Granted; policy `0.4.0.2023.1.1` |
+| SK ID Solutions, production | EE | Yes | `http://tsa.sk.ee/ecc`, `http://tsa.sk.ee/rsa` | Contract | HTTP 403 |
+| SK ID Solutions, demo | EE | No | `http://tsa.demo.sk.ee/tsa` | None | Granted; policy `0.4.0.2023.1.1` |
+| Actalis | IT | Company is a QTSP; this endpoint's status unknown | `http://timestamp.actalis.com` | None | Granted; policy `1.3.159.8.2.1` |
+| Namirial | IT | Yes | `https://timestamp.namirialtsp.com` | Account | HTTP 401 |
+| Uanataca | ES | Yes | `https://tsa.uanataca.com/tsa/tss02`, sandbox `https://tsa.sandbox.uanataca.com/tsa/tss03` | Account | HTTP 401 |
+| InfoCert | IT | Yes | `https://digitaltimestamp.infocert.it/idts-rest/dts/timestamp` | Paid | HTTP 401 |
+| ANF AC | ES | Yes | `https://tsu.anf.es/TimeStampServer/ANFTimeServer` | Account | HTTP 401 |
+| Evrotrust | BG | Yes | `http://ts.evrotrust.com/tsa` | Policy says anonymous for private non-commercial use | Returned `TSA Response error.`; not usable anonymously on the day |
+| D-Trust | DE | Yes | `https://timestamp.d-trust.net` | Paid contract | HTTP 401 |
+| GlobalSign qualified | BE | Yes | Not published | Contract | Not reachable to test |
+| Certum qualified | PL | Yes | Sold through the vendor's shop | Paid | Not reachable to test |
+| TrustPro | IE | Yes | Not published | Paid | Not reachable to test |
+| SwissSign | CH | Swiss ZertES qualified, not EU | `http://tsa.swisssign.net` | Contractually customers only, IP checked | Granted; policy `2.16.756.1.89.1.1.3.5` |
+
+Free and non-qualified services, useful for tests:
+
+| TSA | Endpoint | Credentials | Observed and terms |
+| --- | --- | --- | --- |
+| freetsa.org | `https://freetsa.org/tsr` | None | Granted; the only stated condition is not to abuse it. No code-signing or non-commercial clause found |
+| DigiCert | `http://timestamp.digicert.com` | None | Granted; policy `2.16.840.1.114412.7.1`. No timestamp-specific terms published |
+| Sectigo | `http://timestamp.sectigo.com` | None | Granted; policy `1.3.6.1.4.1.6449.2.1.1`. Documented guidance to wait 15 seconds or more between scripted requests |
+| Certum | `http://time.certum.pl` | None | Granted; policy text says free for private, commercial and non-commercial customers |
+| DFN-Verein | `http://zeitstempel.dfn.de` | None | Granted; usable only within the DFN statutes, so non-commercial only |
+| Apple | `http://timestamp.apple.com/ts01` | None | Granted; no public terms, documentation assumes Apple code signing |
+| SSL.com | `http://ts.ssl.com` | None in practice | Granted; free tier documented at 10000 timestamps per year |
+| Entrust | `http://timestamp.entrust.net/TSS/RFC3161sha2TS` | None | Granted, but the responding unit was `Sectigo Public Time Stamping Signer R37` |
+| GlobalSign | `http://timestamp.globalsign.com/tsa/r6advanced1` | None in practice | Granted; marketed for code signing customers, issuance at the vendor's discretion |
+| Microsoft | `http://timestamp.acs.microsoft.com` | None | Granted; intended for Trusted Signing customers |
+| IdenTrust | `http://timestamp.identrust.com` | None | Granted; policy `2.16.840.1.113839.0.6.13.3` |
+| CESNET | `http://tsa.cesnet.cz:3161/tsa` | None | Granted; academic network, so likely non-commercial |
+| Lex Persona | `http://tsa.lex-persona.com/tsa` | None | Granted; policy `1.3.6.1.4.1.22542.3.2.0` |
+| rfc3161.ai.moda | `http://rfc3161.ai.moda` | None | Granted, but it is a proxy that returned tokens from different issuers on different paths; unsuitable when the issuer must be known |
+
+### 4.3 What this means for openSzigno
+
+The Hungarian answer is clean and useful. Microsec runs a test timestamp
+service at `https://bteszt.e-szigno.hu/tsa` that answers with `test` /
+`test` and issues tokens under a test policy OID from a unit whose subject
+says "Test". That is the right fixture for a timestamping test in this
+project: it is Microsec's own service, it is unambiguously a test unit, and
+it cannot be mistaken for a qualified token. Production Microsec
+timestamping needs either a client certificate or an account, so it is not
+something a contributor can exercise.
+
+For non-Hungarian tests, `https://freetsa.org/tsr` is the least
+encumbered endpoint found: it is the only widely used free service with no
+non-commercial clause and no implied tie to the operator's own
+certificates. `http://timestamp.sectigo.com/qualified` is the only endpoint
+found that is both on a trusted list and answers anonymously, which makes
+it the cheapest way to obtain a real qualified token for a shape check.
+
+Two cautions. First, the absence of a published restriction is not
+permission: DigiCert and Sectigo publish no timestamp-specific terms at
+all, so their free endpoints should be recorded as unknown rather than
+allowed. Second, a timestamp is a second, independent dependency with its
+own account model, and it decides more about what a `sign` command can
+produce than the signer does; an ES3 signature that needs a timestamp
+cannot be completed by a CSC credential alone.
