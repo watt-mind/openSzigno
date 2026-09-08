@@ -50,6 +50,7 @@ pub fn document_signature(certificates: Vec<Vec<u8>>) -> SigSpec {
         signature_value_id: None,
         signature_profile_type: "signature".to_owned(),
         countersignatures: Vec::new(),
+        signing_time: None,
     }
 }
 
@@ -85,6 +86,7 @@ pub fn dossier_signature(certificates: Vec<Vec<u8>>) -> SigSpec {
         signature_value_id: None,
         signature_profile_type: "signature".to_owned(),
         countersignatures: Vec::new(),
+        signing_time: None,
     }
 }
 
@@ -471,8 +473,11 @@ pub(super) fn render_signature(spec: &SigSpec, namespace: &str) -> String {
         )
     };
 
-    let mut signed_properties =
-        String::from("<xades:SigningTime>2020-01-01T00:00:00Z</xades:SigningTime>");
+    let signing_time = spec
+        .signing_time
+        .as_deref()
+        .unwrap_or("2020-01-01T00:00:00Z");
+    let mut signed_properties = format!("<xades:SigningTime>{signing_time}</xades:SigningTime>");
     if let Some(certificate) = &spec.signing_certificate {
         signed_properties.push_str(&render_signing_certificate(certificate));
     }

@@ -2721,6 +2721,40 @@ else. Distinguishing a failed RSA unwrap from a bad content-key length from a
 bad PKCS#7 padding is exactly the distinction a padding oracle is built out of,
 so the tool does not make it — not even in the human output.
 
+### RSA key transport: chosen-ciphertext exposure
+
+The RSA ciphertext `unwrap_key` (`openszigno-core::decrypt::cms`) decrypts —
+the `RecipientInfo`'s encrypted content-encryption key — comes from the
+dossier being processed, not from the operator. For PKCS#1 v1.5 key
+transport that matters: whether decryption is fast or slow, and whether it
+succeeds or fails, both depend on the ciphertext, which is exactly the setup
+a Bleichenbacher/Marvin-style chosen-ciphertext attack (RUSTSEC-2023-0071)
+needs. An attacker able to submit many crafted dossiers to the same
+`--decrypt-key` and observe timing or success/failure across calls can, in
+principle, recover the content-encryption key without ever holding the RSA
+private key.
+
+`unwrap_key` calls `RsaPrivateKey::decrypt_blinded` (blinded with an
+`OsRng`-seeded factor) rather than plain `decrypt`. That removes the timing
+signal the private-key modular exponentiation itself would otherwise leak. It
+does **not** remove the success/failure signal, because that comes from the
+PKCS#1 v1.5 unpadding step, not the exponentiation, and `rsa` 0.9 — the
+version this workspace is pinned to — has no constant-time or oracle-free
+decrypt for this padding scheme. See the `RUSTSEC-2023-0071` entry in
+`deny.toml` for the full write-up, including why `rsa` 0.10 (which fixes
+this) is not yet adoptable without pulling pre-release dependency versions
+into `Cargo.lock`.
+
+**Practically**, this is a low-severity residual for openSzigno used the way
+it is documented to be used: run once per dossier from a terminal or a
+pipeline stage, exiting after that one attempt. A single local run gives an
+attacker at most one observation, nowhere near enough to mount the attack.
+The risk model changes if openSzigno is wrapped by a service that decrypts
+many attacker-submitted dossiers against one long-lived key and exposes, even
+indirectly, whether each decryption succeeded — see
+[SECURITY.md](../SECURITY.md#rsa-key-transport-decryption-chosen-ciphertext-and-timing-limits)
+for what such a service should do about it.
+
 ## Verification boundary
 
 `verify` ships the complete M2 subset: canonicalization, reference digests, the

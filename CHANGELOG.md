@@ -68,6 +68,29 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
   as an `online_fetch_failed` — naming the size and the limit instead of being
   passed over in silence.
 
+- `parse_rfc3339` (the RFC 3339 parser shared by `--at`, trusted-list dates,
+  and `xades:SigningTime`) bounded the day of month to 1..=31 regardless of
+  the month, so a calendar-impossible date like `2026-02-31T00:00:00Z` parsed
+  and silently became `2026-03-03`. It now validates real month lengths and
+  Gregorian leap years. `--at` with such a date is now a usage error (exit
+  2); a `SigningTime` with one still parses to `None`, which every caller
+  already treats as an absent, unauthenticated claim.
+- `extract`'s rollback of a partially written output tree used
+  `Iterator::all`, which stops at the first failed removal and never even
+  attempts the entries after it. It now attempts every recorded entry once,
+  in the same reverse creation order, regardless of earlier failures, and
+  still reports "files may remain" if any removal failed.
+- `extract --decrypt-key`'s RSA key-transport decryption now uses
+  `RsaPrivateKey::decrypt_blinded` instead of plain `decrypt`, closing the
+  timing side-channel on the private-key modular exponentiation
+  (RUSTSEC-2023-0071). The `deny.toml` ignore rationale for that advisory is
+  corrected: the RSA ciphertext being decrypted comes from the dossier under
+  analysis, not the operator, so a service that decrypts many
+  attacker-submitted dossiers against one key is exposed to a
+  Bleichenbacher/Marvin-style chosen-ciphertext attack; direct local use is
+  not. See [SECURITY.md](SECURITY.md) and
+  [docs/architecture.md](docs/architecture.md#decryption).
+
 ### Changed
 
 - Internal module split of the CLI crate: `crates/openszigno-cli/src/main.rs`

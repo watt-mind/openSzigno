@@ -82,6 +82,51 @@ not change any command's verdict.
 openSzigno never creates, signs, timestamps, or encrypts anything, so it holds
 a private key only for the duration of one `extract` run.
 
+### RSA key-transport decryption: chosen-ciphertext and timing limits
+
+`extract --decrypt-key` unwraps the CMS `RecipientInfo`'s encrypted
+content-encryption key with the operator's RSA private key. The RSA
+*ciphertext* being decrypted there is not something the operator chose: it is
+bytes read straight out of the untrusted `.es3` dossier. That makes this a
+textbook setup for a Bleichenbacher/Marvin-style chosen-ciphertext attack
+(RUSTSEC-2023-0071) against PKCS#1 v1.5 key transport — an attacker who can
+submit many crafted dossiers to the same key and observe how long decryption
+takes, or merely whether it succeeded or failed, can in principle recover the
+plaintext content-encryption key one dossier at a time.
+
+Two things bound this in openSzigno itself:
+
+- Decryption is **blinded** (`RsaPrivateKey::decrypt_blinded` with an
+  `OsRng`-seeded factor), which removes the timing signal that would otherwise
+  leak from the private-key modular exponentiation.
+- Every failure — a bad RSA unwrap, a bad content-key length, bad padding — is
+  reported as the same fixed `decryption failed`, so the *message* never tells
+  an attacker which step failed.
+
+What is **not** bounded by either of those: whether decryption succeeded or
+failed at all is still an observable two-way signal (an extracted file appears
+versus `decryption failed` is returned), and that boolean is the oracle a
+Bleichenbacher-style attack is built from — blinding the exponentiation does
+not close it, because the padding check that produces the signal is not a
+timing artifact of the exponentiation. `rsa` 0.9, the version this project is
+pinned to, has no constant-time or oracle-free PKCS#1 v1.5 decrypt API; see
+`deny.toml`'s `RUSTSEC-2023-0071` entry for the full analysis, including why
+`rsa` 0.10 is not yet adoptable.
+
+**This means a single local `extract --decrypt-key` run, by an operator
+decrypting their own dossier, is not meaningfully exposed**: the attacker
+would need to control the dossier *and* observe the outcome of many decryption
+attempts against the same key, which one interactive run does not offer.
+**The exposure becomes real once openSzigno is wrapped by a service** that
+decrypts many attacker-submitted dossiers against a long-lived key and lets an
+attacker distinguish success from failure across calls — directly, or through
+a timing difference elsewhere in that service's own request handling. Anyone
+building such a service on top of `extract --decrypt-key` should treat the
+decrypt outcome as sensitive: batch or delay it, do not return it to the
+submitter directly, and consider RSA-OAEP-only recipients if the sender side
+can be controlled, since OAEP is not the vulnerable padding here. See also
+[docs/architecture.md](docs/architecture.md#decryption).
+
 ## Network exposure
 
 **openSzigno makes no network connection unless you pass `--online` to

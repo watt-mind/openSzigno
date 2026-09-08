@@ -421,7 +421,7 @@ pub fn parse_rfc3339(text: &str) -> Option<UnixTime> {
     let hour = number(11..13)?;
     let minute = number(14..16)?;
     let second = number(17..19)?;
-    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+    if !(1..=12).contains(&month) || day < 1 || day > days_in_month(year, month) {
         return None;
     }
     if hour > 23 || minute > 59 || second > 60 {
@@ -464,6 +464,24 @@ pub fn format_rfc3339(time: UnixTime) -> String {
         (seconds / 60) % 60,
         seconds % 60
     )
+}
+
+/// The number of days in `month` (1..=12) of the proleptic Gregorian
+/// `year`, accounting for leap years (divisible by 4, except centuries
+/// unless also divisible by 400: 2024 and 2000 are leap, 2023 and 1900 are
+/// not).
+fn days_in_month(year: i64, month: i64) -> i64 {
+    const LENGTHS: [i64; 12] = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    if month == 2 && is_leap_year(year) {
+        29
+    } else {
+        LENGTHS[(month - 1) as usize]
+    }
+}
+
+/// Whether `year` is a leap year in the proleptic Gregorian calendar.
+fn is_leap_year(year: i64) -> bool {
+    (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
 }
 
 /// Howard Hinnant's `days_from_civil`, which is exact for the proleptic

@@ -28,6 +28,10 @@ des.workspace = true
 encoding_rs.workspace = true
 pem-rfc7468.workspace = true
 pkcs8.workspace = true
+# `OsRng`, to blind the RSA key-transport decryption in `decrypt/cms.rs`
+# against timing side-channels on the private exponentiation (see
+# `deny.toml` and `SECURITY.md` for what this does and does not mitigate).
+rand_core = { workspace = true }
 roxmltree.workspace = true
 rsa.workspace = true
 serde.workspace = true
