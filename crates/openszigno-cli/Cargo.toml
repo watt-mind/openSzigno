@@ -12,6 +12,9 @@ documentation = "https://github.com/watt-mind/openSzigno#readme"
 keywords = ["e-szigno", "es3", "dossier", "cli", "microsec"]
 categories = ["command-line-utilities", "parser-implementations"]
 
+[lints]
+workspace = true
+
 [[bin]]
 name = "openszigno"
 path = "src/main.rs"

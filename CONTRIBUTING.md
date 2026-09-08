@@ -74,6 +74,13 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
 
+`clippy::too_many_lines` is a workspace lint (`Cargo.toml`); `clippy.toml`
+sets `too-many-lines-threshold`. The ticket's target is 150, but the
+threshold is currently 484, the smallest value that passes today, because
+lowering it further means restructuring functions that are logic-adjacent
+work for other tickets. Lower the threshold whenever a change shrinks the
+function that set it; do not raise it to admit a new long function.
+
 Before a release build, also confirm:
 
 ```sh
@@ -88,6 +95,7 @@ CI additionally runs, on every pull request:
 | Crate manifests | `cargo package -p <crate> --no-verify --locked` for all three crates |
 | Release container | `docker build .`, then the CLI subcommands inside the image |
 | Workflow lint | `actionlint` with `SHELLCHECK_OPTS=--severity=warning` |
+| Source file length | `python3 scripts/check-file-length.py` |
 
 Any of these can be reproduced locally with the same command. The
 container job runs `inspect`, `list`, `validate-structure`, `extract`, and
@@ -123,6 +131,16 @@ the same pull request, and CI lints the Markdown and checks relative links.
 - **Stable names.** A code, flag, field, or exit status appears in the docs
   in the same pull request that adds it, and `CHANGELOG.md` gets an entry
   under Unreleased in Keep a Changelog form.
+- **File length.** Keep files under 800 lines; allowlisted files may only
+  shrink. `scripts/check-file-length.py` fails a `*.rs` file under
+  `crates/*/src` that exceeds 800 physical lines, or one under
+  `crates/*/tests` that exceeds 1500, unless it is named in
+  `scripts/file-length-allowlist.txt` with the size it was allowlisted at;
+  an allowlisted file that grows past that recorded size fails too, even
+  while still under its own limit. The allowlist exists only for files
+  that already exceeded the limit before the guardrail was added and whose
+  reduction is logic-adjacent work tracked elsewhere; it is not a way to
+  admit a new oversized file.
 - **Never claim validity.** No sentence may state or imply that a signature,
   timestamp, certificate, or dossier is valid unless the code that proves it
   exists and is tested.

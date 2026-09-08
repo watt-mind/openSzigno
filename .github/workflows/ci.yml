@@ -51,6 +51,8 @@ jobs:
         run: npx --yes markdownlint-cli2@0.18.1 "**/*.md" "#target" "#refs" "#tmp" "#samples" "#node_modules"
       - name: Check relative links and anchors
         run: python3 scripts/check-doc-links.py
+      - name: Source file length
+        run: python3 scripts/check-file-length.py
 
   test:
     name: Test (${{ matrix.os }})

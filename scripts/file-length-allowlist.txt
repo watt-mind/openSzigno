@@ -1,0 +1,17 @@
+# Files that already exceeded scripts/check-file-length.py's limit when the
+# guardrail was added (LAB-260). Each line is `<path> <size>`, where <size>
+# is the physical line count recorded at the time the file was allowlisted.
+# The script fails if a listed file grows past its recorded size, even
+# though it stays under the file's own 800/1500-line limit: these files may
+# only shrink from here.
+#
+# Reducing them is logic-adjacent work (splitting verification logic, not
+# moving code verbatim) and is owned by other tickets, not LAB-260.
+crates/openszigno-verify/src/certs.rs 1617
+crates/openszigno-verify/src/revocation.rs 1582
+crates/openszigno-verify/src/tsa.rs 1428
+crates/openszigno-core/src/decrypt.rs 1008
+crates/openszigno-verify/src/signature.rs 930
+crates/openszigno-verify/src/trustlist.rs 925
+crates/openszigno-verify/tests/revocation.rs 2110
+crates/openszigno-cli/tests/cli.rs 1611

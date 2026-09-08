@@ -854,6 +854,12 @@ The split is internal; the crate's public API is unchanged.
 | `trustlist` | ETSI TS 119 612 trusted lists, and the qualified status of a validated chain. |
 | `trust`, `policy`, `codes`, `report`, `c14n`, `embedded` | The injected I/O seams, the pinned algorithm and limit policy, the check codes, the JSON report types, canonicalization, and the whole-document reads the CLI's `--online` fetcher needs. |
 
+`scripts/check-file-length.py`, run in CI, keeps a new `src` file under 800
+lines and a new `tests` file under 1500 (see
+[CONTRIBUTING.md](../CONTRIBUTING.md)); the modules above that already
+exceeded that when the guardrail was added are named in
+`scripts/file-length-allowlist.txt` and may only shrink from there.
+
 ### Reference scope
 
 Because the e-dossier specification mandates *which elements* a signature must

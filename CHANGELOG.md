@@ -25,6 +25,25 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
   check code, status, message, ordering and JSON field is unchanged, and the
   crate's public API keeps the paths it had. See
   [docs/architecture.md](docs/architecture.md#module-map).
+- `crates/openszigno-verify/tests/common/mod.rs` (2394 lines) was split into
+  `pki.rs`, `dossier.rs`, `signer.rs`, `timestamps.rs`, `cms.rs` and
+  `trustlist.rs`, with `mod.rs` reduced to module declarations and `pub use`
+  re-exports; every existing `use common::{...}` import keeps compiling
+  unchanged. Code moved verbatim, no behaviour change. See
+  [docs/testing.md](docs/testing.md#test-layout).
+
+### Added
+
+- `scripts/check-file-length.py`, run in CI's Documentation job, fails a
+  tracked `crates/*/src/*.rs` file over 800 physical lines or a
+  `crates/*/tests/*.rs` file over 1500, with a shrink-only allowlist in
+  `scripts/file-length-allowlist.txt` for files that already exceeded the
+  limit before the guardrail was added. See
+  [CONTRIBUTING.md](CONTRIBUTING.md#documentation).
+- `clippy::too_many_lines` is now a workspace lint, with `clippy.toml`
+  setting `too-many-lines-threshold`. See
+  [CONTRIBUTING.md](CONTRIBUTING.md#required-checks) for the current
+  threshold and the plan to lower it.
 
 ## [0.4.0] - 2026-09-08
 
