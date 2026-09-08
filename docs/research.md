@@ -2,58 +2,30 @@
 
 Last reviewed: 2026-09-07
 
-## What an `.es3` file is
-
-For this project, `.es3` means the Hungarian Microsec e-Szignó **electronic
-dossier** (e-akta) format, not another unrelated format that happens to use
-the same file extension. It is an XML document, normally rooted at
-`es:Dossier`, which contains document payloads, metadata, signatures and/or
-timestamps. Payloads are Base64 encoded even when the original payload is
-text or XML.
-
-The default e-Szignó namespace is:
-
-```text
-https://www.microsec.hu/ds/e-szigno30#
-```
-
-Special-purpose dossiers may use another compatible e-dossier namespace, for
-example the Hungarian company-court (e-cégeljárás) dossiers. The tool must
-identify a dossier by a namespace-aware root-element check, not by extension
-alone. Support for compatible non-default namespaces is milestone M1 in
-[roadmap.md](roadmap.md).
-
 ## Primary sources
 
-| Source | Why it matters |
-| --- | --- |
-| [Microsec e-dossier specification, v1.2 (English)](https://srv.e-szigno.hu/edossier) | Primary prose specification. It says its verbal requirements are authoritative over the XSD. |
-| [Default e-dossier XSD](https://www.microsec.hu/ds/e-szigno30.xsd) | Machine-readable shape of the default schema; deliberately permissive for compatibility, so it is not the only validator. |
-| [IANA media-type registration](https://www.iana.org/assignments/media-types/application/vnd.eszigno3+xml) | Registers `application/vnd.eszigno3+xml`, `.es3`/`.et3`, and UTF-8 or ISO-8859-2 XML declarations. |
-| [Microsec `eszigno3` CLI reference](https://download.e-szigno.hu/eszigno/docs/eszigno3_ref.html) | Compatibility evidence for practical operations: list, export, validate, encrypt, and decrypt. Not an open-source dependency. |
+The maintained format guide is
+[ES3 specification and implementation map](es3-specification.md). It records
+source versions, requirement IDs, code/test links, and unassessed areas.
+The full source inventory and local-cache checksums are in
+[references.md](references.md).
 
-## Container model relevant to the MVP
+The implementation has used the English v1.2 prose as its baseline. The
+Hungarian v1.5 text needs a full comparison before that baseline can be
+considered complete. The guide records the confirmed empty-document exception
+and keeps project compatibility choices separate from format requirements.
 
-For each `es:Document` under `es:Documents`, the MVP needs to read:
+Compatible namespaces (M1) and the first verification phase (M2 phase 1) have
+shipped. Current behavior belongs in [architecture.md](architecture.md), and
+remaining work in [roadmap.md](roadmap.md).
 
-- `es:DocumentProfile`: title, creation time, MIME type, declared source size,
-  and `OBJREF`;
-- the matching `ds:Object` payload identified by `OBJREF`;
-- `es:BaseTransform/es:Transform` in declared order.
+## Additional implementation research
 
-The documented transform chain is:
-
-```text
-zip? -> encrypt? -> base64
-```
-
-Extraction reverses that chain. The initial implementation supports only
-`base64` and `zip -> base64`; it must report `encrypt` as encrypted/unsupported
-rather than treating it as a corrupt payload or attempting ad-hoc decryption.
-
-The dossier can additionally hold document-level and dossier-level XMLDSig /
-XAdES signatures and timestamps. Their presence is metadata for the MVP; it
-is **not** evidence of a valid signature.
+The [related documentation register](references.md#related-documentation-and-test-resources)
+adds official W3C interoperability cases, NIST PKITS, European Commission DSS,
+Apache Santuario, OpenSSL verification options, and the document-signing EKU
+and distinguished-name matching RFCs. These provide candidate independent
+checks; none is an ES3 conformance oracle by itself.
 
 ## Existing implementations found
 
@@ -80,13 +52,11 @@ to reject or safely bound at least:
   collisions;
 - unsupported transforms and unknown namespaces without an explicit opt-in.
 
-Signature verification is a separate security-sensitive feature, planned as
-milestone M2 in [roadmap.md](roadmap.md). It requires
-strict same-document ID resolution, reference-scope enforcement,
-canonicalization, algorithm policy, certificate-path and revocation checking,
-and timestamp validation. Until all of those are implemented and tested,
-commands may report *signature material present*, but must not report
-*signature valid*.
+Signature verification is a separate security-sensitive feature. M2 phase 1
+checks reference digests, signature values, scope, and a certificate-path
+subset. Full XAdES, revocation, and timestamp checks remain unfinished.
+`verify` can report `invalid` or `indeterminate`, never `valid`; the other
+commands perform no cryptographic verification.
 
 ## Language decision
 

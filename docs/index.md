@@ -5,8 +5,9 @@ command reference.
 
 | Document | Contents |
 | --- | --- |
+| [es3-specification.md](es3-specification.md) | Source/version scope, stable requirement IDs, implementation and test mapping, project policy distinctions, and known conformance gaps. |
 | [architecture.md](architecture.md) | Canonical reference: crate shape, format scope, parser safety model, limits, JSON envelope, stable error and warning codes, exit statuses, extraction policy, the `verify` pipeline with its check codes and algorithm policy, and the verification boundary. |
-| [research.md](research.md) | What an `.es3` e-dossier is, the primary Microsec and IANA sources, the container and transform model, other implementations reviewed, and the security conclusions that shaped the design. |
+| [research.md](research.md) | Research entry point, related implementation resources, other implementations reviewed, and the security conclusions that shaped the design. |
 | [testing.md](testing.md) | Test layout, how to run tests and coverage, the public fixture policy, and the private opt-in smoke tests. |
 | [verify-design.md](verify-design.md) | M2 design proposal for XMLDSig/XAdES verification: Rust ecosystem survey, pipeline stages and stable check codes, JSON result shape, trust and revocation policy, phased delivery. |
 | [references.md](references.md) | Index of the primary specifications, standards, RFCs, trust-list and CA material the project relies on, with canonical links and checksums; the files themselves live in the gitignored `refs/` cache. |

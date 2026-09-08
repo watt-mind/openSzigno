@@ -4,6 +4,11 @@ This document is the canonical reference for the openSzigno JSON envelope,
 stable codes, limits, parser safety model, and extraction policy. Anything
 described here is intended to be stable for a given `schema_version`.
 
+For upstream format sources and their relationship to code and tests, see
+[ES3 specification and implementation map](es3-specification.md). That guide
+distinguishes format requirements from this tool's policy and compatibility
+choices; this document remains the authority for the openSzigno API.
+
 ## Goals
 
 - Provide distributable, cross-platform binaries.
@@ -192,10 +197,12 @@ the codes `dangling_objref`, `document_without_profile`,
 `signature_inventory_truncated`, and never change an exit
 status by themselves.
 
-- Every `Document` must carry a `DocumentProfile`; one holding only a
-  `ds:Object` is non-conformant. Such a document is skipped, is not counted in
+- A `Document` without `DocumentProfile` is skipped, is not counted in
   `documents`, and produces `document_without_profile` naming its source
-  position among `Document` elements.
+  position among `Document` elements. The Hungarian v1.5 specification has
+  an exception for a document holding only an empty `ds:Object`; the parser
+  tolerates a broader set of profile-less documents. See
+  [confirmed version differences](es3-specification.md#confirmed-version-differences).
 - `SourceSize` is optional in a `DocumentProfile`; company-court dossiers
   occur without it. When it is present the `sizeValue`/`sizeUnit` and
   declared-size-limit rules apply unchanged and the decoded length must match

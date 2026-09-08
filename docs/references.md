@@ -2,8 +2,11 @@
 
 Last built: 2026-09-07
 
+For the source-to-code mapping, version caveats, and implementation gaps, see
+[ES3 specification and implementation map](es3-specification.md).
+
 This file indexes the local reference-document cache under `refs/`
-(gitignored; not committed). Every file was fetched with
+(gitignored; not committed). Original cache entries were fetched with
 `curl -L --fail --retry 3` and a normal User-Agent, then checked by content
 type, size, and first lines to rule out HTML error pages. Checksums are
 `sha256sum` of the file exactly as stored under `refs/`.
@@ -27,10 +30,10 @@ committed to git except this index file itself.
 
 | Title | Version / date | Canonical URL | Local path | SHA-256 | Licence / redistribution | Why it matters |
 | --- | --- | --- | --- | --- | --- | --- |
-| e-Szignó CA — Specification of the e-Dossier Format (HTML landing page) | v1.2 (English), page undated | <https://srv.e-szigno.hu/edossier> | `refs/es3/edossier-spec.html` | `a9df6bf99d8753b956336cff5c9eaae680464259132a4eaa0cf4678ce694d0fe` | © Microsec Ltd., publicly published spec page; no explicit redistribution licence found | Primary prose specification for `.es3`; states its verbal requirements are authoritative over the XSD. No separate PDF link was found on the page itself (only a link out to the XSD and to the unrelated NMHH trusted-list PDF). |
-| Az e-akta formátum specifikációja (e-akta format specification) | v1.5 | <http://static.e-szigno.hu/e-akta/e-akta_specifikacio_v1.5.pdf> | `refs/es3/e-akta_specifikacio_v1.5.pdf` | `63e5759c0fe70e6f2a4c7c4a781759f92ea2c507c8086c1c0e95f56a68330390` | © Microsec Ltd., publicly hosted PDF; no explicit redistribution licence found | Hungarian-language companion/underlying spec for the e-akta (e-dossier) container; directly relevant to `es:Dossier`/`es:Document` structure and to cross-checking the English `edossier-spec.html` prose. |
+| e-Szignó CA — Specification of the e-Dossier Format (HTML landing page) | v1.2 (English), 2011-02-04 | <https://srv.e-szigno.hu/edossier> | `refs/es3/edossier-spec.html` | `a9df6bf99d8753b956336cff5c9eaae680464259132a4eaa0cf4678ce694d0fe` | © Microsec Ltd., publicly published spec page; no explicit redistribution licence found | Primary prose specification for `.es3`; states its verbal requirements are authoritative over the XSD. No separate PDF link was found on the page itself (only a link out to the XSD and to the unrelated NMHH trusted-list PDF). |
+| Az e-akta formátum specifikációja (e-akta format specification) | v1.5, 2015-02-20 | <https://static.e-szigno.hu/e-akta/e-akta_specifikacio_v1.5.pdf> | `refs/es3/e-akta_specifikacio_v1.5.pdf` | `63e5759c0fe70e6f2a4c7c4a781759f92ea2c507c8086c1c0e95f56a68330390` | © Microsec Ltd., publicly hosted PDF; no explicit redistribution licence found | Hungarian-language companion/underlying spec for the e-akta (e-dossier) container; directly relevant to `es:Dossier`/`es:Document` structure and to cross-checking the English `edossier-spec.html` prose. |
 | e-Szignó default e-dossier XSD (`e-szigno30#` namespace) | schema `version="3.0"`-family, undated | <https://www.microsec.hu/ds/e-szigno30.xsd> | `refs/es3/e-szigno30.xsd` | `7a3fd72e480cd032cebfeb01ab820c82d8c233bc3747e5a04001249cb710e716` | Published as a normative machine-readable artefact by Microsec; no explicit licence text found | The default namespace XSD (`https://www.microsec.hu/ds/e-szigno30#`) the project's root-element/namespace check is built against; deliberately permissive, so used only as a shape check, not sole validator. |
-| IANA media-type registration: `application/vnd.eszigno3+xml` | registration record, created 2007-07-31 | <https://www.iana.org/assignments/media-types/application/vnd.eszigno3+xml> | `refs/es3/iana-eszigno3.txt` | `d930a430ffbdbabcdfe9b550e534b18ccfa60e8a63c43fe16edf28e902e1ee94` | US Government work / IANA registry data, public domain in practice | Registers `application/vnd.eszigno3+xml`, `.es3`/`.et3` extensions, and confirms UTF-8/ISO-8859-2 as the only expected encodings — used to validate the extractor's MIME/extension assumptions. |
+| IANA media-type registration: `application/vnd.eszigno3+xml` | registration record, created 2007-07-31 | <https://www.iana.org/assignments/media-types/application/vnd.eszigno3+xml> | `refs/es3/iana-eszigno3.txt` | `d930a430ffbdbabcdfe9b550e534b18ccfa60e8a63c43fe16edf28e902e1ee94` | Public registry record; redistribution terms not established in this inventory | Registers `application/vnd.eszigno3+xml`, `.es3`/`.et3` extensions, and confirms UTF-8/ISO-8859-2 as the only expected encodings — used to validate the extractor's MIME/extension assumptions. |
 | Microsec `eszigno3` CLI reference ("eszigno3 használati útmutató") | undated (Hungarian-titled, English-content usage guide) | <https://download.e-szigno.hu/eszigno/docs/eszigno3_ref.html> | `refs/es3/eszigno3_ref.html` | `c4993089fa01980b71cdd201f6982c06654b6e87db267f869bedda82931e7c65` | © Microsec Ltd., publicly published reference page; no explicit redistribution licence found | Compatibility evidence for practical CLI operations (list/export/validate/encrypt/decrypt) against real e-Szignó tooling behaviour; not an open-source dependency. |
 | Aláírási szabályzatok (SZIGORÍTOTT / EGYSZERŰSÍTETT aláírási szabályzat — signature policies, strict and simplified) | undated | <https://static.e-szigno.hu/anyagok/alairasi_szabalyzatok.pdf> | `refs/es3/alairasi_szabalyzatok.pdf` | `c1303b67bc4200a04ac7ac6363625cc16e82a32e7094240a0659e304ddc8038e` | © Microsec Ltd., publicly hosted PDF; no explicit redistribution licence found | Microsec's own signature-policy documents (Hungarian: "aláírási szabályzat"), relevant background for `es:SignatureProfile`/policy handling and for understanding what "signature profile" means operationally at Microsec, not only in the container XSD. |
 | Older/other e-Szignó XSD versions on microsec.hu | — | tried `e-szigno20.xsd`, `e-szigno.xsd`, `e-akta.xsd` under `https://www.microsec.hu/ds/` | — (not found) | — | — | All returned HTTP 404; no other reachable XSD version was found under that path. Only `e-szigno30.xsd` is currently published there. |
@@ -60,7 +63,7 @@ committed to git except this index file itself.
 | Canonical XML Version 1.1 | REC, 2008-05-02 | <https://www.w3.org/TR/2008/REC-xml-c14n11-20080502/> | `refs/xmldsig/xml-c14n11-20080502.html` | `d91a016ac03391255c64bd5f90035b292f1ee97c3ad4076ea8b33ef11fd9673f` | W3C Document License | C14N 1.1, fixes the xml:* attribute inheritance defect in 1.0; needed for the differential-testing corpus described in `docs/verify-design.md` section 1.3. |
 | Exclusive XML Canonicalization Version 1.0 | REC, 2002-07-18 | <https://www.w3.org/TR/2002/REC-xml-exc-c14n-20020718/> | `refs/xmldsig/xml-exc-c14n-20020718.html` | `10b1ec71542db546b311a3e600589339505b9099bc60affafa4204ece31807e3` | W3C Document License | Exclusive C14N — the algorithm most commonly used by real-world XMLDSig/XAdES signatures (including e-Szignó output) because it tolerates being embedded in other documents. |
 | XML Signature Best Practices | W3C Note, 2013-04-11 | <https://www.w3.org/TR/2013/NOTE-xmldsig-bestpractices-20130411/> | `refs/xmldsig/xmldsig-bestpractices-20130411.html` | `f2e97d3da2a095ffd9444756998b8f4ba99f0c3f61fb16bb1ec5da17a0c265c7` | W3C Document License | Directly informs the threat-model section of `docs/verify-design.md` (signature wrapping, algorithm confusion, reference counting) — the project's own threat table cites the same concerns. |
-| W3C Canonical XML test vectors | — | (searched under `w3.org/TR/xml-c14n` interoperability/test-case sections) | — (not found as a separate downloadable package) | — | — | The REC itself (`xml-c14n-20010315.html`, above) contains its worked examples inline; no separate standalone test-vector archive could be located at an official W3C URL. Differential-testing fixtures will need to be hand-built or sourced from library test suites (e.g. Apache Santuario), which is out of scope for this reference cache. |
+| W3C C14N/XMLDSig interoperability cases | WG Note, 2008-06-10 | <https://www.w3.org/TR/2008/NOTE-xmldsig2ed-tests-20080610/> | — (link only) | — | Review W3C document and individual test-file notices before importing | Corrects the initial unsuccessful search: includes C14N 1.1 cases and references to legacy XMLDSig tests. Select cases relevant to the supported algorithm subset; see the related-documentation register below. |
 
 ## 4. `xades/` — ETSI XAdES / CAdES / validation model / trusted lists
 
@@ -127,9 +130,9 @@ committed to git except this index file itself.
   documents by design (HTTP 400) — the actual schema documents live under
   `e-cegjegyzek.hu/schema/<year>/e-cegeljaras<year>.xsd` and were all four
   obtained successfully (2007, 2009, 2012, 2014), plus a bonus 2023 version.
-- **`xmldsig/`**: no standalone official W3C Canonical XML test-vector package
-  could be located; the REC's own inline examples are the only official source
-  found.
+- **`xmldsig/`**: the initial test-vector search was incomplete. The
+  follow-up found the W3C C14N/XMLDSig interoperability note; it is linked
+  above and below, but no test archive has been imported.
 - **`trust/`**: the `e-szigno.hu/ca-certificates` page is a client-rendered SPA
   shell with no certificate links in the static HTML; the two root certificates
   were instead obtained directly from their stable, documented `.crt` URLs and
@@ -140,7 +143,7 @@ committed to git except this index file itself.
   environment; a university-hosted mirror of the same PDF was used instead and
   is flagged as such in the table.
 
-## Verification method used for every download
+## Verification method used for original cache downloads
 
 For every file: (1) `curl -L --fail --retry 3` with a descriptive User-Agent
 identifying this as a research fetch; (2) `file` and/or `head -c` inspection
@@ -150,3 +153,121 @@ title tags) rather than an HTML error/redirect page; (3) size sanity-checked
 against `ls -l`; (4) `sha256sum` recorded above. All root certificates were
 additionally parsed with `openssl x509` to confirm subject and compute an
 independent SHA-256 fingerprint.
+
+## Related documentation and test resources
+
+Web sources checked on 2026-09-07. These are link-only additions: no downloaded
+file or checksum is claimed. Suggestions describe potential project uses,
+not work already implemented. Review each source's current terms before
+copying documents, code, or test assets; no third-party material is relicensed
+by this inventory.
+
+| Source | Why it is useful here | Application and limits |
+| --- | --- | --- |
+| [W3C C14N 1.1 and XMLDSig interoperability tests](https://www.w3.org/TR/2008/NOTE-xmldsig2ed-tests-20080610/) | Independent canonicalization/reference-processing cases and legacy interop references. | ES3-008: inventory cases against our supported algorithms. C14N 1.1 remains unsupported; expected rejection is distinct from a failed implementation of a supported algorithm. The note is nonnormative. |
+| [NIST Public Key Infrastructure Testing / PKITS](https://csrc.nist.gov/Projects/pki-testing) | Path-validation test descriptions and data, plus a separate path-discovery suite. | ES3-009: derive synthetic boundary cases for constraints and competing chains. PKITS targets X.509/RFC 3280; account for later standards and our algorithm policy before adopting expectations. |
+| [European Commission DSS documentation](https://ec.europa.eu/digital-building-blocks/DSS/webapp-demo/doc/dss-documentation.html) | Implementation guidance for XAdES, validation policy, trust, revocation, timestamps, and reports. | ES3-010: candidate local comparison tool for later phases. Pin its version and policy; its generic XML validation does not establish ES3-specific scope. Use synthetic inputs locally, not private dossiers in the hosted demo. |
+| [Apache Santuario secure-validation FAQ](https://santuario.apache.org/javafaq.html) | Resolver behavior, namespace/canonicalization pitfalls, and secure-validation restrictions. | ES3-008: candidate independent XMLDSig comparison implementation. Keep external resource access disabled and reconcile policy differences instead of expecting identical verdicts automatically. |
+| [OpenSSL 3.5 verification options](https://docs.openssl.org/3.5/man1/openssl-verification-options/) | Explicit controls for trust inputs, verification time, purpose, and chain processing. | ES3-009: document exact settings for a local differential harness. Avoid implicit system trust; purpose and strictness must be chosen deliberately. |
+| [RFC 9336: Document-signing EKU](https://www.rfc-editor.org/rfc/rfc9336.html) | Standardized document-signing purpose, relevant to the current EKU gap. | ES3-009: review critical and noncritical EKU behavior together with RFC 5280 section 4.2.1.12. |
+| [RFC 4518: LDAP internationalized string preparation](https://www.rfc-editor.org/rfc/rfc4518.html) | String preparation used by distinguished-name matching rules. | ES3-009: research input for replacing raw DER equality, read with RFC 5280 section 7.1; do not apply generic Unicode normalization blindly. |
+
+Already indexed ETSI EN 319 102-1 V1.4.1 and EN 319 132-1 V1.3.1 remain
+useful versioned validation and XAdES references. Their presence in the cache
+is not a claim that they are the newest revisions or that all their rules are
+implemented.
+
+For ES3 itself, the Hungarian v1.5 PDF is dated 2015-02-20. Its change log and
+sections 4–5 warrant priority over searching for more generic tutorials. The
+confirmed version differences are recorded in
+[the implementation map](es3-specification.md#confirmed-version-differences).
+
+## Microsec SDK and standards discovery
+
+Checked on 2026-09-07. The [SDK page](https://e-szigno.hu/e-szigno-sdk)
+and [laws and standards page](https://e-szigno.hu/jogszabalyok-es-szabvanyok)
+render through JavaScript. Their public page content was read through the
+same site's `cms.page` API. No SDK was installed or registered, and no
+upstream documents were added to tracked repository files.
+
+### SDK documentation as compatibility evidence
+
+The existing [eszigno3 CLI reference](https://download.e-szigno.hu/eszigno/docs/eszigno3_ref.html)
+and the additional [XSign developer reference](https://download.e-szigno.hu/eszigno/docs/Xsign_ref.html)
+both identify version 3.5.2.6. They describe vendor behavior, not a replacement
+for the ES3 or ETSI specifications. The SDK page also mentions MELASZ-Ready
+1.0/2.0 support; that is a research lead, not evidence of openSzigno support.
+
+For a future synthetic comparison harness, record these CLI settings:
+
+- `list_dossier` defaults `ignore_validation_errors` to `yes`; successful
+  process exit alone is not a signature-verification result.
+- Disabling list-time checking requires both `validate no` and
+  `check_qualification no`.
+- `ignore_custom_timestamp` defaults to `yes`; timestamp comparisons need
+  explicit settings.
+
+The XSign reference documents signature levels, revocation modes, trust-list
+inputs, and grace-period handling. Compare checks under an explicit policy
+and fixed inputs; do not expect its overall verdict to match our phase-1
+ceiling. Any eventual SDK use requires checking its applicable license terms.
+
+### Additional standards to consult
+
+The vendor's standards page is a discovery index, not a guarantee that a
+listed revision is current. These linked editions were opened at their
+primary publishers; they are link-only additions with no cache checksum.
+
+| Source | Project use |
+| --- | --- |
+| [ETSI TS 101 903 V1.4.2](https://www.etsi.org/deliver/etsi_ts/101900_101999/101903/01.04.02_60/ts_101903v010402p.pdf) | ES3-010: the legacy XAdES revision named by the Hungarian v1.5 specification; the earlier cache contained V1.4.1 only. |
+| [ETSI EN 319 412-5 V2.4.1](https://www.etsi.org/deliver/etsi_en/319400_319499/31941205/02.04.01_60/en_31941205v020401p.pdf) | ES3-009/010: QCStatements syntax and certificate-type declarations for future qualification work. Parsing a statement alone does not establish qualified status. |
+| [ETSI EN 319 422 V1.1.1](https://www.etsi.org/deliver/etsi_en/319400_319499/319422/01.01.01_60/en_319422v010101p.pdf) | ES3-010: timestamp protocol/token profiles to read alongside RFC 3161 and RFC 5816. |
+| [RFC 6818](https://www.rfc-editor.org/rfc/rfc6818.html) | ES3-009: updates and clarifications to RFC 5280; include it in the path-validation requirements audit. |
+| [ETSI TS 119 312 V1.4.3](https://www.etsi.org/deliver/etsi_ts/119300_119399/119312/01.04.03_60/ts_119312v010403p.pdf) | ES3-008: cryptographic-suite guidance for a future versioned algorithm policy; do not automatically widen the current allowlist. |
+
+The page also links eIDAS and Hungarian legal materials, plus trust-provider
+operating and signing-device standards. Those are context for later legal or
+qualification analysis, not automatically requirements for an offline ES3
+reader. Check current official consolidated law and applicable dates before
+making legal-effect or compliance claims; this register makes neither.
+
+## Dated Microsec CLI reference archive
+
+An exact HTML snapshot of the
+[eszigno3 CLI reference](https://download.e-szigno.hu/eszigno/docs/eszigno3_ref.html)
+was saved locally on 2026-09-07. This is a gitignored backup under `refs/`,
+not an archive published or preserved in Git history. Linked assets are not
+included. Redistribution permission has not been established.
+
+| Field | Recorded value |
+| --- | --- |
+| Retrieved at (UTC) | `2026-09-07T20:17:51.975677+00:00` |
+| HTML path | `refs/es3/archive/2026-09-07T201751Z/eszigno3_ref.html` |
+| Retrieval metadata | `refs/es3/archive/2026-09-07T201751Z/metadata.json` |
+| Size | 468273 bytes |
+| SHA-256 | `c4993089fa01980b71cdd201f6982c06654b6e87db267f869bedda82931e7c65` |
+
+This snapshot was fetched with Python's HTTP client, checked as UTF-8 HTML,
+and hashed again after writing. Metadata records the source and final URLs,
+response headers, retrieval time, size, checksum, and archive scope. Its
+checksum matches the original CLI reference cache entry above.
+
+## EU Digital Identity Wallet research leads
+
+The [EUDI organization](https://github.com/eu-digital-identity-wallet) and
+the following repository READMEs were checked on 2026-09-07. These are
+link-only research leads; no code was imported or audited. Pin a release or
+commit before using any implementation for comparisons.
+
+| Resource | Suggested use for openSzigno | Boundary |
+| --- | --- | --- |
+| [ETSI 119 6x2 consultation library](https://github.com/eu-digital-identity-wallet/eudi-lib-kmp-etsi-1196x2) | Highest relevance for future trust-list work: separates trust-anchor discovery from context-specific chain validation. Its `consultation-dss` module supports ETSI TS 119 612 Trusted Lists through DSS. | Wallet-oriented ETSI TS 119 602 Lists of Trusted Entities and ETSI TS 119 612 trust-service lists serve different contexts. Do not transfer wallet trust policy into document-signature verification. Apache-2.0. |
+| [Architecture and Reference Framework](https://github.com/eu-digital-identity-wallet/eudi-doc-architecture-and-reference-framework) | Background on wallet architecture and trust roles; tagged versions provide a useful model for versioned requirements documentation. | Wallet specifications do not define ES3. The README identifies CC BY 4.0 for this material. |
+| [JVM trust manager](https://github.com/eu-digital-identity-wallet/eudi-lib-jvm-trust-manager-kt) | Secondary comparison material for certificate-path and revocation interfaces. | Targets ISO/IEC 18013-5 mobile documents, including MSO and IssuerAuth checks; it is not an ES3/XAdES verifier. Apache-2.0. |
+
+For this project, prioritize the consultation library's trust-source boundary
+when designing later verification phases. Discovery, list authenticity and
+freshness, certificate purpose, and signature verification need explicit
+requirements. These links do not change the current user-supplied trust-store
+model or the `indeterminate` verification ceiling.
