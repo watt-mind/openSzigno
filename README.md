@@ -57,18 +57,18 @@ cargo install openszigno-cli --locked
 Shell and PowerShell installers, for a machine with no Rust toolchain:
 
 ```sh
-curl --proto '=https' --tlsv1.2 -LsSf https://github.com/watt-mind/openSzigno/releases/download/v0.5.0/openszigno-cli-installer.sh | sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/watt-mind/openSzigno/releases/download/v0.5.1/openszigno-cli-installer.sh | sh
 ```
 
 ```powershell
-powershell -ExecutionPolicy Bypass -c "irm https://github.com/watt-mind/openSzigno/releases/download/v0.5.0/openszigno-cli-installer.ps1 | iex"
+powershell -ExecutionPolicy Bypass -c "irm https://github.com/watt-mind/openSzigno/releases/download/v0.5.1/openszigno-cli-installer.ps1 | iex"
 ```
 
 Container image (`linux/amd64` and `linux/arm64`), for CI and sandboxed
 pipelines. It is `FROM scratch` and runs as the numeric user `65532`:
 
 ```sh
-docker run --rm -v "$PWD:/work" ghcr.io/watt-mind/openszigno:0.5.0 inspect /work/file.es3 --json
+docker run --rm -v "$PWD:/work" ghcr.io/watt-mind/openszigno:0.5.1 inspect /work/file.es3 --json
 ```
 
 Otherwise take an archive and the `.sha256` file beside it from the

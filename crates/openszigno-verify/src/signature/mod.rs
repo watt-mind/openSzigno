@@ -10,6 +10,7 @@
 
 mod collect;
 mod signed_info;
+mod structure;
 
 pub use collect::TimestampSource;
 

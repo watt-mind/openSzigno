@@ -871,8 +871,11 @@ store remain the only external material a run consults on its own.
 Per `ds:Signature`, in document order, stopping early where continuing would be
 meaningless:
 
-1. **Structure and policy.** `ds:SignedInfo` and `ds:SignatureValue` are
-   present; the signature sits at `//es:Document/ds:Signature`,
+1. **Structure and policy.** The element children of `ds:Signature`, its
+   `ds:SignedInfo`, and each `ds:Reference` match the cardinality and order
+   the XMLDSig schema fixes (see
+   [XMLDSig structural rules](#xmldsig-structural-rules)); the signature sits
+   at `//es:Document/ds:Signature`,
    `//es:Dossier/ds:Signature`, or inside an `xades:CounterSignature` (see
    [Countersignatures](#countersignatures)); the canonicalization, signature,
    and digest algorithms are inside the pinned allowlist; every transform is
@@ -916,6 +919,45 @@ meaningless:
    asked about: its revocation is not a question the PKI it roots can answer,
    and asking would invite a self-signed CRL to speak for itself.
 
+### XMLDSig structural rules
+
+Stage A1 reads each critical child of a signature by name. That is only sound
+once something has established that exactly one such child exists, in the
+position the schema puts it: a second `ds:SignatureValue` appended after the
+real one, or a `ds:DigestValue` placed before its `ds:DigestMethod`, would
+otherwise let one consumer read what another ignores while openSzigno still
+reported the first copy as verified.
+
+So stage A1 first walks the element children of `ds:Signature`, of its
+`ds:SignedInfo`, and of each `ds:Reference` in document order and checks the
+sequence against the XMLDSig schema:
+
+| Element | Required sequence |
+| --- | --- |
+| `ds:Signature` | one `ds:SignedInfo`, one `ds:SignatureValue`, at most one `ds:KeyInfo`, then zero or more `ds:Object`. |
+| `ds:SignedInfo` | one `ds:CanonicalizationMethod`, one `ds:SignatureMethod`, then one or more `ds:Reference`. |
+| `ds:Reference` | at most one `ds:Transforms`, then one `ds:DigestMethod` and one `ds:DigestValue`. |
+
+A duplicated child, a child out of that order, or a child the sequence does not
+name is a `sig_structure_invalid` failure whose message says which element and
+which of the three it is. The verdict is `invalid`, as it is for every failed
+check, and no later stage runs, so such a signature can never reach a passed
+`signature_value_ok`.
+
+The schema's extension points stay open. The content of `ds:Object` and of
+`ds:KeyInfo` is unconstrained here and is never inspected by this pass, so
+XAdES `xades:QualifyingProperties`, which live inside a `ds:Object`, and any
+key material a `ds:KeyInfo` carries are unaffected. The `Id` attribute of
+`ds:Signature` is untouched. Whitespace text and comments between children are
+ignored, so an indented signature reads the same as a compact one. What the
+schema does *not* allow is a foreign-namespace element as a direct child of
+`ds:Signature`, `ds:SignedInfo`, or `ds:Reference`, so one appearing there is a
+structure error too.
+
+Only duplication, order, and unexpected children are decided by this pass. A
+required element that is simply absent is reported by the same code with the
+message it always had.
+
 ### Module map
 
 `openszigno-verify` is organised as the pipeline above, one module per stage.
@@ -928,7 +970,7 @@ The split is internal; the crate's public API is unchanged.
 | `references` | One `ds:Reference`: parsing, same-document resolution on the validated ID space, the transform allowlist and its application, the effective node set (`ReferenceScope`) every coverage rule shares, and digest recomputation. |
 | `scope` | Placement classification (`Placement`, `placement_of`), the mandated e-dossier reference sets, and `reference_scope_check`. |
 | `countersign` | Countersignature detection, the binding check, and the reported role, parent and `countersigns` set. |
-| `signature` | The per-signature driver (stages A and B): `signed_info.rs` parses `ds:SignedInfo` and applies the signature-level algorithm policy, `collect.rs` gathers the timestamp tokens and the octets each one covers, and `mod.rs` keeps signer selection and `ds:SignatureValue` verification. |
+| `signature` | The per-signature driver (stages A and B): `structure.rs` checks XMLDSig cardinality and order before anything is read by name, `signed_info.rs` parses `ds:SignedInfo` and applies the signature-level algorithm policy, `collect.rs` gathers the timestamp tokens and the octets each one covers, and `mod.rs` keeps signer selection and `ds:SignatureValue` verification. |
 | `coverage` | What a signature's resolved references cover, and the per-document coverage report and its dossier-level checks. |
 | `xades` | Stage C: the XAdES qualifying properties and the signed `SigningCertificate` binding. |
 | `certs` | Stage D: `extensions.rs` decodes a certificate's extensions, `purpose.rs` holds the `extendedKeyUsage` policy per `PathPurpose`, `names.rs` implements RFC 5280 name constraints, `path.rs` builds and validates a path, and `mod.rs` keeps the public types, `check_path` and public-key signature verification. |
@@ -2433,8 +2475,8 @@ verify), and `revocation_not_checked` (the caller switched revocation off).
 | `documents_all_covered` | `passed` / `info` | Every modelled document is covered. `passed` when each is covered by a signature that verified; `info` when at least one is covered only by signatures that did not verify, because that finding is already on those signatures. See [Document coverage](#document-coverage). |
 | `documents_uncovered` | `unknown` | One or more modelled documents are covered by no signature; the message names the count and the indexes. Blocking, so a dossier with an unsigned document cannot be `valid`. `unknown`, not `failed`: an unsigned sibling is missing information, not evidence against a signature that did verify. |
 | `documents_coverage_undetermined` | `unknown` | The coverage of one or more modelled documents could not be determined, because a signature that might cover them could not be evaluated. The message names the count. Blocking, for the same reason. |
-| `sig_structure` | `passed` | `ds:SignedInfo`, `ds:SignatureValue`, the methods, and at least one reference are present and within limits. |
-| `sig_structure_invalid` | `failed` | One of those is missing, malformed, or over a limit. |
+| `sig_structure` | `passed` | `ds:SignedInfo`, `ds:SignatureValue`, the methods, and at least one reference are present, within limits, and in the cardinality and order the XMLDSig schema fixes. |
+| `sig_structure_invalid` | `failed` | One of those is missing, duplicated, out of order, malformed, or over a limit, or one of the three sequenced elements carries an unexpected child. The message names the element and which of those it is. See [XMLDSig structural rules](#xmldsig-structural-rules). |
 | `sig_placement` | `passed` | The signature is at a placement this build describes: `//es:Document/ds:Signature`, `//es:Dossier/ds:Signature`, or the `ds:Signature` inside an `xades:CounterSignature`. |
 | `sig_placement_invalid` | `failed` | It is not, and the message names the reason. On its own this does **not** make the dossier `invalid`; see `signatures_unsupported` and [Countersignatures](#countersignatures). |
 | `countersignature_binding_ok` | `passed` | The countersignature's references resolve to the `ds:SignatureValue` it must attest. |
@@ -2830,48 +2872,66 @@ several people, and `extract` should give a caller the ones they can read.
 | No `RecipientInfo` names the certificate | `document_skipped_no_matching_recipient` warning, exit 0. |
 | Unsupported key transport or content cipher | `document_skipped_unsupported_cipher` warning naming the OID, exit 0. |
 | DES-EDE3-CBC without the flag | `document_skipped_legacy_cipher` warning naming the OID, exit 0. |
-| Key unwrap or padding failed | `decrypt_failed` error, exit 5. |
+| Content decryption failed, including a key transport that did not unwrap | `decrypt_failed` error, exit 5. |
 | Not well-formed CMS | `invalid_cms` error, exit 5. |
 | Key, certificate, or passphrase unusable | `invalid_decryption_key`, `invalid_decryption_certificate`, `decryption_certificate_required`, or `decryption_key_mismatch`, exit 4, before the dossier is decoded. |
 
 `decrypt_failed` carries the fixed message `decryption failed` and nothing
 else. Distinguishing a failed RSA unwrap from a bad content-key length from a
 bad PKCS#7 padding is exactly the distinction a padding oracle is built out of,
-so the tool does not make it — not even in the human output.
+so the tool does not make it, not even in the human output. The RSA half does
+not raise it at all; see
+[RSA key transport: implicit rejection](#rsa-key-transport-implicit-rejection).
 
-### RSA key transport: chosen-ciphertext exposure
+### RSA key transport: implicit rejection
 
-The RSA ciphertext `unwrap_key` (`openszigno-core::decrypt::cms`) decrypts —
-the `RecipientInfo`'s encrypted content-encryption key — comes from the
-dossier being processed, not from the operator. For PKCS#1 v1.5 key
-transport that matters: whether decryption is fast or slow, and whether it
-succeeds or fails, both depend on the ciphertext, which is exactly the setup
-a Bleichenbacher/Marvin-style chosen-ciphertext attack (RUSTSEC-2023-0071)
-needs. An attacker able to submit many crafted dossiers to the same
-`--decrypt-key` and observe timing or success/failure across calls can, in
-principle, recover the content-encryption key without ever holding the RSA
-private key.
+The RSA ciphertext `openszigno-core::decrypt` decrypts, the
+`RecipientInfo`'s encrypted content-encryption key, comes from the dossier
+being processed, not from the operator. For PKCS#1 v1.5 key transport that
+matters: if whether the padding checked out is observable, an attacker able
+to submit many crafted dossiers to the same `--decrypt-key` recovers the
+content-encryption key without ever holding the RSA private key. That is the
+Bleichenbacher/Marvin attack, RUSTSEC-2023-0071.
 
-`unwrap_key` calls `RsaPrivateKey::decrypt_blinded` (blinded with an
-`OsRng`-seeded factor) rather than plain `decrypt`. That removes the timing
-signal the private-key modular exponentiation itself would otherwise leak. It
-does **not** remove the success/failure signal, because that comes from the
-PKCS#1 v1.5 unpadding step, not the exponentiation, and `rsa` 0.9 — the
-version this workspace is pinned to — has no constant-time or oracle-free
-decrypt for this padding scheme. See the `RUSTSEC-2023-0071` entry in
-`deny.toml` for the full write-up, including why `rsa` 0.10 (which fixes
-this) is not yet adoptable without pulling pre-release dependency versions
-into `Cargo.lock`.
+openSzigno therefore rejects **implicitly**, in `decrypt/keytrans.rs`, the way
+OpenSSL 3.2+ (`RSA_PKCS1_IMPLICIT_REJECTION`) and Go's `crypto/rsa` do and RFC
+5246 section 7.4.7.1 prescribes:
 
-**Practically**, this is a low-severity residual for openSzigno used the way
-it is documented to be used: run once per dossier from a terminal or a
-pipeline stage, exiting after that one attempt. A single local run gives an
-attacker at most one observation, nowhere near enough to mount the attack.
-The risk model changes if openSzigno is wrapped by a service that decrypts
-many attacker-submitted dossiers against one long-lived key and exposes, even
-indirectly, whether each decryption succeeded — see
-[SECURITY.md](../SECURITY.md#rsa-key-transport-decryption-chosen-ciphertext-and-timing-limits)
-for what such a service should do about it.
+| Step | What happens |
+| --- | --- |
+| Private operation | Runs once, blinded with an `OsRng`-seeded factor, through `rsa::hazmat::rsa_decrypt_and_check`, which returns the raw plaintext block instead of unpadding it. |
+| Unpadding | Done here, in constant time: the leading `0x00 0x02`, a padding run of at least eight non-zero bytes, the `0x00` separator, and a payload of exactly the announced content cipher's key length all fold into one flag, with no early return and no branch on a plaintext byte. |
+| Failure | The block is replaced by a synthetic key of the same length, derived with HMAC-SHA-256 from a per-key secret over the ciphertext and chosen in constant time. |
+| After | Content decryption runs unconditionally. A substituted key fails at the content cipher's PKCS#7 padding, as `decrypt_failed`, exactly as a tampered content ciphertext does. |
+
+The content cipher is resolved before the unwrap, because its key length is
+what the unpadding checks against; a wrapped key of any other length is
+rejected through the same path rather than by a separate length check. The
+synthetic key is deterministic per `(private key, ciphertext)` and
+unpredictable to whoever supplied the ciphertext, so replaying a dossier gives
+an attacker no new information and no substitution can be precomputed.
+RSAES-OAEP takes the same shape: it is not the padding this attack is about,
+but an OAEP failure is likewise answered with the synthetic key rather than a
+distinguishable error.
+
+**What is left** is a timing residual rather than an oracle: `rsa` 0.9's
+modular exponentiation is not constant-time, and its big-integer to
+byte-string conversion has a length that follows the plaintext's leading zero
+bytes. Blinding masks the exponentiation; `rsa` 0.10's crypto-bigint backend
+would remove the residual, and has no stable release yet. See the
+`RUSTSEC-2023-0071` entry in `deny.toml` for the full write-up, and
+[SECURITY.md](../SECURITY.md#rsa-key-transport-decryption-implicit-rejection)
+for the operator-facing statement.
+
+One visible consequence: a dossier whose wrapped key is unusable is decrypted
+under a synthetic key, so the failure surfaces further down rather than at the
+unwrap. Almost always that is the content cipher's PKCS#7 padding, reported as
+`decrypt_failed`; roughly once in 256 the padding of garbage is valid by
+chance and the answer is `source_size_mismatch` instead, because the decoded
+length no longer matches the document's declared source size. `extract` would
+write the garbage only if that length matched as well. Decryption asserts
+nothing about authenticity either way; see
+[Verification boundary](#verification-boundary).
 
 ## Verification boundary
 

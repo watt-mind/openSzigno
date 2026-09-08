@@ -10,12 +10,57 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-09-08
+
 ### Fixed
 
 - The CI `hygiene` job no longer re-checks commits that are already on
   `develop` when a release pull request promotes `develop` to `master`;
   those passed the check on the pull request that landed them, and two
   older commits predate the rule.
+
+### Security
+
+- `verify` stage A1 now enforces the cardinality and order the XMLDSig
+  schema fixes for `ds:Signature`, `ds:SignedInfo` and each `ds:Reference`
+  before any critical child is read by name. Previously each child was
+  located by a first-match lookup, so a signature carrying a second
+  `ds:SignatureValue`, `ds:SignedInfo`, canonicalization or signature
+  method, `ds:Transforms`, `ds:DigestMethod` or `ds:DigestValue`, or one
+  whose children appeared out of order, was accepted: openSzigno read the
+  first copy and reported a passed `signature_value_ok` while another
+  consumer could read the other. Such a signature now fails
+  `sig_structure_invalid`, with a message naming the element and whether it
+  is a duplicate, out of order, or a child the schema does not allow there,
+  and the verdict is `invalid`. The schema's extension points stay open:
+  `ds:Object` and `ds:KeyInfo` content is unconstrained, so XAdES
+  qualifying properties are unaffected, and whitespace and comments between
+  children are ignored. See
+  [docs/architecture.md](docs/architecture.md#xmldsig-structural-rules).
+- `extract --decrypt-key` no longer reports that a PKCS#1 v1.5 wrapped
+  content-encryption key failed to unpad. The RSA key transport now rejects
+  **implicitly**, the mitigation OpenSSL 3.2+ ships as
+  `RSA_PKCS1_IMPLICIT_REJECTION` and RFC 5246 section 7.4.7.1 prescribes: the
+  blinded private operation runs once, the block is unpadded in constant time
+  against the announced content cipher's key length, and any fault is answered
+  with a deterministic synthetic key derived from a per-key secret over the
+  ciphertext, after which content decryption runs unconditionally. A bad
+  wrapped key now fails as the content cipher does, with the same
+  `decrypt_failed` code and `decryption failed` message as a tampered body, so
+  a caller who submits chosen dossiers can no longer read a
+  Bleichenbacher/Marvin padding oracle (RUSTSEC-2023-0071) off the outcome,
+  the error, or the coarse timing. RSAES-OAEP takes the same shape. What
+  remains is `rsa` 0.9's non-constant-time private exponentiation, which
+  blinding masks and `rsa` 0.10 will retire; the `deny.toml` ignore now covers
+  only that. See
+  [SECURITY.md](SECURITY.md#rsa-key-transport-decryption-implicit-rejection)
+  and
+  [docs/architecture.md](docs/architecture.md#rsa-key-transport-implicit-rejection).
+  One consequence: an unusable wrapped key is decrypted under the synthetic
+  key, so the failure surfaces further down. Almost always that is the content
+  cipher's padding, as `decrypt_failed`; roughly once in 256 the padding of
+  garbage is valid by chance and the answer is `source_size_mismatch` instead.
+  Decryption never asserted authenticity.
 
 ## [0.5.0] - 2026-09-08
 
@@ -1399,7 +1444,8 @@ This release performs no cryptographic verification of any kind.
 
 [0.1.0]: https://github.com/watt-mind/openSzigno/releases/tag/v0.1.0
 [0.2.0]: https://github.com/watt-mind/openSzigno/compare/v0.1.0...v0.2.0
-[Unreleased]: https://github.com/watt-mind/openSzigno/compare/v0.5.0...develop
+[Unreleased]: https://github.com/watt-mind/openSzigno/compare/v0.5.1...develop
+[0.5.1]: https://github.com/watt-mind/openSzigno/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/watt-mind/openSzigno/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/watt-mind/openSzigno/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/watt-mind/openSzigno/compare/v0.2.0...v0.3.0

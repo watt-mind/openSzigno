@@ -38,7 +38,8 @@ pub(super) struct Policy<'a, 'input> {
     pub(super) resolved: Vec<Option<Node<'a, 'input>>>,
 }
 
-/// Stage A1: read the structure, or say which element is missing.
+/// Stage A1: check cardinality and order, then read the structure, or say
+/// which element is missing.
 ///
 /// The failing check is returned rather than pushed, so the caller reports it
 /// exactly where it reported it before.
@@ -46,6 +47,10 @@ pub(super) fn parse<'a, 'input>(
     context: &Context<'_, '_, '_>,
     signature: Node<'a, 'input>,
 ) -> Result<Structure<'a, 'input>, Check> {
+    // The cardinality and order pass runs first, so every `direct_child`
+    // lookup below reads the one element the schema allows in that position
+    // rather than the first of several.
+    super::structure::validate(signature)?;
     let signed_info = direct_child(signature, XMLDSIG_NAMESPACE, "SignedInfo");
     let signature_value_node = direct_child(signature, XMLDSIG_NAMESPACE, "SignatureValue");
     let (Some(signed_info), Some(signature_value_node)) = (signed_info, signature_value_node)

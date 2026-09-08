@@ -26,6 +26,9 @@ der.workspace = true
 # Triple DES is reachable only through `DecryptOptions::allow_legacy_ciphers`.
 des.workspace = true
 encoding_rs.workspace = true
+# Derives the synthetic content-encryption key that PKCS#1 v1.5 implicit
+# rejection substitutes for an unusable padding block.
+hmac.workspace = true
 pem-rfc7468.workspace = true
 pkcs8.workspace = true
 # `OsRng`, to blind the RSA key-transport decryption in `decrypt/cms.rs`
@@ -39,6 +42,8 @@ serde.workspace = true
 # senders use; it is never used as a signature or integrity digest here.
 sha1.workspace = true
 sha2.workspace = true
+# Constant-time selection and comparison in `decrypt/keytrans.rs`.
+subtle.workspace = true
 thiserror.workspace = true
 x509-cert = { workspace = true, features = ["pem"] }
 zeroize.workspace = true
