@@ -67,7 +67,6 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
   as `revocation_data_invalid` in the tier walk, as a store-loading error, and
   as an `online_fetch_failed` — naming the size and the limit instead of being
   passed over in silence.
-### Fixed
 
 - `parse_rfc3339` (the RFC 3339 parser shared by `--at`, trusted-list dates,
   and `xades:SigningTime`) bounded the day of month to 1..=31 regardless of
