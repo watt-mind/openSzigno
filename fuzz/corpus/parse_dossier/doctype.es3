@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE es:Dossier [<!ENTITY unsafe "not allowed">]>
+<es:Dossier xmlns:es="https://www.microsec.hu/ds/e-szigno30#">
+  <es:DossierProfile Id="DossierProfile1" OBJREF="Object0"><es:Title>&unsafe;</es:Title><es:CreationDate>2026-01-01T00:00:00Z</es:CreationDate></es:DossierProfile>
+  <es:Documents Id="Object0"/>
+</es:Dossier>

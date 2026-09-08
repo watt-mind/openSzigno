@@ -343,6 +343,38 @@ fn hostile_values_are_left_out_rather_than_echoed() {
     assert_eq!(signature.reference_count, 1);
 }
 
+/// A signature carrying no `Id` attribute at all (as opposed to one whose
+/// `Id` is hostile and gets dropped) reports `id: None`, and a `SignedInfo`
+/// with no `SignatureMethod` child reports `signature_method: None` while
+/// still reporting the `CanonicalizationMethod` that is present.
+#[test]
+fn a_signature_missing_its_id_and_signature_method_reports_none_for_each() {
+    let signature = concat!(
+        "<ds:Signature>",
+        "<ds:SignedInfo>",
+        r##"<ds:CanonicalizationMethod Algorithm="http://www.w3.org/TR/2001/REC-xml-c14n-20010315"/>"##,
+        r##"<ds:Reference URI="#Object0"><ds:DigestMethod Algorithm="http://www.w3.org/2001/04/xmlenc#sha256"/>"##,
+        "<ds:DigestValue>AA==</ds:DigestValue></ds:Reference>",
+        "</ds:SignedInfo>",
+        "<ds:SignatureValue>AA==</ds:SignatureValue>",
+        "</ds:Signature>",
+    );
+    let xml = dossier("", signature);
+    let dossier = parse(xml.as_bytes(), &Limits::default()).expect("the dossier parses");
+
+    let signature = &dossier.signatures[0];
+    assert_eq!(signature.id, None, "no Id attribute was present");
+    assert_eq!(
+        signature.canonicalization_method.as_deref(),
+        Some("http://www.w3.org/TR/2001/REC-xml-c14n-20010315"),
+        "the CanonicalizationMethod that is present must still be reported"
+    );
+    assert_eq!(
+        signature.signature_method, None,
+        "no SignatureMethod element was present"
+    );
+}
+
 #[test]
 fn the_inventory_serialises_with_the_documented_names() {
     let xml = dossier(

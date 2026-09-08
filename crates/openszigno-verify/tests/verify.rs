@@ -3,121 +3,25 @@
 //! Every check code the crate can emit is exercised with a positive and a
 //! negative case, because a verifier that only ever sees valid input is a
 //! verifier whose failure paths are untested.
+//!
+//! Placement, reference scope and the shapes the private corpus showed live
+//! next door in `verify_scope.rs`; both suites drive the same harness from
+//! [`common::harness`].
 
 mod common;
 
 use common::{
     C14N_EXC, CertSpec, DossierSpec, ECDSA_SHA256_URI, ENVELOPED_URI, HMAC_SHA256_URI,
-    RSA_SHA1_URI, RefSpec, SHA1_URI, SIGNED_PROPERTIES_TYPE, TestKey, XPATH_URI, XSLT_URI, build,
-    document_signature, dossier_signature, ecdsa_key, issued_by, keys, rsa_key, self_signed,
-    tamper,
+    RSA_SHA1_URI, RefSpec, SHA1_URI, XPATH_URI, XSLT_URI, assert_check, assert_no_failures, at,
+    build, document_signature, dossier_signature, ecdsa_key, has, issued_by, keys, rsa_key, run,
+    run_without_trust, self_signed, simple_pki, tamper,
 };
 use openszigno_verify::codes::{CheckCode, CheckStatus};
 use openszigno_verify::{
-    CoverageState, FixedClock, MemoryTrustStore, NoRevocation, NoTrust, RoxmltreeC14n, Verdict,
-    VerifyOptions, VerifyReport, parse_rfc3339, verify,
+    CoverageState, MemoryTrustStore, NoRevocation, RoxmltreeC14n, Verdict, VerifyOptions,
+    VerifyReport, parse_rfc3339, verify,
 };
 use rcgen::{BasicConstraints, GeneralSubtree, IsCa, KeyUsagePurpose, NameConstraints};
-
-/// A fixed validation time inside every synthetic certificate's window, so no
-/// test depends on the wall clock.
-fn at(text: &str) -> FixedClock {
-    FixedClock(parse_rfc3339(text).expect("the fixed time parses"))
-}
-
-fn run(xml: &str, anchors: Vec<Vec<u8>>, time: &str) -> VerifyReport {
-    let trust = MemoryTrustStore::new(anchors, Vec::new());
-    let revocation = NoRevocation;
-    let backend = RoxmltreeC14n;
-    let clock = at(time);
-    let mut options = VerifyOptions::new(&clock, &trust, &revocation, &backend);
-    options.requested_time = Some(time.to_owned());
-    verify(xml.as_bytes(), &options).expect("the dossier parses structurally")
-}
-
-fn run_without_trust(xml: &str, time: &str) -> VerifyReport {
-    let trust = NoTrust;
-    let revocation = NoRevocation;
-    let backend = RoxmltreeC14n;
-    let clock = at(time);
-    let mut options = VerifyOptions::new(&clock, &trust, &revocation, &backend);
-    options.requested_time = Some(time.to_owned());
-    verify(xml.as_bytes(), &options).expect("the dossier parses structurally")
-}
-
-/// Every check code emitted anywhere in the report, with its status.
-fn codes(report: &VerifyReport) -> Vec<(CheckCode, CheckStatus)> {
-    report
-        .checks
-        .iter()
-        .chain(
-            report
-                .signatures
-                .iter()
-                .flat_map(|signature| signature.checks.iter()),
-        )
-        .map(|check| (check.code, check.status))
-        .collect()
-}
-
-fn has(report: &VerifyReport, code: CheckCode, status: CheckStatus) -> bool {
-    codes(report).contains(&(code, status))
-}
-
-fn assert_check(report: &VerifyReport, code: CheckCode, status: CheckStatus) {
-    assert!(
-        has(report, code, status),
-        "expected {} to be {}; got {:?}",
-        code.as_str(),
-        status.as_str(),
-        codes(report)
-            .iter()
-            .map(|(code, status)| format!("{}={}", code.as_str(), status.as_str()))
-            .collect::<Vec<_>>()
-    );
-}
-
-fn assert_no_failures(report: &VerifyReport) {
-    let failed: Vec<&str> = codes(report)
-        .iter()
-        .filter(|(_, status)| *status == CheckStatus::Failed)
-        .map(|(code, _)| code.as_str())
-        .collect();
-    assert!(failed.is_empty(), "unexpected failures: {failed:?}");
-}
-
-/// A root, an intermediate, and a signer, plus the keys behind them.
-struct Pki {
-    /// Kept so a test can issue further certificates from the same root.
-    #[allow(dead_code)]
-    root_key: TestKey,
-    signer_key: TestKey,
-    root_der: Vec<u8>,
-    signer_der: Vec<u8>,
-    chain: Vec<Vec<u8>>,
-}
-
-fn simple_pki() -> Pki {
-    let root_key = rsa_key(keys::ROOT_RSA2048);
-    let signer_key = rsa_key(keys::SIGNER_RSA2048);
-    let root = self_signed(
-        &CertSpec::ca("openSzigno Test Root", BasicConstraints::Unconstrained),
-        &root_key,
-    );
-    let signer = issued_by(
-        &CertSpec::signer("openSzigno Test Signer"),
-        &signer_key,
-        &root,
-        &root_key,
-    );
-    Pki {
-        chain: vec![signer.der.clone()],
-        root_der: root.der,
-        signer_der: signer.der,
-        root_key,
-        signer_key,
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Positive cases
@@ -311,13 +215,19 @@ fn ecdsa_p256_signature_verifies() {
 }
 
 /// An enveloped signature over the whole document: `URI=""` plus the
-/// enveloped-signature transform. It covers everything, so the scope is
-/// complete by construction.
+/// enveloped-signature transform. It covers everything *outside* the
+/// signature, which is the document's profile and payload object; the
+/// signature's own profile object is inside the subtree the transform removes,
+/// so it needs a reference of its own. See
+/// `an_enveloped_whole_document_reference_covers_nothing_inside_the_signature`.
 #[test]
 fn enveloped_signature_over_the_whole_document() {
     let pki = simple_pki();
     let mut signature = document_signature(pki.chain.clone());
-    signature.references = vec![RefSpec::to("").with_transforms(&[ENVELOPED_URI, C14N_EXC])];
+    signature.references = vec![
+        RefSpec::to("").with_transforms(&[ENVELOPED_URI, C14N_EXC]),
+        RefSpec::to("#sigobj-doc"),
+    ];
     signature.include_xades = false;
     let spec = DossierSpec {
         document_signature: Some(signature),
@@ -918,82 +828,6 @@ fn a_signer_without_a_signing_key_usage_fails() {
 }
 
 // ---------------------------------------------------------------------------
-// Placement and scope edge cases
-// ---------------------------------------------------------------------------
-
-/// A signature somewhere the e-dossier format does not describe fails
-/// placement; the scope of such a signature is unknown rather than complete.
-#[test]
-fn a_signature_in_an_undefined_place_fails_placement() {
-    let xml = misplaced_signature();
-    let report = run_without_trust(&xml, "2020-06-01T00:00:00Z");
-    assert_check(&report, CheckCode::SigPlacementInvalid, CheckStatus::Failed);
-    assert_check(
-        &report,
-        CheckCode::ReferenceScopeUnknown,
-        CheckStatus::Unknown,
-    );
-}
-
-/// A `Document` without a `DocumentProfile` is non-conformant; the mandated
-/// reference set is then undefined, so the honest answer is `unknown`.
-#[test]
-fn a_document_without_a_profile_makes_the_scope_unknown() {
-    let xml = signature_on_a_profileless_document();
-    let report = run_without_trust(&xml, "2020-06-01T00:00:00Z");
-    assert_check(
-        &report,
-        CheckCode::ReferenceScopeUnknown,
-        CheckStatus::Unknown,
-    );
-}
-
-/// A signature with no `ds:SignedInfo` cannot be examined at all.
-#[test]
-fn a_malformed_signature_fails_structure() {
-    let xml = structurally_broken_signature();
-    let report = run_without_trust(&xml, "2020-06-01T00:00:00Z");
-    assert_check(&report, CheckCode::SigStructureInvalid, CheckStatus::Failed);
-    assert_eq!(report.verdict, Verdict::Invalid);
-}
-
-fn misplaced_signature() -> String {
-    wrap(
-        r#"<es:DossierProfile Id="dossier-profile" OBJREF="documents"><es:Title>t</es:Title><es:CreationDate>2020-01-01T00:00:00Z</es:CreationDate></es:DossierProfile><es:Documents Id="documents"><es:Document><es:DocumentProfile Id="prof0" OBJREF="obj0"><es:Title>a</es:Title><es:CreationDate>2020-01-01T00:00:00Z</es:CreationDate><es:Format><es:MIME-Type type="text" subtype="plain"/></es:Format><es:BaseTransform><es:Transform Algorithm="base64"/></es:BaseTransform></es:DocumentProfile><ds:Object Id="obj0">aGVsbG8=</ds:Object><es:Wrapper><ds:Signature Id="sig-odd">"#.to_owned()
-            + &signed_info("#obj0")
-            + r#"<ds:SignatureValue>AAAA</ds:SignatureValue></ds:Signature></es:Wrapper></es:Document></es:Documents>"#,
-    )
-}
-
-fn signature_on_a_profileless_document() -> String {
-    wrap(
-        r#"<es:DossierProfile Id="dossier-profile" OBJREF="documents"><es:Title>t</es:Title><es:CreationDate>2020-01-01T00:00:00Z</es:CreationDate></es:DossierProfile><es:Documents Id="documents"><es:Document><ds:Object Id="obj0">aGVsbG8=</ds:Object><ds:Signature Id="sig-orphan">"#.to_owned()
-            + &signed_info("#obj0")
-            + r#"<ds:SignatureValue>AAAA</ds:SignatureValue></ds:Signature></es:Document></es:Documents>"#,
-    )
-}
-
-fn structurally_broken_signature() -> String {
-    wrap(
-        r#"<es:DossierProfile Id="dossier-profile" OBJREF="documents"><es:Title>t</es:Title><es:CreationDate>2020-01-01T00:00:00Z</es:CreationDate></es:DossierProfile><es:Documents Id="documents"><es:Document><es:DocumentProfile Id="prof0" OBJREF="obj0"><es:Title>a</es:Title><es:CreationDate>2020-01-01T00:00:00Z</es:CreationDate><es:Format><es:MIME-Type type="text" subtype="plain"/></es:Format><es:BaseTransform><es:Transform Algorithm="base64"/></es:BaseTransform></es:DocumentProfile><ds:Object Id="obj0">aGVsbG8=</ds:Object><ds:Signature Id="sig-broken"></ds:Signature></es:Document></es:Documents>"#.to_owned(),
-    )
-}
-
-fn signed_info(uri: &str) -> String {
-    format!(
-        r#"<ds:SignedInfo><ds:CanonicalizationMethod Algorithm="{C14N_EXC}"/><ds:SignatureMethod Algorithm="http://www.w3.org/2001/04/xmldsig-more#rsa-sha256"/><ds:Reference URI="{uri}"><ds:DigestMethod Algorithm="http://www.w3.org/2001/04/xmlenc#sha256"/><ds:DigestValue>AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=</ds:DigestValue></ds:Reference></ds:SignedInfo>"#
-    )
-}
-
-fn wrap(body: String) -> String {
-    format!(
-        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<es:Dossier xmlns:es=\"{}\" xmlns:ds=\"{}\">{body}</es:Dossier>",
-        common::ESZIGNO_NS,
-        common::DS_NS
-    )
-}
-
-// ---------------------------------------------------------------------------
 // Report shape and helpers
 // ---------------------------------------------------------------------------
 
@@ -1092,6 +926,35 @@ fn rfc3339_round_trips() {
     }
 }
 
+/// Calendar validity is checked precisely, not merely bounded to 1..=31:
+/// Feb 29 exists only in leap years (divisible by 4, except centuries unless
+/// also divisible by 400), and no month runs past its real length.
+#[test]
+fn rfc3339_rejects_impossible_calendar_dates() {
+    // Feb 29 in leap years: 2024 (div 4), 2000 (div 400) both parse.
+    for leap in ["2024-02-29T00:00:00Z", "2000-02-29T00:00:00Z"] {
+        assert!(parse_rfc3339(leap).is_some(), "{leap} must parse");
+    }
+    // Feb 29 in non-leap years: 2023 (not div 4), 1900 (div 100, not 400).
+    for non_leap in ["2023-02-29T00:00:00Z", "1900-02-29T00:00:00Z"] {
+        assert!(
+            parse_rfc3339(non_leap).is_none(),
+            "{non_leap} must not parse"
+        );
+    }
+    // Feb 30/31 never exist, in any year.
+    for bad in ["2024-02-30T00:00:00Z", "2024-02-31T00:00:00Z"] {
+        assert!(parse_rfc3339(bad).is_none(), "{bad} must not parse");
+    }
+    // April has 30 days, not 31; the classic silent-rollover case from the
+    // review finding (2026-02-31 must not become 2026-03-03).
+    assert!(parse_rfc3339("2026-04-31T00:00:00Z").is_none());
+    assert!(parse_rfc3339("2026-02-31T00:00:00Z").is_none());
+    // Valid month ends still parse.
+    assert!(parse_rfc3339("2026-01-31T00:00:00Z").is_some());
+    assert!(parse_rfc3339("2026-04-30T00:00:00Z").is_some());
+}
+
 /// Adding a non-passing check can only lower a verdict, never raise it.
 #[test]
 fn the_verdict_function_is_monotone() {
@@ -1156,173 +1019,6 @@ fn pem_rfc7468_encode(der: &[u8]) -> String {
     }
     out.push_str("-----END CERTIFICATE-----\n");
     out
-}
-
-// ---------------------------------------------------------------------------
-// Shapes the private corpus showed
-// ---------------------------------------------------------------------------
-//
-// Real dossiers reference the `es:SignatureProfile` element rather than the
-// `ds:Object` around it, place the profile and qualifying-properties objects in
-// either order, and use XAdES 1.2.2 with a versioned `SignedProperties` Type.
-// Each of those made every corpus signature stop at
-// `reference_scope_incomplete` before any digest was recomputed.
-
-/// A reference to the `es:SignatureProfile` element itself satisfies the
-/// "own profile object" requirement, exactly as one to the `ds:Object` does.
-#[test]
-fn referencing_the_signature_profile_element_covers_the_profile_object() {
-    let pki = simple_pki();
-    let mut signature = document_signature(pki.chain.clone());
-    signature.references[2] = RefSpec::to("#sigprof-doc");
-    let spec = DossierSpec {
-        document_signature: Some(signature),
-        ..Default::default()
-    };
-    let xml = build(&spec, &[("doc", &pki.signer_key)]);
-    let report = run(&xml, vec![pki.root_der], "2020-06-01T00:00:00Z");
-    assert_no_failures(&report);
-    assert_check(
-        &report,
-        CheckCode::ReferenceScopeComplete,
-        CheckStatus::Passed,
-    );
-    assert_eq!(
-        report.signatures[0].references[2].resolved_to.as_deref(),
-        Some("Dossier/Documents/Document/Signature/Object/SignatureProfile")
-    );
-}
-
-/// The profile object is found by content, so the order of the signature's
-/// `ds:Object` children does not matter.
-#[test]
-fn the_profile_object_is_found_whichever_order_the_objects_are_in() {
-    for reversed in [false, true] {
-        let pki = simple_pki();
-        let mut signature = dossier_signature(pki.chain.clone());
-        signature.objects_reversed = reversed;
-        let spec = DossierSpec {
-            dossier_signature: Some(signature),
-            ..Default::default()
-        };
-        let xml = build(&spec, &[("frame", &pki.signer_key)]);
-        let report = run(&xml, vec![pki.root_der], "2020-06-01T00:00:00Z");
-        assert_no_failures(&report);
-        assert_check(
-            &report,
-            CheckCode::ReferenceScopeComplete,
-            CheckStatus::Passed,
-        );
-    }
-}
-
-/// Legacy XAdES 1.2.2, with the versioned `SignedProperties` Type URI, is
-/// detected and its properties count as covered.
-#[test]
-fn legacy_xades_122_is_detected_and_its_signed_properties_are_covered() {
-    let pki = simple_pki();
-    let mut signature = dossier_signature(pki.chain.clone());
-    signature.xades_namespace = common::XADES_NS_122.to_owned();
-    signature.references[3] = RefSpec {
-        reference_type: Some(common::SIGNED_PROPERTIES_TYPE_122.to_owned()),
-        ..RefSpec::to("#sp-frame")
-    };
-    let spec = DossierSpec {
-        dossier_signature: Some(signature),
-        ..Default::default()
-    };
-    let xml = build(&spec, &[("frame", &pki.signer_key)]);
-    let report = run(&xml, vec![pki.root_der], "2020-06-01T00:00:00Z");
-    assert_no_failures(&report);
-    assert_check(&report, CheckCode::XadesPresent, CheckStatus::Passed);
-    assert_check(
-        &report,
-        CheckCode::ReferenceScopeComplete,
-        CheckStatus::Passed,
-    );
-    assert_eq!(report.signatures[0].xades_level, Some("detected"));
-}
-
-/// Coverage is decided by resolution, not by the `Type` attribute: a reference
-/// that declares the SignedProperties type but resolves elsewhere does not
-/// satisfy the requirement, and the message says so.
-#[test]
-fn a_signed_properties_type_cannot_stand_in_for_resolution() {
-    let pki = simple_pki();
-    let mut signature = document_signature(pki.chain.clone());
-    signature.references[3] = RefSpec {
-        reference_type: Some(SIGNED_PROPERTIES_TYPE.to_owned()),
-        ..RefSpec::to("#prof0")
-    };
-    let spec = DossierSpec {
-        document_signature: Some(signature),
-        ..Default::default()
-    };
-    let xml = build(&spec, &[("doc", &pki.signer_key)]);
-    let report = run(&xml, vec![pki.root_der], "2020-06-01T00:00:00Z");
-    assert_check(
-        &report,
-        CheckCode::ReferenceScopeIncomplete,
-        CheckStatus::Failed,
-    );
-    let message = report.signatures[0]
-        .checks
-        .iter()
-        .find(|check| check.code == CheckCode::ReferenceScopeIncomplete)
-        .map(|check| check.message.clone())
-        .expect("the check was emitted");
-    assert!(
-        message.contains("declares the SignedProperties Type"),
-        "{message}"
-    );
-}
-
-/// A reference to the `ds:Object` that wraps the qualifying properties covers
-/// the `SignedProperties` inside it.
-#[test]
-fn a_reference_to_an_ancestor_covers_the_signed_properties() {
-    let pki = simple_pki();
-    let mut signature = document_signature(pki.chain.clone());
-    // Cover the whole document instead of the individual elements.
-    signature.references = vec![RefSpec::to("").with_transforms(&[ENVELOPED_URI, C14N_EXC])];
-    let spec = DossierSpec {
-        document_signature: Some(signature),
-        ..Default::default()
-    };
-    let xml = build(&spec, &[("doc", &pki.signer_key)]);
-    let report = run(&xml, vec![pki.root_der], "2020-06-01T00:00:00Z");
-    assert_no_failures(&report);
-    assert_check(&report, CheckCode::XadesPresent, CheckStatus::Passed);
-}
-
-/// A caller must always see what each URI resolved to, even when the run
-/// stopped before any digest was recomputed.
-#[test]
-fn resolved_to_is_reported_even_when_the_policy_stage_fails() {
-    let pki = simple_pki();
-    let mut signature = document_signature(pki.chain.clone());
-    signature.references[0] = RefSpec::to("#obj0").with_transforms(&[XSLT_URI, C14N_EXC]);
-    let spec = DossierSpec {
-        document_signature: Some(signature),
-        ..Default::default()
-    };
-    let xml = build(&spec, &[("doc", &pki.signer_key)]);
-    let report = run(&xml, vec![pki.root_der], "2020-06-01T00:00:00Z");
-    assert_check(&report, CheckCode::TransformNotAllowed, CheckStatus::Failed);
-    let references = &report.signatures[0].references;
-    assert_eq!(references.len(), 4);
-    for reference in references {
-        assert_eq!(reference.status, CheckStatus::Skipped);
-        assert!(
-            reference.resolved_to.is_some(),
-            "{} resolved to nothing",
-            reference.uri
-        );
-    }
-    assert_eq!(
-        references[0].resolved_to.as_deref(),
-        Some("Dossier/Documents/Document/Object")
-    );
 }
 
 // ---------------------------------------------------------------------------

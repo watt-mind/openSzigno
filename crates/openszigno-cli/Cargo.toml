@@ -12,14 +12,17 @@ documentation = "https://github.com/watt-mind/openSzigno#readme"
 keywords = ["e-szigno", "es3", "dossier", "cli", "microsec"]
 categories = ["command-line-utilities", "parser-implementations"]
 
+[lints]
+workspace = true
+
 [[bin]]
 name = "openszigno"
 path = "src/main.rs"
 
 [dependencies]
 clap.workspace = true
-openszigno-core = { version = "0.4.0", path = "../openszigno-core" }
-openszigno-verify = { version = "0.4.0", path = "../openszigno-verify" }
+openszigno-core = { version = "0.5.0", path = "../openszigno-core" }
+openszigno-verify = { version = "0.5.0", path = "../openszigno-verify" }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

@@ -1,0 +1,345 @@
+//! The human-readable summary each command prints when `--json` is absent.
+
+use std::io::{self, Write};
+
+use serde_json::Value;
+
+use crate::render::write_diagnostic;
+use crate::response::Response;
+
+/// Print the claimed signature inventory, one line per signature and one per
+/// container timestamp.
+///
+/// Every line starts with `(unverified)`, because nothing on it was checked:
+/// these are the dossier's own claims about its signature material, read out
+/// of the XML at parse time.
+fn write_signature_inventory(out: &mut impl Write, inventory: &Value) -> io::Result<()> {
+    let signatures = inventory["signatures"]
+        .as_array()
+        .map_or(&[][..], |items| items);
+    let timestamps = inventory["timestamps"]
+        .as_array()
+        .map_or(&[][..], |items| items);
+    if signatures.is_empty() && timestamps.is_empty() {
+        return Ok(());
+    }
+    writeln!(
+        out,
+        "Signature inventory (claimed by the dossier; nothing below was verified):"
+    )?;
+    for (index, signature) in signatures.iter().enumerate() {
+        let mut line = format!(
+            "(unverified) signature {index}: placement={}",
+            display_json_string(&signature["placement"])
+        );
+        if let Some(document) = signature["document_index"].as_u64() {
+            line.push_str(&format!(", document={document}"));
+        }
+        if let Some(id) = signature["id"].as_str() {
+            line.push_str(&format!(", id={id}"));
+        }
+        if let Some(parent) = signature["parent_signature_id"].as_str() {
+            line.push_str(&format!(", inside={parent}"));
+        }
+        line.push_str(&format!(", references={}", signature["reference_count"]));
+        let properties = join_json_strings(&signature["xades_properties"]);
+        if !properties.is_empty() {
+            line.push_str(&format!(", xades={properties}"));
+        }
+        let evidence = &signature["evidence"];
+        line.push_str(&format!(
+            ", certificates={}, crls={}, ocsp={}, signature-timestamps={}, archive-timestamps={}",
+            evidence["certificates"],
+            evidence["crls"],
+            evidence["ocsp_responses"],
+            evidence["signature_timestamps"],
+            evidence["archive_timestamps"]
+        ));
+        if let Some(claimed) = signature["claimed_signing_time"].as_str() {
+            line.push_str(&format!(", claimed signing time={claimed}"));
+        }
+        writeln!(out, "{line}")?;
+    }
+    for (index, timestamp) in timestamps.iter().enumerate() {
+        let mut line = format!(
+            "(unverified) timestamp {index}: placement={}",
+            display_json_string(&timestamp["placement"])
+        );
+        if let Some(document) = timestamp["document_index"].as_u64() {
+            line.push_str(&format!(", document={document}"));
+        }
+        line.push_str(&format!(", includes={}", timestamp["include_count"]));
+        line.push_str(if timestamp["has_token"] == Value::Bool(true) {
+            ", token=present"
+        } else {
+            ", token=absent"
+        });
+        writeln!(out, "{line}")?;
+    }
+    Ok(())
+}
+
+/// Join an array of JSON strings for a human line. The values come from the
+/// core inventory, which only ever emits plain element names.
+fn join_json_strings(value: &Value) -> String {
+    value
+        .as_array()
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>()
+                .join("+")
+        })
+        .unwrap_or_default()
+}
+
+pub(crate) fn write_human_success(command: &str, response: &Response) -> io::Result<()> {
+    let stdout = io::stdout();
+    let mut out = stdout.lock();
+    match command {
+        "inspect" => {
+            let dossier = &response.data["dossier"];
+            writeln!(out, "Microsec e-Szigno dossier")?;
+            writeln!(out, "Title: {}", display_json_string(&dossier["title"]))?;
+            writeln!(out, "Documents: {}", dossier["documents"])?;
+            writeln!(
+                out,
+                "Signatures present: {} (not verified)",
+                dossier["signatures_present"]
+            )?;
+            writeln!(
+                out,
+                "Timestamps present: {} (not verified)",
+                dossier["timestamps_present"]
+            )?;
+            write_signature_inventory(&mut out, &dossier["signature_inventory"])?;
+        }
+        "list" => {
+            let dossier = &response.data["dossier"];
+            writeln!(out, "{}", display_json_string(&dossier["title"]))?;
+            for document in response.data["documents"].as_array().into_iter().flatten() {
+                let nested = if document["nested_dossier"] == Value::Bool(true) {
+                    " | nested dossier"
+                } else {
+                    ""
+                };
+                writeln!(
+                    out,
+                    "[{}] {} | {}/{} | {} B | {}{}",
+                    document["index"],
+                    display_json_string(&document["title"]),
+                    display_json_string(&document["mime_type"]["media_type"]),
+                    display_json_string(&document["mime_type"]["subtype"]),
+                    display_source_size(&document["source_size"]),
+                    document["transforms"],
+                    nested
+                )?;
+            }
+            writeln!(
+                out,
+                "Signatures/timestamps are listed by presence only; none were verified."
+            )?;
+        }
+        "extract" => {
+            writeln!(
+                out,
+                "Extracted {} document(s).",
+                response.data["extracted_count"]
+            )?;
+            for item in response.data["extracted"].as_array().into_iter().flatten() {
+                writeln!(
+                    out,
+                    "[{}] {} ({} B, {})",
+                    display_json_string(&item["dossier_path"]),
+                    display_json_string(&item["path"]),
+                    item["bytes"],
+                    display_json_string(&item["detected_type"])
+                )?;
+            }
+            writeln!(out, "Extraction is not proof of signature validity.")?;
+        }
+        "verify" => {
+            let data = &response.data;
+            writeln!(
+                out,
+                "Verification verdict: {}",
+                display_json_string(&data["verdict"])
+            )?;
+            writeln!(
+                out,
+                "Validation time: {}",
+                display_json_string(&data["verification_time"]["effective"])
+            )?;
+            writeln!(out, "Signatures: {}", data["counts"]["signatures"])?;
+            if data["policy"]["legacy_algorithms_allowed"] == Value::Bool(true) {
+                writeln!(
+                    out,
+                    "Legacy algorithms were admitted for diagnosis; their strength is not vouched for."
+                )?;
+            }
+            for check in data["checks"].as_array().into_iter().flatten() {
+                writeln!(
+                    out,
+                    "  {}: {}",
+                    display_json_string(&check["code"]),
+                    display_json_string(&check["status"])
+                )?;
+            }
+            // Document coverage: which documents the signatures actually
+            // cover. Kept apart from the verdict lines above, because "this
+            // content is signed" and "that signature verifies" are different
+            // questions. Titles never appear here.
+            for document in data["documents"].as_array().into_iter().flatten() {
+                let name = document["index"].as_u64().map_or_else(
+                    || "document (not modelled)".to_owned(),
+                    |index| format!("document {index}"),
+                );
+                let by: Vec<String> = document["covered_by"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(|entry| {
+                        format!(
+                            "signature {} {}",
+                            entry["signature_index"],
+                            display_json_string(&entry["via"])
+                        )
+                    })
+                    .collect();
+                let by = if by.is_empty() {
+                    String::new()
+                } else {
+                    format!(" by {}", by.join(", "))
+                };
+                writeln!(
+                    out,
+                    "{name}: {}{by}{}",
+                    display_json_string(&document["coverage"]),
+                    if document["nested_dossier"] == Value::Bool(true) {
+                        " (an embedded dossier; its own inner signatures are not verified by this run)"
+                    } else {
+                        ""
+                    }
+                )?;
+            }
+            for signature in data["signatures"].as_array().into_iter().flatten() {
+                // A countersignature attests another signature, not the
+                // payload, so the line says which one rather than leaving a
+                // reader to infer it from the placement alone.
+                let countersigned: Vec<String> = signature["parent_signature_index"]
+                    .as_u64()
+                    .map(|index| vec![index.to_string()])
+                    .unwrap_or_else(|| {
+                        signature["countersigns"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .map(std::string::ToString::to_string)
+                            .collect()
+                    });
+                let role = if signature["role"] == Value::String("countersignature".to_owned())
+                    && !countersigned.is_empty()
+                {
+                    format!(
+                        " (countersignature of signature {})",
+                        countersigned.join(", ")
+                    )
+                } else {
+                    String::new()
+                };
+                writeln!(
+                    out,
+                    "[{}] {} signature: {}{role}",
+                    signature["index"],
+                    display_json_string(&signature["placement"]),
+                    display_json_string(&signature["verdict"])
+                )?;
+                writeln!(
+                    out,
+                    "  validation time: {} (source: {})",
+                    display_json_string(&signature["validation_time"]),
+                    display_json_string(&signature["validation_time_source"])
+                )?;
+                for timestamp in signature["timestamps"].as_array().into_iter().flatten() {
+                    writeln!(
+                        out,
+                        "  {} at {}: {}",
+                        display_json_string(&timestamp["kind"]),
+                        display_json_string(&timestamp["gen_time"]),
+                        if timestamp["verified"] == Value::Bool(true) {
+                            "verified"
+                        } else {
+                            "not verified"
+                        }
+                    )?;
+                    for check in timestamp["checks"].as_array().into_iter().flatten() {
+                        writeln!(
+                            out,
+                            "    {}: {}",
+                            display_json_string(&check["code"]),
+                            display_json_string(&check["status"])
+                        )?;
+                    }
+                }
+                for check in signature["checks"].as_array().into_iter().flatten() {
+                    writeln!(
+                        out,
+                        "  {}: {}",
+                        display_json_string(&check["code"]),
+                        display_json_string(&check["status"])
+                    )?;
+                }
+            }
+            // The boundary, restated on every run.
+            writeln!(
+                out,
+                "Revocation policy: {}. A verdict of `valid` means every check passed at the stated validation time; it is not a legal opinion.",
+                display_json_string(&data["policy"]["revocation"])
+            )?;
+        }
+        "validate-structure" => {
+            writeln!(
+                out,
+                "Structure is valid for the supported e-Szigno profile."
+            )?;
+            writeln!(
+                out,
+                "Conformance warnings: {} (listed as warnings on stderr).",
+                response.data["conformance_warnings"]
+            )?;
+            writeln!(out, "Cryptographic verification was not performed.")?;
+        }
+        _ => {}
+    }
+    out.flush()?;
+    for warning in &response.warnings {
+        write_diagnostic(&format!("warning [{}]: {}", warning.code, warning.message));
+    }
+    Ok(())
+}
+
+/// A declared source size, or `?` when the profile omits `SourceSize`.
+fn display_source_size(value: &Value) -> String {
+    value
+        .as_u64()
+        .map_or_else(|| "?".to_owned(), |size| size.to_string())
+}
+
+fn display_json_string(value: &Value) -> String {
+    value.as_str().unwrap_or("<missing>").to_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use serde_json::json;
+
+    #[test]
+    fn a_missing_json_string_is_rendered_as_a_placeholder() {
+        assert_eq!(display_json_string(&json!("title")), "title");
+        assert_eq!(display_json_string(&Value::Null), "<missing>");
+        assert_eq!(display_json_string(&json!(7)), "<missing>");
+    }
+}

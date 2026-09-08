@@ -1,0 +1,3 @@
+Unsigned encrypted-marker fixture
+[0] encrypted.bin | application/octet-stream | 1 B | ["zip","encrypt","base64"]
+Signatures/timestamps are listed by presence only; none were verified.

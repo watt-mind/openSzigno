@@ -1,9 +1,19 @@
 [workspace]
 members = ["crates/openszigno-core", "crates/openszigno-verify", "crates/openszigno-cli"]
 resolver = "2"
+# `fuzz/` is its own cargo-fuzz package with its own lockfile (see
+# fuzz/Cargo.toml): it needs nightly and libFuzzer instrumentation that must
+# never leak into the stable-toolchain, MSRV-pinned build the rest of this
+# workspace is held to.
+exclude = ["fuzz"]
+
+# See CONTRIBUTING.md for the ratchet: this threshold is the smallest value
+# that passes today, paired with `too-many-lines-threshold` in clippy.toml.
+[workspace.lints.clippy]
+too_many_lines = "warn"
 
 [workspace.package]
-version = "0.4.0"
+version = "0.5.0"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/Watt-Mind/openSzigno"
@@ -26,9 +36,12 @@ p256 = { version = "0.13.2", default-features = false, features = ["ecdsa", "std
 p384 = { version = "0.13.1", default-features = false, features = ["ecdsa", "std", "pkcs8"] }
 pem-rfc7468 = { version = "0.7.0", features = ["std"] }
 pkcs8 = { version = "0.10.2", features = ["encryption", "pem", "std"] }
-# Test-only randomness for the synthetic CMS encryptor; the shipped code
-# never generates keys or nonces.
+# Test-only randomness for the synthetic CMS encryptor.
 rand_chacha = "0.3.1"
+# `OsRng`, used both by the test-only synthetic encryptor and, in shipped
+# code, to blind RSA key-transport decryption (`openszigno-core`'s
+# `decrypt/cms.rs`) against timing side-channels on the private
+# exponentiation.
 rand_core = { version = "0.6.4", features = ["getrandom"] }
 rcgen = "0.14.10"
 roxmltree = "0.21.1"

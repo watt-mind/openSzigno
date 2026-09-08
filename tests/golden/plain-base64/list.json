@@ -1,0 +1,49 @@
+{
+  "command": "list",
+  "data": {
+    "documents": [
+      {
+        "creation_date": "2026-01-01T00:00:00Z",
+        "index": 0,
+        "mime_type": {
+          "charset": "UTF-8",
+          "extension": "txt",
+          "media_type": "text",
+          "subtype": "plain"
+        },
+        "nested_dossier": false,
+        "object_ref": "DocumentObject1",
+        "source_size": 41,
+        "title": "hello.txt",
+        "transforms": [
+          "base64"
+        ]
+      }
+    ],
+    "dossier": {
+      "category": "electronic dossier",
+      "creation_date": "2026-01-01T00:00:00Z",
+      "documents": 1,
+      "namespace": "https://www.microsec.hu/ds/e-szigno30#",
+      "nested_dossiers": 0,
+      "signature_inventory": {
+        "signatures": [],
+        "timestamps": [],
+        "verified": false
+      },
+      "signatures_present": 0,
+      "signatures_verified": false,
+      "timestamps_present": 0,
+      "title": "Unsigned synthetic plain fixture",
+      "xml_encoding": "UTF-8"
+    }
+  },
+  "errors": [],
+  "input": {
+    "bytes": 1109,
+    "format": "microsec-es3"
+  },
+  "ok": true,
+  "schema_version": 1,
+  "warnings": []
+}

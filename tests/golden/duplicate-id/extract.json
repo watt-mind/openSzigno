@@ -1,0 +1,17 @@
+{
+  "command": "extract",
+  "data": null,
+  "errors": [
+    {
+      "code": "duplicate_id",
+      "message": "XML IDs must be non-empty and unique"
+    }
+  ],
+  "input": {
+    "bytes": 370,
+    "format": null
+  },
+  "ok": false,
+  "schema_version": 1,
+  "warnings": []
+}

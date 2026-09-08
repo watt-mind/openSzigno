@@ -21,11 +21,17 @@
 use std::fs;
 use std::path::Path;
 
-use openszigno_verify::MemoryRevocationStore;
 use openszigno_verify::revocation::{RevocationItemKind, classify};
+use openszigno_verify::{MAX_REVOCATION_ITEM_BYTES, MemoryRevocationStore};
 
 /// The largest revocation-store file this loader will read.
-const MAX_FILE_BYTES: u64 = 16 * 1024 * 1024;
+///
+/// It is the verifier's own limit, deliberately: a store that accepted a file
+/// the verifier would then decline to parse would load evidence that answers
+/// nothing, which is exactly the silence this constant exists to prevent. The
+/// message names the size and the limit, because "too large" without either is
+/// not something an operator can act on.
+const MAX_FILE_BYTES: u64 = MAX_REVOCATION_ITEM_BYTES as u64;
 
 /// The largest number of files read from one directory.
 const MAX_FILES: usize = 4096;
@@ -81,7 +87,10 @@ fn read_directory(
             continue;
         }
         if metadata.len() > MAX_FILE_BYTES {
-            return Err("a revocation store file is too large".to_owned());
+            return Err(format!(
+                "a revocation store file is too large: {} bytes, over the {MAX_FILE_BYTES}-byte limit on one CRL or OCSP response",
+                metadata.len()
+            ));
         }
         let bytes =
             fs::read(&path).map_err(|_| "a revocation store file could not be read".to_owned())?;

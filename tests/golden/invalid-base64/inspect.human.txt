@@ -1,0 +1,5 @@
+Microsec e-Szigno dossier
+Title: Unsigned invalid-Base64 fixture
+Documents: 1
+Signatures present: 0 (not verified)
+Timestamps present: 0 (not verified)

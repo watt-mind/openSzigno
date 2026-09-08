@@ -1,0 +1,83 @@
+{
+  "command": "list",
+  "data": {
+    "documents": [
+      {
+        "creation_date": "2026-01-01T00:00:00Z",
+        "index": 0,
+        "mime_type": {
+          "charset": null,
+          "extension": "txt",
+          "media_type": "text",
+          "subtype": "plain"
+        },
+        "nested_dossier": false,
+        "object_ref": "obj0",
+        "source_size": 5,
+        "title": "openSzigno OpenSSL vector",
+        "transforms": [
+          "base64"
+        ]
+      }
+    ],
+    "dossier": {
+      "category": null,
+      "creation_date": "2026-01-01T00:00:00Z",
+      "documents": 1,
+      "namespace": "https://www.microsec.hu/ds/e-szigno30#",
+      "nested_dossiers": 0,
+      "signature_inventory": {
+        "signatures": [
+          {
+            "canonicalization_method": "http://www.w3.org/2001/10/xml-exc-c14n#",
+            "claimed_signing_time": null,
+            "digest_methods": [
+              "http://www.w3.org/2001/04/xmlenc#sha256"
+            ],
+            "document_index": 0,
+            "evidence": {
+              "archive_timestamps": 0,
+              "certificates": 0,
+              "crls": 0,
+              "ocsp_responses": 0,
+              "signature_timestamps": 0
+            },
+            "id": "sig0",
+            "key_info_certificates": 1,
+            "parent_signature_id": null,
+            "placement": "document",
+            "reference_count": 3,
+            "reference_uris": [
+              "#obj0",
+              "#prof0",
+              "#sigobj0"
+            ],
+            "signature_method": "http://www.w3.org/2001/04/xmldsig-more#rsa-sha256",
+            "xades_namespace": null,
+            "xades_properties": []
+          }
+        ],
+        "timestamps": [],
+        "verified": false
+      },
+      "signatures_present": 1,
+      "signatures_verified": false,
+      "timestamps_present": 0,
+      "title": "openSzigno OpenSSL vector",
+      "xml_encoding": "UTF-8"
+    }
+  },
+  "errors": [],
+  "input": {
+    "bytes": 4280,
+    "format": "microsec-es3"
+  },
+  "ok": true,
+  "schema_version": 1,
+  "warnings": [
+    {
+      "code": "cryptographic_verification_not_performed",
+      "message": "signature and timestamp material was counted but not verified"
+    }
+  ]
+}

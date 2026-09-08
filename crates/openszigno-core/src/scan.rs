@@ -131,6 +131,38 @@ mod tests {
         assert_eq!(error.code(), ErrorCode::UnsafeXml);
     }
 
+    /// `<a><b/></a>` is exactly 2 deep and exactly 2 elements: right at both
+    /// limits, which must pass (the check is `>`, not `>=`).
+    #[test]
+    fn exactly_at_the_depth_and_node_limits_passes() {
+        let summary = prescan("<a><b/></a>", &limits(2, 2)).unwrap();
+        assert_eq!(summary.elements, 2);
+        assert_eq!(summary.max_depth, 2);
+    }
+
+    /// One element or one level of nesting past the limit is rejected, with
+    /// the depth and node checks each isolated from the other.
+    #[test]
+    fn one_past_the_depth_limit_is_rejected() {
+        let error = prescan("<a><b/></a>", &limits(1, 100)).unwrap_err();
+        assert_eq!(error.code(), ErrorCode::UnsafeXml);
+    }
+
+    #[test]
+    fn one_past_the_node_limit_is_rejected() {
+        let error = prescan("<a><b/></a>", &limits(100, 1)).unwrap_err();
+        assert_eq!(error.code(), ErrorCode::UnsafeXml);
+    }
+
+    /// A self-closing root element returns depth to zero afterwards, so a
+    /// sibling that follows it is only depth 1, not stacked on top.
+    #[test]
+    fn self_closing_tags_do_not_leave_depth_open_for_siblings() {
+        let summary = prescan("<a/><b/>", &limits(1, 10)).unwrap();
+        assert_eq!(summary.elements, 2);
+        assert_eq!(summary.max_depth, 1);
+    }
+
     #[test]
     fn ignores_markup_inside_comments_cdata_and_instructions() {
         let xml = "<?xml version=\"1.0\"?><!-- <!DOCTYPE x> <a><b> --><a><![CDATA[<!ENTITY x><c><d>]]><?pi <e> ?></a>";
@@ -160,6 +192,23 @@ mod tests {
         let summary = prescan("<a x=\"1>2\" y='<b><c>'><d/></a>", &limits(2, 10)).unwrap();
         assert_eq!(summary.elements, 2);
         assert_eq!(summary.max_depth, 2);
+    }
+
+    /// `scan_start_tag` reports self-closing only when the byte immediately
+    /// before `>` is `/`, even when the tag carries an attribute whose quoted
+    /// value ends in `/` right before the closing quote.
+    #[test]
+    fn self_closing_is_detected_by_the_byte_immediately_before_the_close() {
+        let (end, self_closing) = scan_start_tag(b"a x=\"1\"/>", 0);
+        assert!(self_closing);
+        assert_eq!(end, 9);
+
+        // The quoted value ends in '/', but the '/' is inside the quotes, so
+        // the tag is *not* self-closing: the character right before '>' is
+        // the closing quote.
+        let (end, self_closing) = scan_start_tag(b"a x=\"1/\">", 0);
+        assert!(!self_closing);
+        assert_eq!(end, 9);
     }
 
     #[test]

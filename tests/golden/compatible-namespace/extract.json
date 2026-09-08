@@ -1,0 +1,38 @@
+{
+  "command": "extract",
+  "data": {
+    "extracted": [
+      {
+        "bytes": 43,
+        "declared_type": "text/plain",
+        "decrypted": false,
+        "detected_type": "text",
+        "document_index": 0,
+        "dossier_path": "0",
+        "filename": "ruling.txt",
+        "path": "ruling.txt"
+      }
+    ],
+    "extracted_count": 1,
+    "nested_dossiers_extracted": 0,
+    "selected": null,
+    "skipped_count": 0
+  },
+  "errors": [],
+  "input": {
+    "bytes": 1093,
+    "format": "microsec-es3"
+  },
+  "ok": true,
+  "schema_version": 1,
+  "warnings": [
+    {
+      "code": "dangling_objref",
+      "message": "SignatureProfile OBJREF does not resolve to any XML ID"
+    },
+    {
+      "code": "document_without_profile",
+      "message": "Document at source position 1 has no DocumentProfile and was skipped"
+    }
+  ]
+}

@@ -25,8 +25,10 @@ use x509_cert::ext::pkix::name::GeneralName;
 use x509_cert::serial_number::SerialNumber;
 
 use crate::certs::ParsedCertificate;
+use crate::codes::{Check, CheckCode};
 use crate::dsig::{XADES_NAMESPACES, direct_child, direct_children, text_of};
 use crate::policy::Digest;
+use crate::report::XadesReport;
 
 /// `IssuerSerialV2` (EN 319 132-1): the DER encoding of the `IssuerSerial`
 /// type of RFC 5035, carried Base64 inside the XML.
@@ -498,4 +500,195 @@ pub(crate) fn sanitize(text: &str) -> String {
         .filter(|character| !character.is_control())
         .take(128)
         .collect()
+}
+
+/// The outcome of stage C, gathered before the report is assembled.
+pub(crate) struct StageC {
+    pub(crate) checks: Vec<Check>,
+    pub(crate) report: XadesReport,
+    /// The `ds:KeyInfo` candidate the signed `SigningCertificate` designates,
+    /// which overrides the key-based selection when the two disagree.
+    pub(crate) signer_override: Option<usize>,
+}
+
+/// The part of stage C that needs no cryptography: what the properties are,
+/// and what this build did not process.
+///
+/// Used on its own when the signature failed an earlier stage, because the
+/// signing-certificate binding cannot be evaluated against a signature whose
+/// references were never resolved.
+pub(crate) fn stage_c_presence(properties: &XadesProperties<'_, '_>) -> StageC {
+    let mut checks = Vec::new();
+    let present = properties.qualifying_properties.is_some();
+    if present {
+        checks.push(Check::passed(
+            CheckCode::XadesPresent,
+            "XAdES qualifying properties are present",
+        ));
+    } else {
+        // Blocking, and the one XAdES `skipped` that stays so: with no
+        // qualifying properties there is no *signed* statement of which
+        // certificate signed, so the `SigningCertificate` binding the policy
+        // requires was not performed. That is what `skipped` means.
+        checks.push(Check::skipped(
+            CheckCode::XadesAbsent,
+            "no XAdES qualifying properties were found for this signature, so nothing signed says which certificate signed it",
+        ));
+    }
+
+    // A signature policy is reported by identifier only: no policy document is
+    // fetched, parsed, or applied, so neither form can contribute a `passed`.
+    // Informational: a declared policy is a statement about how the signature
+    // was made, not a question this build failed to answer. Blocking on it
+    // would cap every policy-bearing signature at `indeterminate` for a
+    // property that says nothing about whether the signature is sound.
+    match properties.signature_policy {
+        Some(SignaturePolicy::Implied) => checks.push(Check::info(
+            CheckCode::XadesSignaturePolicyImplied,
+            "the signature declares an implied signature policy; no policy is processed",
+        )),
+        Some(SignaturePolicy::Explicit) => checks.push(Check::info(
+            CheckCode::XadesSignaturePolicyExplicit,
+            "the signature declares an explicit signature policy; its identifier is reported and no policy is processed",
+        )),
+        None => {}
+    }
+
+    // Informational, and emitted only when there is something to name.
+    //
+    // Everything counted here lives under `xades:UnsignedProperties`, which is
+    // not covered by the signature and cannot change what the signature says.
+    // ETSI EN 319 102-1 decides validity from the signed properties, the
+    // timestamps, and revocation; the remaining unsigned properties are
+    // evidence containers, and the ones that carry evidence this build uses —
+    // `CertificateValues`, `RevocationValues`, `TimeStampValidationData` — are
+    // already consumed and are not counted here. Blocking on the rest would
+    // cap a signature at `indeterminate` for carrying *more* evidence than the
+    // minimum, which is precisely backwards.
+    if !properties.unprocessed_properties.is_empty() {
+        checks.push(Check::info(
+            CheckCode::XadesNotValidated,
+            format!(
+                "unsigned qualifying properties this build does not validate are present and are named rather than ignored: {}",
+                properties.unprocessed_properties.join(", ")
+            ),
+        ));
+    }
+    if properties.archive_timestamps > 0 {
+        // Informational: an archive timestamp is additional long-term evidence
+        // laid on top of a signature. Not validating it means this build makes
+        // no claim about the signature's validity *beyond* the point its other
+        // evidence reaches; it does not make the evidence already checked worth
+        // less. LTA re-validation is M3.
+        checks.push(Check::info(
+            CheckCode::ArchiveTimestampPresent,
+            "an xades:ArchiveTimeStamp is present and is not validated; this release makes no claim about long-term (B-LTA) re-validation",
+        ));
+    }
+
+    StageC {
+        checks,
+        report: XadesReport {
+            present,
+            signing_time: properties.signing_time.clone(),
+            signing_certificate: None,
+            signature_policy: properties.signature_policy,
+            signature_policy_id: properties.signature_policy_id.clone(),
+            signature_timestamps: properties.signature_timestamps.len(),
+            archive_timestamps: properties.archive_timestamps,
+            unvalidated_properties: properties.unprocessed_properties.clone(),
+        },
+        signer_override: None,
+    }
+}
+
+/// Stage C in full: the signed `SigningCertificate` binding on top of the
+/// presence reporting.
+///
+/// This is the substitution check. `ds:KeyInfo` is unsigned unless a reference
+/// covers it, so the certificate the signature *claims* is the one the signed
+/// `CertDigest` names. When the certificate whose key verified the signature is
+/// not that one, the check fails: someone swapped the certificate.
+pub(crate) fn stage_c_binding(
+    properties: &XadesProperties<'_, '_>,
+    candidates: &[ParsedCertificate],
+    key_signer_index: Option<usize>,
+    allow_legacy_algorithms: bool,
+    signature_timestamps: usize,
+) -> StageC {
+    let mut stage = stage_c_presence(properties);
+    let _ = signature_timestamps;
+    if properties.certificate_references.is_empty() {
+        stage.checks.push(Check::unknown(
+            CheckCode::XadesSigningCertificateAbsent,
+            "the signature carries no xades:SigningCertificate, so nothing signed says which certificate signed it",
+        ));
+        return stage;
+    }
+    let form = properties.signing_certificate_form;
+    match match_certificate(
+        &properties.certificate_references,
+        candidates,
+        allow_legacy_algorithms,
+    ) {
+        Ok(position) => {
+            let bound = key_signer_index.is_none_or(|index| index == position);
+            if bound {
+                stage.checks.push(Check::passed(
+                    CheckCode::XadesSigningCertificateBound,
+                    "the signing certificate matches the digest the signed SigningCertificate property names",
+                ));
+            } else {
+                stage.checks.push(Check::failed(
+                    CheckCode::XadesSigningCertificateMismatch,
+                    "the certificate whose key verified the signature is not the one the signed SigningCertificate property names",
+                ));
+            }
+            stage.signer_override = Some(position);
+            stage.report.signing_certificate = Some(crate::report::SigningCertificateBinding {
+                form,
+                digest_algorithm: properties
+                    .certificate_references
+                    .first()
+                    .and_then(|reference| {
+                        Digest::from_digest_uri(&reference.digest_uri).map(Digest::as_str)
+                    }),
+                issuer_serial_present: properties.certificate_references.iter().any(|reference| {
+                    reference.issuer_serial.is_some() || reference.issuer_serial_v2.is_some()
+                }),
+                matched: true,
+            });
+        }
+        Err(failure) => {
+            let message = match failure {
+                BindingFailure::DigestAlgorithm => {
+                    "the SigningCertificate property names no digest algorithm inside the pinned allowlist"
+                }
+                BindingFailure::IssuerSerial => {
+                    "a certificate digests to the SigningCertificate property but its issuer and serial do not match"
+                }
+                BindingFailure::NoMatch => {
+                    "no offered certificate digests to the certificate the signed SigningCertificate property names"
+                }
+            };
+            stage.checks.push(Check::failed(
+                CheckCode::XadesSigningCertificateMismatch,
+                message,
+            ));
+            stage.report.signing_certificate = Some(crate::report::SigningCertificateBinding {
+                form,
+                digest_algorithm: properties
+                    .certificate_references
+                    .first()
+                    .and_then(|reference| {
+                        Digest::from_digest_uri(&reference.digest_uri).map(Digest::as_str)
+                    }),
+                issuer_serial_present: properties.certificate_references.iter().any(|reference| {
+                    reference.issuer_serial.is_some() || reference.issuer_serial_v2.is_some()
+                }),
+                matched: false,
+            });
+        }
+    }
+    stage
 }

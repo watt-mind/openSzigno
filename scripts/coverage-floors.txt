@@ -1,0 +1,10 @@
+# Coverage ratchet floors. One `<crate> <percent>` pair per line, plus
+# `workspace`. A CI run fails if a crate (or the workspace total) drops
+# more than 1.0 points below its recorded value here.
+# Regenerate locally with:
+#   python3 scripts/coverage_gate.py --lcov lcov.info --update-floors
+# CI never updates this file.
+openszigno-cli 94.90
+openszigno-core 97.72
+openszigno-verify 93.04
+workspace 94.33

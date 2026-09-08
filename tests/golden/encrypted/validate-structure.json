@@ -1,0 +1,22 @@
+{
+  "command": "validate-structure",
+  "data": {
+    "conformance_warnings": 0,
+    "cryptographic_verification_performed": false,
+    "documents": 1,
+    "valid_structure": true
+  },
+  "errors": [],
+  "input": {
+    "bytes": 924,
+    "format": "microsec-es3"
+  },
+  "ok": true,
+  "schema_version": 1,
+  "warnings": [
+    {
+      "code": "encrypted_document_unsupported",
+      "message": "document 0 is encrypted; only `extract --decrypt-key` can read it"
+    }
+  ]
+}

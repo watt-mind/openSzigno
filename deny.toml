@@ -5,17 +5,49 @@ all-features = true
 version = 2
 yanked = "deny"
 ignore = [
-  # RUSTSEC-2023-0071 (Marvin attack): `rsa` 0.9's *private-key* operation is
-  # not constant time, leaking key material to an attacker who can observe
-  # timing. No fixed release exists. Creating or signing a dossier stays a
-  # permanent non-goal, and `verify` calls only the public-key path, which the
-  # advisory does not cover. Since M4, `extract --decrypt-key` does perform a
-  # private-key operation, with a key the operator supplied, for the length of
-  # one local run. Exploiting it needs an attacker who can time that run on the
-  # operator's own machine, which is outside the threat model in `SECURITY.md`;
-  # nothing about the input under analysis affects it. Revisit when `rsa` 0.10
-  # is stable, which is the fix.
-  { id = "RUSTSEC-2023-0071", reason = "no signing; the only private-key use is local decryption with an operator-supplied key" },
+  # RUSTSEC-2023-0071 (Marvin attack): PKCS#1 v1.5 decryption's timing and
+  # error behavior depend on the ciphertext, which lets a remote attacker who
+  # can submit many chosen ciphertexts and measure response time or observe
+  # success/failure recover the plaintext (a Bleichenbacher-style oracle). No
+  # fixed release of `rsa` 0.9 exists; `rsa` 0.10 fixes it but is still a
+  # release candidate (see below).
+  #
+  # `verify` never performs a private-key operation; only `extract --decrypt-key`
+  # does, in `openszigno-core::decrypt::cms::unwrap_key`. There the RSA
+  # ciphertext being decrypted is the CMS `RecipientInfo`'s encrypted
+  # content-encryption key, which comes from the dossier under analysis, i.e.
+  # attacker-controlled input, not from the operator. This tool is invoked
+  # once per dossier and exits, so a *local* run gives an attacker no more
+  # than one measurement, which is not enough to mount the attack. The
+  # exposure is real when something wraps this CLI as a service that decrypts
+  # many attacker-submitted dossiers with the same key and lets an attacker
+  # observe per-call timing or the decrypt-succeeded/failed outcome across
+  # calls (see `SECURITY.md` and the decryption section of
+  # `docs/architecture.md`); direct, purely local use by an operator decrypting
+  # their own dossiers is not exposed to it.
+  #
+  # Mitigation taken now: `unwrap_key` calls `RsaPrivateKey::decrypt_blinded`
+  # (an `OsRng`-seeded blinding factor) instead of plain `decrypt`, closing
+  # the timing channel on the modular exponentiation itself. This does *not*
+  # close the Bleichenbacher-style oracle the advisory is actually about:
+  # whether PKCS#1 v1.5 unpadding accepts or rejects the recovered plaintext
+  # is still visible to a caller (as `decrypt_failed()` vs. success), and `rsa`
+  # 0.9 exposes no constant-time, oracle-free alternative for this padding
+  # scheme (its own doc comment says as much, pointing at a
+  # `decrypt_session_key` helper that does not exist in this version). Closing
+  # that requires either `rsa` 0.10 (see below) or restructuring the caller to
+  # never let decrypt success/failure or its timing distinguish observably,
+  # which is out of scope for this change.
+  #
+  # `rsa` 0.10 was evaluated as the real fix and is not adoptable yet: as of
+  # this writing the latest release is 0.10.0-rc.18, and its dependency graph
+  # requires `pkcs1 ^0.8.0-rc.4` and `signature ^3.0.0-rc.10` (both
+  # pre-release) plus `spki ^0.8`/`pkcs8 ^0.11`, which are incompatible with
+  # the `der 0.7`/`pkcs8 0.10`/`x509-cert 0.2`/`cms 0.2` versions this
+  # workspace is on. Adopting it now would pull pre-release crate versions
+  # into `Cargo.lock`. Revisit once `rsa` 0.10 is a stable release and
+  # `x509-cert`/`cms` have compatible releases too.
+  { id = "RUSTSEC-2023-0071", reason = "no signing; extract --decrypt-key's RSA decrypt is blinded against exponentiation timing, but the dossier-controlled ciphertext still exposes a Bleichenbacher-style oracle to anything that lets an attacker submit many dossiers and observe outcome or timing across calls -- see the comment above and SECURITY.md" },
 ]
 
 [licenses]

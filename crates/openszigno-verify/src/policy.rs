@@ -162,6 +162,19 @@ impl Transform {
     }
 }
 
+/// The largest CRL or OCSP response this build will accept, wherever it comes
+/// from.
+///
+/// One limit, used everywhere, on purpose. It was previously three: the
+/// downloader capped a fetch at 16 MiB, the `--revocation-store` loader capped
+/// a file at 16 MiB, and the tier walk quietly skipped any item over 8 MiB. A
+/// CRL between the two figures therefore loaded, was stored, and was then
+/// passed over without a word, leaving the certificate `revocation_status_
+/// unknown` for a reason nothing in the report named. Anything over this bound
+/// is now refused *and said out loud*, with the size and the limit, by whichever
+/// layer met it first.
+pub const MAX_REVOCATION_ITEM_BYTES: usize = 16 * 1024 * 1024;
+
 /// Verification limits, on top of the structural limits the core crate applies.
 #[derive(Clone, Debug, Serialize)]
 pub struct VerifyLimits {

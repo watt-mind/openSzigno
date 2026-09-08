@@ -214,6 +214,40 @@ fn a_member_inside_a_subdirectory_is_not_a_bare_name() {
     assert_eq!(decode_error(&xml), ErrorCode::UnsafeZipMember);
 }
 
+/// A member whose Unix mode marks it as a symbolic link (`S_IFLNK`,
+/// `0o120000`) is rejected: a symlink's "contents" are a target path, not
+/// document bytes, and following it is not something this crate does.
+#[test]
+fn a_symlink_member_is_not_a_regular_file() {
+    // `SimpleFileOptions::unix_permissions` masks to the low 0o777
+    // permission bits and cannot itself set the symlink file-type bit
+    // (`S_IFLNK`, `0o120000`), so the member is built with the ZIP writer's
+    // own symlink support instead.
+    let mut archive = std::io::Cursor::new(Vec::new());
+    {
+        let mut writer = zip::ZipWriter::new(&mut archive);
+        writer
+            .add_symlink("payload.txt", "/etc/passwd", stored())
+            .expect("symlink member is added");
+        writer.finish().expect("archive finishes");
+    }
+    let xml = zip_dossier(&archive.into_inner(), 11);
+    assert_eq!(decode_error(&xml), ErrorCode::UnsafeZipMember);
+}
+
+/// The negative case for the symlink check above: an ordinary regular file
+/// with an executable Unix mode (`S_IFREG`, `0o100755`) is *not* rejected as
+/// unsafe. This pins the mask to exactly the file-type bits (`0o170000`)
+/// rather than, say, any bit outside the low permission bits.
+#[test]
+fn a_regular_file_with_an_executable_mode_is_still_a_regular_file() {
+    let options = stored().unix_permissions(0o100755);
+    let archive = single_member_zip("payload.txt", b"payload", options);
+    let xml = zip_dossier(&archive, 7);
+    let outcome = decode(&xml);
+    assert_eq!(decoded_bytes(outcome), b"payload");
+}
+
 #[test]
 fn a_member_above_the_expanded_size_limit_is_rejected_from_its_header() {
     let archive = single_member_zip("payload.bin", &vec![7u8; 4096], stored());

@@ -254,6 +254,18 @@ pub enum RevocationPolicy {
     /// [`RevocationSource`] as any offline one, and is validated by the same
     /// offline code path before it is believed.
     Online,
+    /// The caller passed `--online`, but no trust anchors were configured, so
+    /// nothing was fetched.
+    ///
+    /// Revocation data is fetched only for certificates that sit on a path to
+    /// a configured anchor: a URL out of a certificate nothing vouches for is
+    /// an attacker-chosen destination, and contacting it would let any dossier
+    /// decide who this tool talks to. With no anchors there is no such path,
+    /// so there is nothing to fetch for and the run is offline in fact. The
+    /// state is distinct from [`Offline`](Self::Offline) because the caller
+    /// asked for something they did not get, and a report that said plain
+    /// `offline` would not tell them why.
+    OnlineNoAnchors,
 }
 
 impl RevocationPolicy {
@@ -262,6 +274,7 @@ impl RevocationPolicy {
             Self::NotChecked => "not_checked",
             Self::Offline => "offline",
             Self::Online => "online",
+            Self::OnlineNoAnchors => "online_no_anchors",
         }
     }
 }
@@ -314,7 +327,11 @@ pub struct MemoryRevocationStore {
     ocsp: Vec<Vec<u8>>,
     online_crls: Vec<Vec<u8>>,
     online_ocsp: Vec<Vec<u8>>,
-    online: bool,
+    /// The policy `--online` left behind, if the caller passed it at all:
+    /// [`RevocationPolicy::Online`] when fetching was permitted, and
+    /// [`RevocationPolicy::OnlineNoAnchors`] when it was asked for but no
+    /// trust anchor made any certificate eligible for it.
+    online: Option<RevocationPolicy>,
 }
 
 impl MemoryRevocationStore {
@@ -324,21 +341,29 @@ impl MemoryRevocationStore {
             ocsp,
             online_crls: Vec::new(),
             online_ocsp: Vec::new(),
-            online: false,
+            online: None,
         }
     }
 
     /// Mark the store as having been filled under `--online`, so the reported
     /// policy says so even when nothing was actually fetched.
     pub fn into_online(mut self) -> Self {
-        self.online = true;
+        self.online = Some(RevocationPolicy::Online);
+        self
+    }
+
+    /// Mark the store as one `--online` was asked of and could fetch nothing
+    /// for, because no trust anchor was configured and so no certificate sat
+    /// on a path to one.
+    pub fn into_online_without_anchors(mut self) -> Self {
+        self.online = Some(RevocationPolicy::OnlineNoAnchors);
         self
     }
 
     /// Add artefacts the CLI fetched, keeping them separate from the offline
     /// tiers so that the report can say an answer came from the network.
     pub fn extend_online(&mut self, crls: Vec<Vec<u8>>, ocsp: Vec<Vec<u8>>) {
-        self.online = true;
+        self.online = Some(RevocationPolicy::Online);
         self.online_crls.extend(crls);
         self.online_ocsp.extend(ocsp);
     }
@@ -346,11 +371,7 @@ impl MemoryRevocationStore {
 
 impl RevocationSource for MemoryRevocationStore {
     fn policy(&self) -> RevocationPolicy {
-        if self.online {
-            RevocationPolicy::Online
-        } else {
-            RevocationPolicy::Offline
-        }
+        self.online.unwrap_or(RevocationPolicy::Offline)
     }
 
     fn crls(&self) -> &[Vec<u8>] {
@@ -400,7 +421,7 @@ pub fn parse_rfc3339(text: &str) -> Option<UnixTime> {
     let hour = number(11..13)?;
     let minute = number(14..16)?;
     let second = number(17..19)?;
-    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+    if !(1..=12).contains(&month) || day < 1 || day > days_in_month(year, month) {
         return None;
     }
     if hour > 23 || minute > 59 || second > 60 {
@@ -445,6 +466,24 @@ pub fn format_rfc3339(time: UnixTime) -> String {
     )
 }
 
+/// The number of days in `month` (1..=12) of the proleptic Gregorian
+/// `year`, accounting for leap years (divisible by 4, except centuries
+/// unless also divisible by 400: 2024 and 2000 are leap, 2023 and 1900 are
+/// not).
+fn days_in_month(year: i64, month: i64) -> i64 {
+    const LENGTHS: [i64; 12] = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    if month == 2 && is_leap_year(year) {
+        29
+    } else {
+        LENGTHS[(month - 1) as usize]
+    }
+}
+
+/// Whether `year` is a leap year in the proleptic Gregorian calendar.
+fn is_leap_year(year: i64) -> bool {
+    (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
+}
+
 /// Howard Hinnant's `days_from_civil`, which is exact for the proleptic
 /// Gregorian calendar and needs no table.
 fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
@@ -473,4 +512,162 @@ fn civil_from_days(days: i64) -> (i64, i64, i64) {
         month_prime - 9
     };
     (if month <= 2 { year + 1 } else { year }, month, day)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::codes::{Check, CheckCode, CheckStatus};
+    use crate::trustlist::ServiceRecord;
+
+    fn service_identity(der: &[u8]) -> TrustServiceIdentity {
+        TrustServiceIdentity {
+            identity: ServiceIdentity::Certificate(der.to_vec()),
+            service: ServiceRecord {
+                service_name: Some("Example TSP".to_owned()),
+                territory: Some("HU".to_owned()),
+                sequence_number: Some(1),
+                entries: Vec::new(),
+            },
+        }
+    }
+
+    /// `MemoryTrustStore`'s accessors report exactly what was loaded into it,
+    /// not merely "something" — a mutant that returned an empty slice, or the
+    /// wrong field, would still pass a bare `is_empty()` check but fails
+    /// these content assertions.
+    #[test]
+    fn memory_trust_store_accessors_report_loaded_contents() {
+        let mut store = MemoryTrustStore::new(
+            vec![b"anchor-der".to_vec()],
+            vec![b"intermediate-der".to_vec()],
+        );
+        store.extend_services(vec![service_identity(b"service-der")]);
+        store.push_check(Check::new(
+            CheckCode::SigStructureInvalid,
+            CheckStatus::Failed,
+            "synthetic",
+        ));
+
+        assert_eq!(store.anchors().len(), 1);
+        assert_eq!(store.anchors()[0].der, b"anchor-der");
+        assert_eq!(store.anchors()[0].origin, TrustAnchorOrigin::TrustStore);
+        assert_eq!(store.intermediates(), &[b"intermediate-der".to_vec()]);
+        assert!(store.configured());
+
+        assert_eq!(store.services().len(), 1);
+        match &store.services()[0].identity {
+            ServiceIdentity::Certificate(der) => assert_eq!(der, b"service-der"),
+            other => panic!("expected a certificate identity, got {other:?}"),
+        }
+        assert_eq!(
+            store.services()[0].service.service_name.as_deref(),
+            Some("Example TSP")
+        );
+
+        assert_eq!(store.checks().len(), 1);
+        assert_eq!(store.checks()[0].code, CheckCode::SigStructureInvalid);
+        assert_eq!(store.checks()[0].message, "synthetic");
+    }
+
+    /// `NoTrust` is not `configured()`, unlike an explicitly empty
+    /// `MemoryTrustStore`, and both report empty everything else.
+    #[test]
+    fn no_trust_is_empty_and_unconfigured() {
+        let store = NoTrust;
+        assert!(store.anchors().is_empty());
+        assert!(store.intermediates().is_empty());
+        assert!(!store.configured());
+        assert!(store.services().is_empty());
+        assert!(store.checks().is_empty());
+    }
+
+    /// `MemoryRevocationStore`'s `crls`/`ocsp_responses` report the offline
+    /// material, and `online_crls`/`online_ocsp_responses` report only the
+    /// material added through `extend_online`, kept apart from the offline
+    /// tier.
+    #[test]
+    fn memory_revocation_store_separates_offline_and_online_material() {
+        let mut store = MemoryRevocationStore::new(
+            vec![b"offline-crl".to_vec()],
+            vec![b"offline-ocsp".to_vec()],
+        );
+        assert_eq!(store.policy(), RevocationPolicy::Offline);
+        assert_eq!(store.crls(), &[b"offline-crl".to_vec()]);
+        assert_eq!(store.ocsp_responses(), &[b"offline-ocsp".to_vec()]);
+        assert!(store.online_crls().is_empty());
+        assert!(store.online_ocsp_responses().is_empty());
+
+        store.extend_online(vec![b"online-crl".to_vec()], vec![b"online-ocsp".to_vec()]);
+        assert_eq!(store.policy(), RevocationPolicy::Online);
+        // The offline tier is unchanged by the online addition.
+        assert_eq!(store.crls(), &[b"offline-crl".to_vec()]);
+        assert_eq!(store.ocsp_responses(), &[b"offline-ocsp".to_vec()]);
+        assert_eq!(store.online_crls(), &[b"online-crl".to_vec()]);
+        assert_eq!(store.online_ocsp_responses(), &[b"online-ocsp".to_vec()]);
+    }
+
+    #[test]
+    fn no_revocation_reports_not_checked_and_empty_everywhere() {
+        let store = NoRevocation;
+        assert_eq!(store.policy(), RevocationPolicy::NotChecked);
+        assert!(store.crls().is_empty());
+        assert!(store.ocsp_responses().is_empty());
+        assert!(store.online_crls().is_empty());
+        assert!(store.online_ocsp_responses().is_empty());
+    }
+
+    #[test]
+    fn into_online_without_anchors_reports_that_policy_with_no_fetched_material() {
+        let store =
+            MemoryRevocationStore::new(Vec::new(), Vec::new()).into_online_without_anchors();
+        assert_eq!(store.policy(), RevocationPolicy::OnlineNoAnchors);
+        assert!(store.online_crls().is_empty());
+        assert!(store.online_ocsp_responses().is_empty());
+    }
+
+    // -----------------------------------------------------------------
+    // parse_rfc3339 boundaries not already covered by
+    // `openszigno-verify/tests/verify.rs` (LAB-273): leap seconds, the hour
+    // boundary, and offset field boundaries.
+    // -----------------------------------------------------------------
+
+    /// Second 59 is ordinary and second 60 is accepted as a leap second (the
+    /// check is `second > 60`, not `>= 60`); 61 is rejected.
+    #[test]
+    fn seconds_59_and_60_are_accepted_61_is_not() {
+        assert!(parse_rfc3339("2020-06-30T23:59:59Z").is_some());
+        assert!(parse_rfc3339("2020-06-30T23:59:60Z").is_some());
+        assert!(parse_rfc3339("2020-06-30T23:59:61Z").is_none());
+    }
+
+    /// Hour 23 is the last valid hour; hour 24 (even as `24:00:00`) is not.
+    #[test]
+    fn hour_23_is_accepted_hour_24_is_not() {
+        assert!(parse_rfc3339("2020-06-01T23:00:00Z").is_some());
+        assert!(parse_rfc3339("2020-06-01T24:00:00Z").is_none());
+    }
+
+    /// A numeric offset's hour field tops out at 23 and its minute field at
+    /// 59; one past either boundary is rejected.
+    #[test]
+    fn offset_hour_and_minute_fields_are_bounded() {
+        assert!(parse_rfc3339("2020-06-01T00:00:00+23:59").is_some());
+        assert!(parse_rfc3339("2020-06-01T00:00:00+24:00").is_none());
+        assert!(parse_rfc3339("2020-06-01T00:00:00+00:60").is_none());
+        assert!(parse_rfc3339("2020-06-01T00:00:00-23:59").is_some());
+    }
+
+    /// The minimum-length input (`bytes.len() < 20`) boundary: 19 bytes is
+    /// too short even when every character is otherwise well formed, and 20
+    /// (with a `Z`) is exactly enough.
+    #[test]
+    fn nineteen_bytes_is_too_short_twenty_is_enough() {
+        let nineteen = "2020-06-01T00:00:00";
+        assert_eq!(nineteen.len(), 19);
+        assert!(parse_rfc3339(nineteen).is_none());
+        let twenty = "2020-06-01T00:00:00Z";
+        assert_eq!(twenty.len(), 20);
+        assert!(parse_rfc3339(twenty).is_some());
+    }
 }

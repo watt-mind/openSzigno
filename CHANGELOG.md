@@ -10,7 +10,305 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
 
 ## [Unreleased]
 
-Nothing yet.
+### Fixed
+
+- The CI `hygiene` job no longer re-checks commits that are already on
+  `develop` when a release pull request promotes `develop` to `master`;
+  those passed the check on the pull request that landed them, and two
+  older commits predate the rule.
+
+## [0.5.0] - 2026-09-08
+
+### Added
+
+- The CI `semver` job runs `cargo-semver-checks` for `openszigno-core` and
+  `openszigno-verify` against the version already published on crates.io,
+  failing on a breaking API change unless the crate's `Cargo.toml` version
+  was bumped to cover it. See
+  [docs/releasing.md](docs/releasing.md#semver-checks) for how this applies
+  to the pre-1.0 `0.x` crates here. The `openszigno-verify` step ran as
+  advisory until this release, because `develop` carried breaking API
+  changes relative to the published `0.4.0` (new public fields on
+  `SignatureCoverage` and `ChainEntry`, a new `RevocationPolicy` variant,
+  and a renamed `SignatureCoverage` field); the `0.5.0` bump covers them
+  and both steps block again.
+- The CI `hygiene` job, on pull requests only, runs `scripts/commit-msg.sh`
+  (now reusable with a file path or `-` for stdin, in addition to its
+  original hook mode) over every commit subject in the pull request's
+  range, skipping merge commits and `dependabot[bot]`/`github-actions[bot]`
+  commits, and requires the pull request body to contain a
+  `Fixes`/`Closes`/`Refs LAB-<n>` line unless the pull request is
+  bot-authored or labelled `no-ticket`. See
+  [CONTRIBUTING.md](CONTRIBUTING.md#commit-messages).
+- The CI `lint` job now runs `cargo machete` to catch dependencies declared
+  in a manifest but never used. See
+  [CONTRIBUTING.md](CONTRIBUTING.md#required-checks) for how to reproduce it
+  locally and how to record a dependency that is only reachable through a
+  macro or a feature.
+- Nightly fuzzing of the parsers with `cargo-fuzz`: a `fuzz/` package (LAB-268,
+  excluded from the workspace so it never touches the stable MSRV build) with
+  ten targets covering dossier parsing, payload decoding, CMS decryption,
+  C14N canonicalization, and CRL, OCSP, RFC 3161 timestamp, trusted-list, and
+  certificate parsing, each asserting only that the function under it never
+  panics. `.github/workflows/fuzz.yml` runs every target nightly and on
+  manual dispatch; a crash uploads the minimised reproducer and opens or
+  refreshes a tracking issue. See
+  [docs/testing.md](docs/testing.md#fuzzing).
+- Golden output contract tests under `tests/golden/`: the stdout and exit
+  status of `inspect`, `list`, `validate-structure`, `verify` and `extract`
+  over every fixture in `tests/fixtures/`, in `--json` and human mode, plus
+  two trusted `verify` runs over the signed XMLDSig vector.
+  `scripts/golden.py check --bin <binary>` diffs the built binary against
+  them and `update` regenerates them; the new CI `golden` job and the release
+  smoke test both run `check`. Only two clock-dependent times are masked. A
+  diff is a change to the JSON envelope contract and is reviewed under the
+  `schema_version` rule; see
+  [tests/golden/README.md](tests/golden/README.md).
+- `--online-allow-private` on `verify`, which permits `--online` to contact
+  loopback, private, link-local and unique-local destinations and the name
+  `localhost`. It requires `--online`, waives the address rules and nothing
+  else, and exists for an internal CA that really does publish on the
+  operator's own network.
+- `policy.revocation` has a fourth value, `online_no_anchors`, for a run given
+  `--online` with no trust anchor configured: nothing was fetched, and both the
+  `revocation_policy` check and every `revocation_status_unknown` message now
+  say why rather than leaving the caller with an unexplained gap.
+- `scripts/check-file-length.py`, run in CI's Documentation job, fails a
+  tracked `crates/*/src/*.rs` file over 800 physical lines or a
+  `crates/*/tests/*.rs` file over 1500, with a shrink-only allowlist in
+  `scripts/file-length-allowlist.txt` for files that already exceeded the
+  limit before the guardrail was added. See
+  [CONTRIBUTING.md](CONTRIBUTING.md#documentation).
+- `clippy::too_many_lines` is now a workspace lint, with `clippy.toml`
+  setting `too-many-lines-threshold`. See
+  [CONTRIBUTING.md](CONTRIBUTING.md#required-checks) for the current
+  threshold and the plan to lower it.
+- `scripts/coverage_gate.py`, run in CI's Coverage job, enforces a 90%
+  per-crate line-coverage floor, 80% patch coverage on lines a pull
+  request adds or modifies under `crates/*/src/` (when at least 20
+  instrumentable lines changed), and a ratchet against
+  `scripts/coverage-floors.txt` so a crate cannot silently drop more than
+  1.0 point below its recorded coverage. The job posts and refreshes a
+  single PR comment with the summary. See
+  [CONTRIBUTING.md](CONTRIBUTING.md#coverage-quality-gate).
+- `.github/workflows/mutants.yml`, a nightly (and manually dispatchable)
+  `cargo-mutants` run over `openszigno-core` and `openszigno-verify`.
+  `scripts/mutants_gate.py` enforces a ratchet against
+  `scripts/mutants-floors.txt`, the same model as the coverage floors: a
+  crate's caught-mutant percentage cannot drop more than 2.0 points below
+  its recorded value. It is not a required pull-request check; a gate
+  failure opens or refreshes a single "Mutation testing: survivors" issue
+  instead. See [docs/testing.md](docs/testing.md#mutation-testing).
+
+### Tests
+
+- Behavioural tests for the first batch of `cargo-mutants` survivors from the
+  LAB-267 seeding pass: `decode.rs`'s compression-ratio boundary and ZIP
+  symlink guard, `scan.rs`'s depth/node-limit and self-closing-tag
+  arithmetic, `inventory.rs`'s first-occurrence match guards,
+  `trust.rs`'s `TrustSource`/`RevocationSource` accessors and further
+  `parse_rfc3339` boundaries, and `scope.rs`'s signature-profile
+  node-ownership guard. Raised the `openszigno-core` mutation floor from
+  89.46% to 91.12% (full-crate run) and `openszigno-verify` from 70.59% to
+  78.99% (the same `--shard 1/4` slice it was seeded from). See
+  [docs/testing.md](docs/testing.md#mutation-testing).
+
+### Changed
+
+- `README.md` restructured from 536 lines to a scannable front door. "Why and
+  for whom" now sits directly under the security boundary instead of behind
+  the installation block, and states what the tool offers agents, people, and
+  anyone handling hostile input. Installation is one block per channel, the
+  quick start is one human, one `--json`, and one `verify` example, and the
+  command reference is a single table with each command's exit statuses. The
+  reference material moved out of it, deduplicated: the flag tables, the
+  global and `extract` flags, and the full `verify` flag table are now in
+  [docs/architecture.md](docs/architecture.md), which already held the JSON
+  envelope, the stable codes, the exit statuses, and the limits; the
+  "what is not supported yet" list is now a "Not yet implemented" section in
+  [docs/roadmap.md](docs/roadmap.md), refreshed because M2 phase 2, M2 phase 3,
+  and M3 have all shipped since it was written. The README's LEGAL section no
+  longer claims that verification can report "only `invalid` or
+  `indeterminate`", which stopped being true when revocation checking landed.
+- Internal module split of the CLI crate: `crates/openszigno-cli/src/main.rs`
+  became `args`, `input`, `response`, `render/`, `commands/`, `extract/`, and
+  `trust`, and each unit test moved next to the code it covers. No behaviour
+  change — every flag, help text, message, stable code, exit status, and byte
+  of JSON and human output is what it was. See
+  [docs/architecture.md](docs/architecture.md#module-map-openszigno-cli).
+- `openszigno-verify` was split into one module per pipeline stage: internal
+  module split, no behaviour change. `dsig.rs` became `references`, `scope`,
+  `countersign`, `signature` and `coverage`; `lib.rs` now reads as the
+  documented stages A to F with one `Context` threaded through them. Every
+  check code, status, message, ordering and JSON field is unchanged, and the
+  crate's public API keeps the paths it had. See
+  [docs/architecture.md](docs/architecture.md#module-map).
+- Second-round internal split of the five remaining oversized
+  `openszigno-verify` sources, moving code verbatim with no behaviour change:
+  `certs.rs` became `certs/` (`extensions`, `purpose`, `names`, `path`),
+  `revocation.rs` became `revocation/` (`crl`, `ocsp`, `tiers`), `tsa.rs`
+  became `tsa/` (`token`, `imprint`, `path`, `tests`), `signature.rs` gained
+  `signed_info` and `collect`, and `trustlist.rs` became `trustlist/`
+  (`parse`, `services`, `qualified`). Every check code, status, message,
+  ordering and JSON field is unchanged, and every public item keeps its old
+  path through `pub use` re-exports. No `openszigno-verify` source file is
+  named in `scripts/file-length-allowlist.txt` any more. See
+  [docs/architecture.md](docs/architecture.md#module-map).
+- `crates/openszigno-verify/tests/common/mod.rs` (2394 lines) was split into
+  `pki.rs`, `dossier.rs`, `signer.rs`, `timestamps.rs`, `cms.rs` and
+  `trustlist.rs`, with `mod.rs` reduced to module declarations and `pub use`
+  re-exports; every existing `use common::{...}` import keeps compiling
+  unchanged. Code moved verbatim, no behaviour change. See
+  [docs/testing.md](docs/testing.md#test-layout).
+- `crates/openszigno-core/src/decrypt.rs` (1008 lines) was split into
+  `decrypt/mod.rs`, `cms.rs`, `ciphers.rs` and `keys.rs`, one module per
+  concern of the `encrypt` transform: CMS `ContentInfo`/`EnvelopedData`/
+  `RecipientInfo` parsing and key unwrap, content-cipher identification and
+  AES/3DES-CBC decryption, and recipient key loading and certificate
+  matching. Code moved verbatim; `DecryptOptions` and `RecipientKey` keep
+  their `openszigno_core::` paths, and every error code, message and test is
+  unchanged. Removed from `scripts/file-length-allowlist.txt`. See
+  [docs/architecture.md](docs/architecture.md#module-map-openszigno-core).
+
+### Fixed
+
+- `--online` ran one offline pre-pass and then one fetch, so evidence a fetch
+  produced could not open a path the pre-pass had ruled out. A signer whose
+  certificate has expired has no validated path at the clock, and so nothing
+  may be fetched for it; fetching the revocation evidence its signature
+  timestamp's authority needed can verify that timestamp, move the signer's
+  validation time back to the instant the token proves and restore its path,
+  but by then fetching had finished and the signer's own revocation data was
+  never requested. Fetching now runs in at most three bounded rounds: each
+  round verifies with everything fetched so far and fetches only for the
+  certificates that round made eligible, stopping as soon as a round turns up
+  nothing new. Coverage is judged at the validation time each path was
+  actually evaluated at rather than at one global time, so evidence that is
+  fresh at a proven historical instant is no longer re-requested for being
+  stale at the clock. The certificate budget (32) is a budget for the run, the
+  trust gate, the destination policy, `--online-cache` and the
+  `online_fetch_failed` checks are unchanged, and the JSON envelope is
+  unchanged. `VerifyReport::validated_path_certificates_at` is the new
+  verify-crate method the CLI reads the set and its times from; the existing
+  `validated_path_certificates` keeps its signature and its meaning.
+- `--online` deduplicated fetches by URL alone, so two certificates issued by
+  the same CA — which name the same AIA responder — produced one OCSP request
+  and left the second certificate uncovered for a reason nothing in the report
+  named. OCSP is now deduplicated by responder URL **and** `certID`, and CRLs
+  by URL, which is the right key for a list. `--online-cache` names a cached
+  OCSP response by the `certID` it answers about as well as by its own bytes,
+  so two answers from one responder stay distinguishable.
+- Revocation evidence had three size limits: downloads and the
+  `--revocation-store` loader accepted 16 MiB while the tier walk silently
+  skipped anything over 8 MiB, so a CRL between the two figures loaded, was
+  stored, and then answered nothing. There is now one constant,
+  `openszigno_verify::MAX_REVOCATION_ITEM_BYTES` (16 MiB), used by the verifier,
+  the fetch cap and the store loader, and oversized evidence is reported —
+  as `revocation_data_invalid` in the tier walk, as a store-loading error, and
+  as an `online_fetch_failed` — naming the size and the limit instead of being
+  passed over in silence.
+- `parse_rfc3339` (the RFC 3339 parser shared by `--at`, trusted-list dates,
+  and `xades:SigningTime`) bounded the day of month to 1..=31 regardless of
+  the month, so a calendar-impossible date like `2026-02-31T00:00:00Z` parsed
+  and silently became `2026-03-03`. It now validates real month lengths and
+  Gregorian leap years. `--at` with such a date is now a usage error (exit
+  2); a `SigningTime` with one still parses to `None`, which every caller
+  already treats as an absent, unauthenticated claim.
+- `extract`'s rollback of a partially written output tree used
+  `Iterator::all`, which stops at the first failed removal and never even
+  attempts the entries after it. It now attempts every recorded entry once,
+  in the same reverse creation order, regardless of earlier failures, and
+  still reports "files may remain" if any removal failed.
+- `extract --decrypt-key`'s RSA key-transport decryption now uses
+  `RsaPrivateKey::decrypt_blinded` instead of plain `decrypt`, closing the
+  timing side-channel on the private-key modular exponentiation
+  (RUSTSEC-2023-0071). The `deny.toml` ignore rationale for that advisory is
+  corrected: the RSA ciphertext being decrypted comes from the dossier under
+  analysis, not the operator, so a service that decrypts many
+  attacker-submitted dossiers against one key is exposed to a
+  Bleichenbacher/Marvin-style chosen-ciphertext attack; direct local use is
+  not. See [SECURITY.md](SECURITY.md) and
+  [docs/architecture.md](docs/architecture.md#decryption).
+
+### Security
+
+- `--online` now connects to the addresses its destination policy actually
+  vetted. The policy resolved a host, judged the addresses it got back, and
+  then handed the *name* to `ureq`, which resolved it a second time; a zone
+  answering with a public address first and a private one second walked past
+  the address rules through the gap between the check and the socket.
+  `permitted` now returns the endpoint it approved together with its
+  addresses, and the fetcher pins exactly those as the resolution for that
+  host and port through a `ureq` `Resolver` that answers from the pinned map
+  and refuses every other name rather than falling back to system DNS. Every
+  hop is pinned in its own right, so a redirect target is dialled on its own
+  vetted addresses. Only the address is pinned: the URL is sent as published,
+  so the `Host` header, the TLS SNI value and the certificate host-name
+  verification still use the name the certificate published. A host that
+  resolves to nothing is reported as `transport` and nothing is contacted. No
+  new refusal rule and no output change. With `--online-proxy` the request is
+  sent to the proxy and the proxy resolves the destination, so the destination
+  policy still checks the URL but the proxy is what opens the socket; that is
+  now stated in [docs/trust.md](docs/trust.md#online-fetching),
+  [docs/architecture.md](docs/architecture.md) and
+  [SECURITY.md](SECURITY.md).
+- `--online` no longer fetches revocation data for a certificate the run does
+  not trust. A URL is contacted only for a certificate on a certification path
+  the verifier **validated to a configured trust anchor**, from `--trust-store`
+  or from a trusted list, for a signature or a timestamp under evaluation; the
+  set comes from an offline verification pre-pass
+  (`VerifyReport::validated_path_certificates`), so a certificate embedded
+  elsewhere in the XML generates no traffic even when it chains to an anchor.
+  With no anchors configured nothing is fetched at all. Previously the fetcher
+  only checked that an embedded issuer had signed the certificate — a statement
+  whoever wrote the dossier wrote on both sides of — so a synthetic dossier
+  with no trust store configured was enough to make openszigno open a
+  connection of the dossier's choosing.
+- `--online` now applies a destination policy before it opens a socket, to the
+  published URL and to every redirect target alike: `http` and `https` only, no
+  userinfo in a URL, and none of loopback, RFC 1918 private, link-local,
+  unique-local, unspecified, broadcast, multicast, the cloud instance metadata
+  addresses `169.254.169.254` and `fd00:ec2::254`, or the names `localhost` and
+  `*.localhost`, unless the new `--online-allow-private` is given. The host's
+  resolved addresses are re-checked against the same list before connecting, so
+  a public name that resolves inwards — DNS rebinding — is refused too, and an
+  IPv4-mapped IPv6 address is judged as the IPv4 address it carries. Refusals
+  are reported as `online_fetch_failed` (`info`) with the class
+  `destination_refused` and the rule that refused them, and nothing is
+  contacted. See [SECURITY.md](SECURITY.md#network-exposure) and
+  [docs/trust.md](docs/trust.md#online-fetching).
+- `--online-cache` is written with the same descriptor-relative machinery as
+  `extract`: the directory is opened with `O_DIRECTORY | O_NOFOLLOW` and walked
+  component by component, and every file is created with
+  `O_CREAT | O_EXCL | O_NOFOLLOW`. It previously used `create_dir_all`,
+  `Path::exists` and `fs::write`, which follow symlinked components and final
+  files, check existence separately from writing, and truncate. Nothing is now
+  ever truncated or replaced: a name already holding exactly the artefact being
+  cached is left as it is — which is also what two concurrent runs look like —
+  and a name holding anything else, or a symlink, is reported as
+  `online_fetch_failed` with the class `cache_collision` while the run
+  continues, because caching is an optimisation and never changes a verdict.
+- A signature relying on a whole-document enveloped reference could pass the
+  reference-scope check while its `xades:SignedProperties` — including the
+  `SigningCertificate` binding — and its signature profile object were
+  unsigned, feeding unauthenticated XAdES properties to the later stages. The
+  check read coverage off the resolved node and its ancestors and ignored the
+  transform chain, so a reference to the whole document (`URI=""`), or to any
+  ancestor, carrying the enveloped-signature transform was credited with
+  covering elements inside the `ds:Signature` that transform removes from the
+  digest calculation (XMLDSig 1.1 clause 6.6.4), and so absent from the
+  digested bytes. Coverage is now membership of the reference's effective node
+  set: ancestor containment minus the subtrees the transforms removed, with
+  canonicalization changing nothing and `base64` covering the resolved node's
+  content but no element structure beneath it. The rule lives in one function,
+  which the reference-scope check, the countersignature binding and the
+  document-coverage report all use, so the three agree by construction. Such a
+  signature is now `reference_scope_incomplete`, naming both elements, and
+  covers no document; a reference whose enveloped transform removes everything
+  it selected is refused rather than digested as the empty octet string.
+  Signatures that reference those elements directly, as real dossiers do, are
+  unaffected. No check code, status name or JSON field changed. See
+  [docs/architecture.md](docs/architecture.md#the-effective-node-set).
 
 ## [0.4.0] - 2026-09-08
 
@@ -1101,6 +1399,7 @@ This release performs no cryptographic verification of any kind.
 
 [0.1.0]: https://github.com/watt-mind/openSzigno/releases/tag/v0.1.0
 [0.2.0]: https://github.com/watt-mind/openSzigno/compare/v0.1.0...v0.2.0
-[Unreleased]: https://github.com/watt-mind/openSzigno/compare/v0.4.0...develop
+[Unreleased]: https://github.com/watt-mind/openSzigno/compare/v0.5.0...develop
+[0.5.0]: https://github.com/watt-mind/openSzigno/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/watt-mind/openSzigno/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/watt-mind/openSzigno/compare/v0.2.0...v0.3.0

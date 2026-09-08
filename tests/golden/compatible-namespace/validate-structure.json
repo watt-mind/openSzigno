@@ -1,0 +1,26 @@
+{
+  "command": "validate-structure",
+  "data": {
+    "conformance_warnings": 2,
+    "cryptographic_verification_performed": false,
+    "documents": 1,
+    "valid_structure": true
+  },
+  "errors": [],
+  "input": {
+    "bytes": 1093,
+    "format": "microsec-es3"
+  },
+  "ok": true,
+  "schema_version": 1,
+  "warnings": [
+    {
+      "code": "dangling_objref",
+      "message": "SignatureProfile OBJREF does not resolve to any XML ID"
+    },
+    {
+      "code": "document_without_profile",
+      "message": "Document at source position 1 has no DocumentProfile and was skipped"
+    }
+  ]
+}

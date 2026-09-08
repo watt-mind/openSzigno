@@ -1,0 +1,7 @@
+Microsec e-Szigno dossier
+Title: openSzigno OpenSSL vector
+Documents: 1
+Signatures present: 1 (not verified)
+Timestamps present: 0 (not verified)
+Signature inventory (claimed by the dossier; nothing below was verified):
+(unverified) signature 0: placement=document, document=0, id=sig0, references=3, certificates=0, crls=0, ocsp=0, signature-timestamps=0, archive-timestamps=0

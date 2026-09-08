@@ -4,6 +4,11 @@ This document is the canonical reference for the openSzigno JSON envelope,
 stable codes, limits, parser safety model, and extraction policy. Anything
 described here is intended to be stable for a given `schema_version`.
 
+For upstream format sources and their relationship to code and tests, see
+[ES3 specification and implementation map](es3-specification.md). That guide
+distinguishes format requirements from this tool's policy and compatibility
+choices; this document remains the authority for the openSzigno API.
+
 ## Goals
 
 - Provide distributable, cross-platform binaries.
@@ -74,6 +79,70 @@ namespace-aware XML parsing, `base64` and `zip` for bounded payload decoding,
 and `serde`/`serde_json` for the protocol. Dependency versions and licenses
 are captured by `Cargo.lock` and Cargo metadata.
 
+### Module map: `openszigno-cli`
+
+The binary is split along the path one run takes: parse the command line,
+read the input, run the command, render the response, exit. Nothing below is
+part of the public contract — it is where to look, not what is promised.
+
+```text
+crates/openszigno-cli/src/
+  main.rs             # fn main: dispatch, then write the response and exit
+  args.rs             # clap types, and the shared --allow-namespace plumbing
+  input.rs            # the bounded reader for a file or stdin, InputInfo, load
+  response.rs         # the JSON envelope, CliError, and its exit statuses
+  render/             # writing the envelope (json.rs) and the summary (human.rs)
+  commands/           # one module per command: inspect, list, validate,
+                      #   extract, verify
+  extract/            # select.rs (--document), plan.rs (decode, names, nesting),
+                      #   names.rs (filename safety), write.rs (writing and
+                      #   rollback), output_dir.rs (race-resistant output)
+  trust.rs            # --trust-store, --trust-list, and --lotl loading
+  revocation_store.rs # --revocation-store loading
+  online/             # --online fetching, the only code that opens a socket
+    mod.rs            #   the transport, its bounds and failure classes, and
+                      #     the --online-cache writer
+    gaps.rs           #   what to fetch and for whom: the trust gate, coverage
+                      #     at each path's own validation time, the URL order
+    destination.rs    #   which URLs and addresses may be contacted at all
+    pinned.rs         #   connecting only to the addresses the policy approved
+```
+
+Two boundaries are load-bearing rather than tidiness. Every command reaches
+its input through `input::load` alone, so the size cap in
+[Limits](#limits) cannot be bypassed by adding a command. And `extract`
+plans the whole output tree — decoding, naming, and collision checking —
+before `extract/write.rs` touches the filesystem, which is what makes the
+all-or-nothing guarantee in [Extraction policy](#extraction-policy) possible.
+
+### Module map: `openszigno-core`
+
+```text
+crates/openszigno-core/src/
+  lib.rs      # the crate's public re-exports and the parse/parse_with_options entry points
+  parse.rs    # namespace policy and the top-level Dossier parse
+  xml.rs      # the shared XmlSource and id_map that verify reads too
+  model.rs    # Dossier, Document, Limits, and the inventoried summary types
+  sniff.rs    # DetectedType detection ahead of full parsing
+  scan.rs     # structural scanning: duplicate IDs, objref resolution, warnings
+  decode.rs   # decode_document_with: base64/zip decoding and the encrypt handoff
+  decrypt/    # the encrypt transform; see below
+  inventory.rs # signature/timestamp inventory for the JSON envelope
+  error.rs    # Error, ErrorCode, and the stable-code table
+```
+
+`decrypt/` undoes the `encrypt` transform (CMS `EnvelopedData`, RFC 5652) and
+is split by concern, one module per stage of that pipeline. The split is
+internal; `DecryptOptions` and `RecipientKey` are the only public names, both
+re-exported from `decrypt::mod` at their original path.
+
+| Module | What it owns |
+| --- | --- |
+| `mod.rs` | The public entry points (`DecryptOptions`, `RecipientKey` re-export), `CmsOutcome`, and `decrypt_cms`, the orchestration that ties the other three modules together. |
+| `cms` | `ContentInfo` / `EnvelopedData` / `RecipientInfo` parsing and validation, and unwrapping the content-encryption key (RSAES-PKCS1-v1_5, RSAES-OAEP). |
+| `ciphers` | Content-encryption algorithm identification and AES-128/192/256-CBC and DES-EDE3-CBC decryption. |
+| `keys` | Loading the recipient's PKCS#8 private key (DER or PEM, plain or passphrase-protected), PEM scanning, and certificate matching by `issuerAndSerialNumber` or `subjectKeyIdentifier`. |
+
 ## Format scope
 
 - Root element `Dossier` in an allowed namespace, checked namespace-aware
@@ -134,10 +203,12 @@ the codes `dangling_objref`, `document_without_profile`,
 `signature_inventory_truncated`, and never change an exit
 status by themselves.
 
-- Every `Document` must carry a `DocumentProfile`; one holding only a
-  `ds:Object` is non-conformant. Such a document is skipped, is not counted in
+- A `Document` without `DocumentProfile` is skipped, is not counted in
   `documents`, and produces `document_without_profile` naming its source
-  position among `Document` elements.
+  position among `Document` elements. The Hungarian v1.5 specification has
+  an exception for a document holding only an empty `ds:Object`; the parser
+  tolerates a broader set of profile-less documents. See
+  [confirmed version differences](es3-specification.md#confirmed-version-differences).
 - `SourceSize` is optional in a `DocumentProfile`; company-court dossiers
   occur without it. When it is present the `sizeValue`/`sizeUnit` and
   declared-size-limit rules apply unchanged and the decoded length must match
@@ -326,19 +397,27 @@ under `data.limits`. They are not yet configurable on the command line; see
 | `extract FILE --document SEL --stdout` | Decode exactly one document and write its raw payload bytes to stdout. Writes no files. | No |
 | `extract FILE --decrypt-key KEY` | The same, additionally decrypting documents whose transform chain contains `encrypt`. See [Decryption](#decryption). | No |
 | `validate-structure FILE` | Apply the project's strict structural rules without validating signatures. | No |
-| `verify FILE` | Verify every `ds:Signature`: canonicalization, reference digests, the signature value, the e-dossier reference-scope rules, and the certificate path. Cannot report a signature as `valid` in this release. | No |
+| `verify FILE` | Verify every `ds:Signature`: canonicalization, reference digests, the signature value, the e-dossier reference-scope rules, the XAdES signed `SigningCertificate` binding, RFC 3161 signature timestamps, the certificate path, and revocation. Reports a per-signature verdict of `valid`, `invalid`, or `indeterminate`. | No |
 
 In every command `FILE` is either a path to a regular file or `-`, which
 reads the dossier from standard input; see [Reading from stdin](#reading-from-stdin).
 
-`verify` additionally accepts `--trust-store <DIR>` and `--at <RFC3339>`; see
-[The `verify` command](#the-verify-command).
-
-All commands accept `--json` and `--allow-namespace <URI>` (repeatable).
-`extract` additionally accepts:
+These flags apply to every command:
 
 | Flag | Meaning |
 | --- | --- |
+| `--json` | Emit exactly one JSON object on stdout. |
+| `FILE` as `-` | Read the dossier from standard input instead of from a path. The stream is capped at `max_input_bytes` and buffered in memory. |
+| `--allow-namespace <URI>` | Also accept a dossier rooted in this namespace, in addition to the known-compatible ones. Repeatable. See [Namespace policy](#namespace-policy). |
+| `-h`, `--help` | Print help as plain text. |
+| `-V`, `--version` | Print the version as plain text. Top level only. |
+
+`verify` has its own flags; see
+[The `verify` command](#the-verify-command). `extract` additionally accepts:
+
+| Flag | Meaning |
+| --- | --- |
+| `-o`, `--output <DIR>` | Destination directory; created if missing. |
 | `--no-recursive` | Write an embedded dossier as a plain payload file instead of expanding it. |
 | `--max-depth <N>` | Nesting levels of embedded dossiers to expand, default 3; values above the hard cap of 8 are clamped to 8. |
 | `--document <SELECTOR>` | Extract only the named documents. Repeatable. See [Selecting documents](#selecting-documents). |
@@ -504,7 +583,7 @@ writes one compact line; this is pretty-printed:
 | `list` | `dossier`, plus `documents`: an array in source order with `index`, `title`, `creation_date`, `mime_type` (`media_type`, `subtype`, `extension`, `charset`), `source_size`, `object_ref`, `transforms`, and `nested_dossier`. `source_size` is `null` when the profile omits `SourceSize`. |
 | `extract` | `extracted` (array of `document_index`, `dossier_path`, `filename`, `path`, `bytes`, `detected_type`, `declared_type`, `decrypted`), `extracted_count`, `skipped_count`, `nested_dossiers_extracted`, `selected`. |
 | `validate-structure` | `valid_structure`, `documents`, `conformance_warnings`, `cryptographic_verification_performed` (always `false`). |
-| `verify` | `verdict`, `verification_time`, `policy`, `limits`, `counts`, `checks`, `signatures`. See [The `verify` command](#the-verify-command). |
+| `verify` | `verdict`, `verification_time`, `policy`, `limits`, `counts`, `checks`, `documents`, `signatures`, `timestamps`. `documents` is the per-document coverage inventory and `timestamps` the container `es:TimeStamp` reports; both are always present, as empty arrays when there is nothing to report. See [The `verify` command](#the-verify-command). |
 
 `valid_structure` stays `true` whenever parsing succeeded;
 `conformance_warnings` counts the structural deviations, which are listed
@@ -600,6 +679,20 @@ Example of a failure envelope, from `inspect --json` on
 }
 ```
 
+### Contract tests
+
+The envelope above is not only described here; it is captured. `tests/golden/`
+holds the stdout and exit status of every command over every fixture in
+`tests/fixtures/`, in both `--json` and human mode, and CI's `golden` job
+compares the built binary against those files on every pull request. A change
+to any golden file is a change to this contract and is reviewed with the
+`schema_version` rule in mind: an added field, warning code, check code, or
+human line is additive, keeps `schema_version` at `1`, and needs the goldens
+regenerated and a `CHANGELOG.md` entry; a removed or renamed field, a changed
+type, or a changed exit status for an existing outcome needs a
+`schema_version` bump in the same pull request. Only two values are masked,
+both clock-dependent times; the rules are in `tests/golden/README.md`.
+
 ## Exit statuses
 
 Exit statuses are stable at the category level:
@@ -683,6 +776,10 @@ I/O and extraction policy.
 | `stdout_requires_single_document` | CLI | 4 | `--stdout` did not resolve to exactly one document, or the one it resolved to embeds a dossier while recursion is on. |
 | `document_not_extractable` | CLI | 5 | The document `--stdout` selected is encrypted or uses an unsupported transform chain. |
 | `trust_store_invalid` | CLI | 3 | `--trust-store` does not name a readable directory, holds a file that is not PEM or DER certificate data, or holds no trust anchor. A partially loaded store would silently change what "trusted" means, so the run fails instead. |
+| `trust_list_invalid` | CLI | 3 | A `--trust-list`, `--lotl`, or `--trust-list-signer` file could not be read or parsed. A trusted list that loaded only in part would silently change what "trusted" means, so the run fails instead. |
+| `revocation_store_invalid` | CLI | 3 | `--revocation-store` does not name a readable directory, holds more files than the loader will read, holds a file larger than `MAX_REVOCATION_ITEM_BYTES`, or holds a file that is neither a CRL nor an OCSP response. |
+| `online_options_invalid` | CLI | 3 | The `--online` transport could not be built, which today means `--online-proxy` is not a usable proxy URL. |
+| `online_cache_invalid` | CLI | 3 | The `--online-cache` directory could not be opened safely, or a cache file could not be written. A name inside it that already holds something else is not this error; that is one `online_fetch_failed` with the class `cache_collision`, and the run continues. |
 | `unsafe_output_directory` | CLI | 5 | The output path contains a symlink or reparse point, or is not a real directory. |
 | `total_size_limit` | CLI | 5 | Aggregate decoded size exceeds `max_total_decoded_bytes`. |
 
@@ -732,18 +829,35 @@ openszigno verify FILE [--json]
     --online                    # fetch what offline data does not cover
     --online-cache DIR          # write what --online fetched, store-shaped
     --online-proxy URL          # the only proxy --online will ever use
+    --online-allow-private      # permit loopback/private --online destinations
     --at <RFC3339>              # validation time; overrides any timestamp
     --allow-legacy-algorithms   # admit SHA-1 for diagnosis only
     --allow-namespace URI       # as on every other command, repeatable
 ```
 
+| Flag | Meaning |
+| --- | --- |
+| `--trust-store <DIR>` | Directory of trust anchors (`anchors/*`, PEM or DER) and optional extra CA certificates (`intermediates/*`). A directory of certificates with no `anchors` subdirectory is read as anchors. Without it, every chain check is `unknown`. See [Trust store](#trust-store). |
+| `--trust-list <FILE>` | ETSI TS 119 612 trusted list (XML) to take trust anchors from. Repeatable. Its anchors join the `--trust-store` ones, each reported with its origin, and only these can make a chain `qualified`. Nothing is fetched. See [Trusted lists](#trusted-lists). |
+| `--lotl <FILE>` | EU list of trusted lists (XML). Its `PointersToOtherTSL` entries name the national lists' signing certificates, so one out-of-band certificate bootstraps every `--trust-list`. The LOTL is verified against `--trust-list-signer` first and contributes no trust anchors of its own. |
+| `--trust-list-signer <CERT>` | Certificate, PEM or DER, that must have signed the `--lotl` and, absent one, every `--trust-list`. Obtain it out of band; for the EU list of trusted lists, from the Official Journal. Without any signer the lists are read but reported `trust_list_unverified`, which caps the verdict at `indeterminate`. |
+| `--revocation-store <DIR>` | Directory of CRLs (`crls/`) and OCSP responses (`ocsp/`), DER or PEM, checked in addition to the signature's own `xades:RevocationValues`. A flat directory works too; each file is classified by what it contains. Nothing is ever fetched. See [Revocation](#revocation). |
+| `--no-revocation` | Do not check revocation at all. Emits `revocation_not_checked`, which is blocking, so this produces at most `indeterminate`. Cannot be combined with `--online`. |
+| `--online` | Fetch revocation data the offline material does not cover, from the CRL distribution points and AIA OCSP responders the certificates themselves publish, and only for certificates on a path openSzigno validated to a configured trust anchor. With no trust material nothing is fetched at all. The only thing that makes openSzigno touch the network. See [Online revocation fetching](#online-revocation-fetching) for the timeouts, size caps, and destination rules. |
+| `--online-cache <DIR>` | Write everything `--online` fetched into `DIR` in the `--revocation-store` layout, so a later run with `--revocation-store DIR` and no `--online` reproduces the result with no network at all. Files are created relative to an opened directory descriptor and never follow a symlink; nothing existing is ever truncated or replaced. Requires `--online`. |
+| `--online-proxy <URL>` | Route `--online` fetches through this proxy. Without it no proxy is used: `HTTP_PROXY` and its relatives are deliberately ignored. Requires `--online`. |
+| `--online-allow-private` | Permit `--online` to contact loopback, private (RFC 1918), link-local and unique-local addresses and the host name `localhost`, which are refused by default because the URL comes out of a certificate the run has not yet established trust in. For an internal CA that really does publish there. Requires `--online`. |
+| `--at <RFC3339>` | Validation time. It overrides everything: without it, a signature whose timestamp verified completely is validated at that token's `genTime`, and otherwise at the current time. See [Validation time](#validation-time). |
+| `--allow-legacy-algorithms` | Admit SHA-1 digests and RSA-SHA1 signature methods for diagnosis only: they emit `algorithm_legacy_allowed` instead of a passed check, the verdict stays capped at `indeterminate`, and no failed check can become a passed one. MD5, HMAC, DSA, and RSA keys below 2048 bits stay refused. See [Algorithm policy](#algorithm-policy). |
+
 Offline is the default and `openszigno-verify` is network-free by
 construction: it opens no socket in any mode, and revocation data reaches it
 only through the injected `RevocationSource`. `--online` does not change that.
 It permits the **CLI** to fetch CRLs and OCSP responses that the caller's own
-material does not cover, from the URLs the certificates themselves publish, and
-to hand what comes back to the verifier through the same seam a
-`--revocation-store` file arrives through. See [Online
+material does not cover, from the URLs published by certificates that sit on a
+path to a configured trust anchor, and to hand what comes back to the verifier
+through the same seam a `--revocation-store` file arrives through. With no
+anchor configured nothing is fetched at all. See [Online
 revocation](#online-revocation-fetching).
 
 Reference resolution is strictly same-document in every mode — a `ds:Reference`
@@ -802,6 +916,37 @@ meaningless:
    asked about: its revocation is not a question the PKI it roots can answer,
    and asking would invite a self-signed CRL to speak for itself.
 
+### Module map
+
+`openszigno-verify` is organised as the pipeline above, one module per stage.
+The split is internal; the crate's public API is unchanged.
+
+| Module | What it owns |
+| --- | --- |
+| `lib.rs` | The `verify` entry point: the run's `Context`, the per-signature loop through stages A to F, and the dossier-level assembly (container timestamps, coverage, counts, verdict). |
+| `dsig` | The shared `Context` and the small XML helpers every stage is built from, plus re-exports of the items that used to live here. |
+| `references` | One `ds:Reference`: parsing, same-document resolution on the validated ID space, the transform allowlist and its application, the effective node set (`ReferenceScope`) every coverage rule shares, and digest recomputation. |
+| `scope` | Placement classification (`Placement`, `placement_of`), the mandated e-dossier reference sets, and `reference_scope_check`. |
+| `countersign` | Countersignature detection, the binding check, and the reported role, parent and `countersigns` set. |
+| `signature` | The per-signature driver (stages A and B): `signed_info.rs` parses `ds:SignedInfo` and applies the signature-level algorithm policy, `collect.rs` gathers the timestamp tokens and the octets each one covers, and `mod.rs` keeps signer selection and `ds:SignatureValue` verification. |
+| `coverage` | What a signature's resolved references cover, and the per-document coverage report and its dossier-level checks. |
+| `xades` | Stage C: the XAdES qualifying properties and the signed `SigningCertificate` binding. |
+| `certs` | Stage D: `extensions.rs` decodes a certificate's extensions, `purpose.rs` holds the `extendedKeyUsage` policy per `PathPurpose`, `names.rs` implements RFC 5280 name constraints, `path.rs` builds and validates a path, and `mod.rs` keeps the public types, `check_path` and public-key signature verification. |
+| `revocation` | Stage E: `crl.rs` validates and looks up CRLs, `ocsp.rs` validates OCSP responses and the RFC 6960 responder-authorisation models, `tiers.rs` holds the source priority, coverage and fallback rules with the summaries and messages they produce, and `mod.rs` keeps the public API and `check_path`. |
+| `tsa` | Stage F: `token.rs` holds the RFC 3161 wire formats and the CMS signed-attribute checks, `imprint.rs` the digest allowlist and the imprint recomputation, `path.rs` the TSA certificate's purpose and its path at `genTime`, and `mod.rs` the token driver and `verify_signature_timestamps`. |
+| `estimestamp` | The container's own `es:TimeStamp` elements and what they cover, including the `xades:Include` data selection. |
+| `trustlist` | ETSI TS 119 612 trusted lists: `parse.rs` reads the XML, `services.rs` evaluates the status timeline and the pre-eIDAS rules, `qualified.rs` decides a validated chain's qualified status, and `mod.rs` keeps the public API and the verification of the list's own signature. |
+| `trust`, `policy`, `codes`, `report`, `c14n`, `embedded` | The injected I/O seams, the pinned algorithm and limit policy, the check codes, the JSON report types, canonicalization, and the whole-document reads the CLI's `--online` fetcher needs. |
+
+Each of those directory modules re-exports every public item at the path it
+had before the split, so the crate's public API is unchanged.
+
+`scripts/check-file-length.py`, run in CI, keeps a new `src` file under 800
+lines and a new `tests` file under 1500 (see
+[CONTRIBUTING.md](../CONTRIBUTING.md)); no module of this crate is named in
+`scripts/file-length-allowlist.txt` any more, and none of its source files
+exceeds the limit.
+
 ### Reference scope
 
 Because the e-dossier specification mandates *which elements* a signature must
@@ -817,10 +962,46 @@ semantics rather than on what the signature claims about itself.
 | the `ds:Signature` inside an `xades:CounterSignature` | `countersignature` | the countersigned signature's `ds:SignatureValue`, its own `xades:SignedProperties`, and its own signature-profile object **when it carries one**. Nothing about documents: a countersignature attests the parent signature, not the payload. See [Countersignatures](#countersignatures). |
 | any other nesting | `unknown` | undefined. This is the *unsupported placement* state; the mandated set is `reference_scope_unknown`. |
 
-A reference covers a required element when the element is the resolved node or
-a descendant of it, so a `URI=""` reference covers everything, and a reference
-to a `ds:Object` covers what it wraps. Two rules follow from what real
-dossiers actually contain:
+#### The effective node set
+
+A reference covers a required element when that element is in the reference's
+**effective node set**: what the reference actually digests, once its transform
+chain has been applied to the node set it dereferenced. Resolution alone does
+not answer the question, because a transform can *remove* nodes from that set.
+
+| Transform | Effect on membership |
+| --- | --- |
+| enveloped-signature | Removes the whole `ds:Signature` the reference is written in. XMLDSig 1.1 clause 6.6.4: it "removes the whole `Signature` element containing T from the digest calculation of the `Reference` element containing T". |
+| the canonicalization algorithms | None. Canonicalization chooses how the set is serialized, never which nodes are in it. |
+| base64 | The reference becomes an octet stream over the resolved node's text, so it covers that node and no element structure beneath it: rearranging the elements inside a base64-referenced object need not change the octets. |
+
+Coverage is then containment minus exclusion: the required element is the
+resolved node or a descendant of it, and no removed subtree lies on the path
+from it to the document root — an exclusion *above* the resolved node removes
+that node too. So a `URI=""` reference covers everything **except** its own
+signature, and a reference to a `ds:Object` covers what it wraps unless the
+transforms took it away.
+
+The consequence worth stating plainly: **a whole-document enveloped reference
+covers nothing inside the signature it belongs to.** The
+`xades:SignedProperties` — which carries the `SigningCertificate` binding — and
+the signature's own profile `ds:Object` both live there, so a signature that
+relies on `URI=""` alone is `reference_scope_incomplete` and names them. Each
+needs a reference of its own, which is what real dossiers write. A reference
+whose enveloped transform removes everything it selected is refused outright
+(`reference_digest_mismatch`) rather than digested as the empty octet string.
+
+One function decides this, in `references::ReferenceScope`, and the
+reference-scope check, the [countersignature binding](#countersignatures) and
+the [document coverage](#document-coverage) report all call it, so the three
+cannot disagree about what a reference covers. At the binding it matters in one
+direction only: the enveloped-signature transform removes the signature the
+reference is written in, and an enveloped countersignature sits *inside* the
+signature it attests, so its parent's `ds:SignatureValue` is never removed —
+but a signature that references a `ds:SignatureValue` nested *within itself*
+and then removes itself digests none of it, and binds nothing.
+
+Two further rules follow from what real dossiers actually contain:
 
 - **The signature-profile object is located by content, never by position.**
   The requirement is satisfied by a reference that resolves either to the
@@ -868,9 +1049,10 @@ container's own rule for what that signature must reference was not met.
 | `direct` | A document-level signature placed in **that** `es:Document`, whose reference scope is complete and whose references resolve to that document's `es:DocumentProfile` and its payload `ds:Object`. |
 | `frame` | A dossier-level signature whose reference scope is complete and whose references resolve to `es:Documents`, or to an ancestor of it, so the document sits inside what was signed. |
 
-An element counts as covered when it is a resolved node or a descendant of
-one, which is exactly the rule the scope check applies. A document-level
-signature covers only the document it is placed in.
+An element counts as covered when it is inside the [effective node
+set](#the-effective-node-set) of one of the signature's references, which is
+exactly the rule — and the same code — the scope check applies. A
+document-level signature covers only the document it is placed in.
 
 The states, per document:
 
@@ -1068,6 +1250,7 @@ Reported verbatim under `data.limits` in `verify --json`.
 | `max_timestamps_per_signature` | 8 | `xades:SignatureTimeStamp` elements processed per signature. |
 | `max_chain_length` | 8 | Certificates in one candidate path, inclusive: a path of exactly this many certificates that ends at an anchor is accepted. |
 | `max_paths` | 32 | Completed candidate paths explored. |
+| `max_revocation_items` | 256 | CRLs or OCSP responses consulted from any one source while answering about a single certificate. |
 | path search expansions | 256 (fixed) | Total candidates visited during path building, successful or not. Not configurable. |
 | `ds:KeyInfo` candidates | 16 (fixed) | Certificates tried as the signer. |
 | `xades:Cert` entries | 16 (fixed) | `SigningCertificate` entries digested against the candidates. |
@@ -1754,6 +1937,28 @@ dossier that embeds nothing at all. See [trust.md](trust.md).
 `--online` is the only thing that makes openSzigno touch the network, and it
 does so under a fixed policy the caller cannot widen.
 
+**Who a URL may be fetched for.** Only a certificate on a certification path
+the verifier **actually validated to a configured trust anchor** — from
+`--trust-store` or from an ETSI trusted list — for a signature or a timestamp
+it was evaluating. The set is not approximated: under `--online` the CLI runs
+an entirely offline-style verification pass first, purely to learn it, and
+`VerifyReport::validated_path_certificates_at` returns the certificates of
+every chain whose own path check passed (`cert_path_ok`,
+`timestamp_tsa_path_ok`), each paired with the validation time that chain was
+evaluated at.
+Everything else in the file — including a certificate parked in `ds:KeyInfo`
+that chains perfectly well to the anchor but that no signature needed — is
+outside the set and generates no traffic.
+
+This is the load-bearing rule. A dossier carries its own certificates,
+including the "issuer" that signed the signer, so "an embedded issuer signed
+this" is a statement whoever wrote the dossier wrote on both sides of. Acting
+on a URL out of such a certificate lets any file handed to the tool choose the
+tool's next network destination. **With no anchors configured nothing is
+fetched at all**, `policy.revocation` reads `online_no_anchors`, and both the
+`revocation_policy` check and every `revocation_status_unknown` message say so
+in as many words.
+
 **Where the URLs come from.** Only from the certificates themselves: the
 `cRLDistributionPoints` extension's `fullName` URIs and the
 `authorityInfoAccess` extension's `id-ad-ocsp` access locations. These are
@@ -1764,12 +1969,67 @@ dereferenced.
 
 **What is fetched, and when.** Nothing, for a certificate the caller's own
 material already answers for. Before any request is made, each certificate is
-put to the *same* offline code path the verdict will use; only a certificate
-that comes back without a definite answer is fetched for. OCSP is tried before
+put to the *same* offline code path the verdict will use, **at the validation
+time its path was evaluated at**; only a certificate that comes back without a
+definite answer is fetched for. That time is not one global instant: a signer
+path a verified timestamp restores is evaluated at the token's `genTime`, a
+timestamp authority's own path at the `genTime` it asserts, and everything
+else at `--at` or the clock. Asking at one global time both fetches for
+certificates the run already covers and calls a certificate covered by data
+that does not apply at the instant the verdict rests on.
+
+**In bounded rounds.** One pass is not enough, because evidence fetched for
+one path can create another. A signer whose certificate has expired has no
+validated path at the clock, so nothing may be fetched for it; fetching the
+revocation evidence its signature timestamp's authority needed can verify that
+timestamp, move the signer's validation time back to the proven instant and
+restore its path. A single fetch pass makes that discovery after fetching has
+finished, and the signer's own revocation data is never fetched. So the CLI
+runs at most `MAX_ONLINE_ROUNDS` (3) rounds: each round verifies with the
+store widened by everything fetched so far, computes the validated-path
+certificate set with its times, and fetches only for what became eligible in
+that round. The run stops as soon as a round turns up nothing new, which is
+the ordinary case after the first, and stops in any case at the bound with
+whatever it has. The certificate budget below belongs to the run, so rounds
+cannot multiply the traffic one dossier can generate. OCSP is tried before
 CRLs, because a response answers about one certificate where a CRL is a list
 that may run to megabytes. Certificates whose issuer is not to hand are skipped
 — a CRL could not be checked against them anyway — and so are self-signed
 roots, whose revocation is never asked about.
+
+**One request per question.** CRLs are deduplicated by URL: a CRL is a list and
+one copy answers for everyone on it. OCSP is deduplicated by **responder URL
+and `certID` together**, because a response answers about one certificate — two
+certificates issued by the same CA name one responder and are two different
+questions, and deduplicating by URL alone asked the first and silently dropped
+the second, leaving it uncovered for a reason nothing in the report named.
+
+**The destination policy.** The URL is treated as attacker-chosen until the
+trust gate above has been passed, and even then it must name a destination this
+build is willing to open a socket to:
+
+| Rule | Default | Why |
+| --- | --- | --- |
+| Scheme | `http` and `https` only | Every other scheme is refused, never rewritten into one this build speaks. |
+| Userinfo | refused, always | `user:password@host` is a way of writing a URL that reads as one host and names another, and it is credential material this tool has no business sending. `--online-allow-private` does not waive it. |
+| Address | loopback (`127/8`, `::1`), RFC 1918 private (`10/8`, `172.16/12`, `192.168/16`), link-local (`169.254/16`, `fe80::/10`), unique-local (`fc00::/7`), unspecified (`0.0.0.0/8`, `::`), broadcast (`255.255.255.255`) and multicast (`224/4`, `ff00::/8`) are all refused, as are the cloud metadata addresses `169.254.169.254` and `fd00:ec2::254` and the name `localhost` (and `*.localhost`) | Otherwise a dossier could point the verifier at `http://169.254.169.254/` — instance metadata, credentials included — or at a service on the operator's own subnet, turning a signature check into an SSRF primitive. An IPv4-mapped IPv6 address is judged as the IPv4 address it carries, so it is not a way round any of these. The two metadata addresses are named in their own refusal, because that is the one an operator wants to be told about explicitly. |
+| Resolved address | re-checked against the same ranges before connecting | A public name that resolves to `127.0.0.1` is refused on the address, not on the name, so DNS rebinding does not walk past the rule. |
+| The address that is dialled | exactly the addresses the check approved | The policy hands its resolution to `ureq` as a pinned answer for that host and port, and a name that was not vetted for the fetch in hand does not resolve at all: there is no second lookup, so a zone that answers with a public address and then with a private one has no window between the check and the socket. A host that resolves to nothing is a `transport` failure and nothing is contacted. |
+| The name that is verified | unchanged | Pinning is an address decision only. The URL is sent as published, so the `Host` header, the TLS SNI value and the certificate host-name verification all still use the name the certificate named. |
+| Every hop | the URL the certificate published and **each redirect target** go through the whole policy, and each is pinned in its own right | A redirect already may not leave the host, but "the same name" and "the same address" are different statements. |
+
+`--online-allow-private` waives the address rules — and only those — for an
+internal CA that really does publish on a private network. It does not waive
+resolution: an address is still needed to connect to, and loopback with the
+flag is vetted down to the address like any other destination. This project's
+own test suite passes it, because it serves a synthetic PKI from `127.0.0.1`.
+
+With `--online-proxy` the request goes to the proxy and the proxy resolves the
+destination, so pinning cannot apply to the destination: `ureq` only asks about
+the proxy's own host, which is resolved normally. The destination policy still
+runs on the URL and still refuses a scheme, userinfo, or an address it does not
+permit; what it cannot promise is that the socket the *proxy* opens goes where
+the policy looked.
 
 **The transport policy.**
 
@@ -1778,11 +2038,11 @@ roots, whose revocation is never asked about.
 | Schemes | `http` and `https`, exactly as published | Neither is rewritten. Upgrading `http` to `https` is a guess about a host's configuration. Confidentiality is not the point: these are public documents and every one is signature-checked before it is believed. |
 | Connect timeout | 5 s | |
 | Total timeout | 20 s per fetch | A fetch that exceeds it is a named failure, never a hang. |
-| Size cap | 16 MiB for a CRL, 64 KiB for an OCSP response | Enforced by the reader, so a server that lies about `Content-Length` cannot make the run allocate more. |
+| Size cap | `MAX_REVOCATION_ITEM_BYTES` (16 MiB) for a CRL, 64 KiB for an OCSP response | Enforced by the reader, so a server that lies about `Content-Length` cannot make the run allocate more. The CRL cap is the *verifier's own* limit, re-exported: a download cap larger than what the tier walk will parse meant a CRL could arrive, be stored, and then answer nothing. |
 | Redirects | at most 3, **never to another host** | The authority for a URL is the certificate, and the certificate named one host. The port is part of the host. |
-| Proxy | none, unless `--online-proxy URL` | `HTTP_PROXY` and its relatives are ignored. A verifier that silently routed its revocation traffic through whatever the shell happened to set would hand an attacker who controls that variable a way to feed it chosen bytes. |
+| Proxy | none, unless `--online-proxy URL` | `HTTP_PROXY` and its relatives are ignored. A verifier that silently routed its revocation traffic through whatever the shell happened to set would hand an attacker who controls that variable a way to feed it chosen bytes. With a proxy the proxy does the connecting, so the destination policy still checks the URL but no longer decides which socket is opened. |
 | Requests | `GET` for a CRL; `POST` of an RFC 6960 `OCSPRequest` as `application/ocsp-request` for OCSP | The `certID` uses **SHA-256**, which is inside the pinned allowlist. No nonce is sent: a nonce defends a live request against replay, and the verifier deliberately ignores nonces because it must also read archived responses. |
-| Volume | at most 32 certificates per run, at most 4 URLs per certificate | Opening one dossier cannot generate unbounded traffic. |
+| Volume | at most 32 certificates per run, rounds included, at most 4 URLs per certificate | Opening one dossier cannot generate unbounded traffic. |
 
 **What fetching can and cannot do.** It can only *add* data. Every fetched
 artefact is classified and then judged by exactly the offline rules — issuer
@@ -1794,7 +2054,11 @@ store, so it can never displace an answer that was already to hand.
 
 **When it fails.** Each failure contributes one `online_fetch_failed` (`info`)
 naming the URL and a failure class: `timeout`, `http status <code>`,
-`too large`, `redirect`, `invalid`, or `transport`. The class is reported
+`too large` (with the limit it exceeded), `redirect`, `invalid`, `transport`,
+`destination_refused` (with the rule that refused it — nothing was contacted at
+all), or `cache_collision` (the artefact was fetched, but `--online-cache`
+already holds a different file under that name and nothing was overwritten).
+The class is reported
 because the remedies differ — a timeout is somebody else's outage, a `404` is a
 stale URL in an old certificate, and "not a CRL" is what a captive portal looks
 like from here. A URL is public CA material, so naming it is safe and is the
@@ -1813,16 +2077,34 @@ deliberately not allowed to decide anything — would drag a dossier whose every
 signature is `valid` down to `indeterminate`.
 
 **Reproducibility.** `--online-cache DIR` writes every fetched artefact into
-`DIR/crls/` and `DIR/ocsp/`, named by the SHA-256 of its own bytes, which is
-the `--revocation-store` layout. A later run with `--revocation-store DIR` and
-no `--online` therefore reaches the same answer with no network at all — the
+`DIR/crls/` and `DIR/ocsp/`, which is the `--revocation-store` layout. A CRL is
+named by the SHA-256 of its own bytes; an **OCSP response is named by the
+SHA-256 of the `certID` it answers about followed by the SHA-256 of its own
+bytes**, so two answers from one responder are two files whose names say which
+is which — the same distinction the request deduplication makes.
+
+The cache is written with the same descriptor-relative machinery as an
+extraction (`extract/output_dir.rs`): the directory is opened once with
+`O_DIRECTORY | O_NOFOLLOW` and walked one component at a time, and each file is
+created with `O_CREAT | O_EXCL | O_NOFOLLOW`. **Nothing is ever truncated or
+replaced.** A name that already holds exactly these bytes is the idempotent
+case — which is also what a concurrent writer looks like — and is left alone; a
+name that holds anything else, or a symlink, is reported as one
+`online_fetch_failed` with the class `cache_collision` and the run continues,
+because a cache is an optimisation and a strange file in it is not a reason to
+fail a verification that has already been done. A later run
+with `--revocation-store DIR` and no `--online` therefore reaches the same
+answer with no network at all — the
 only difference being that the source is reported as `store_crl` rather than
 `online_crl`. Nothing is ever deleted from the cache.
 
 `chain[].revocation.source` reports `online_crl` and `online_ocsp` for answers
-that came from the network, and `policy.revocation` reads `online` for any run
-that was given the flag, whether or not anything was actually fetched.
-`--online` and `--no-revocation` cannot be combined.
+that came from the network. `policy.revocation` reads `online` for a run that
+was given the flag and had at least one trust anchor to gate fetching on,
+whether or not anything was actually fetched, and `online_no_anchors` for a run
+that was given the flag with no anchor configured, where nothing was fetched
+and nothing could have been. `--online` and `--no-revocation` cannot be
+combined.
 
 ### Verify result shape
 
@@ -2206,20 +2488,21 @@ verify), and `revocation_not_checked` (the caller switched revocation off).
 | `cert_basic_constraints_invalid` | `failed` | An issuing certificate is not marked as a CA. |
 | `cert_name_constraint_violation` | `failed` | A certificate violates a name constraint imposed by a CA above it. |
 | `cert_unsupported_critical_extension` | `failed` | A certificate carries a critical extension this validator does not understand. |
-| `revocation_policy` | `info` | Reports the revocation policy actually applied: `offline`, `online` with `--online`, or off with `--no-revocation`. Always emitted, so the policy is visible even when no data was found. |
+| `revocation_policy` | `info` | Reports the revocation policy actually applied: `offline`, `online` with `--online`, `online_no_anchors` when `--online` was given with no trust anchor configured — so nothing was fetched, because revocation data is only fetched for a certificate on a path to an anchor — or off with `--no-revocation`. Always emitted, so the policy is visible even when no data was found. |
 | `revocation_not_checked` | `skipped` | Emitted **only** when the caller passed `--no-revocation`. Blocking, so switching the check off is documented as producing at most `indeterminate`. |
 | `revocation_ok` | `passed` | Every certificate in the path except the trust anchor has fresh, verified, non-revoked status. Emitted once per chain — the signer's and each timestamp authority's — and the message names which. |
 | `cert_revoked` | `failed` | A certificate in the path was revoked at or before the validation time. `certificateHold` counts. |
 | `cert_revoked_after_validation_time` | `info` / `unknown` | A certificate was revoked *after* the instant being validated, so that revocation did not apply then. `info` when the validation time was **proven** by a fully verified signature timestamp, `unknown` when it was merely asserted by `--at` or the clock. Never `passed`: the certificate really was revoked, and the message gives the time and reason. |
 | `revocation_status_unknown` | `unknown` | No usable revocation data covers a certificate in the path, or no path was built to ask about. Blocking. A failed `--online` fetch reaches a verdict through this check and not on its own; see `online_fetch_failed`. |
 | `revocation_data_stale` | `unknown` | The data's `nextUpdate` had passed at the validation time, or it carries none and its `thisUpdate` precedes it. Also the OCSP `unknown` status. |
-| `revocation_data_invalid` | `unknown` | Every source that covered a certificate was found but could not be used: signed by someone unauthorised, a delta or indirect CRL, an unimplemented `issuingDistributionPoint` form, a critical CRL extension this build does not implement, or an OCSP response whose status is not `successful`. The message names the cause. Emitted only after every tier has been tried. `unknown`, not `failed`: unusable data means the tool could not answer. |
-| `online_fetch_failed` | `info` | Under `--online`, one fetch did not produce a usable artefact. The message names the URL and the failure class. Informational: whether the missing data mattered is answered by the chain that needed it, through `revocation_status_unknown`, which blocks. |
+| `revocation_data_invalid` | `unknown` | Every source that covered a certificate was found but could not be used: signed by someone unauthorised, a delta or indirect CRL, an unimplemented `issuingDistributionPoint` form, a critical CRL extension this build does not implement, an OCSP response whose status is not `successful`, or an item larger than `MAX_REVOCATION_ITEM_BYTES`, whose size and limit the message names. The message names the cause. Emitted only after every tier has been tried. `unknown`, not `failed`: unusable data means the tool could not answer. |
+| `online_fetch_failed` | `info` | Under `--online`, one fetch did not produce a usable artefact. The message names the URL and the failure class: `timeout`, `http status <code>`, `too large` with the limit, `redirect`, `invalid`, `transport`, `destination_refused` with the rule that refused the destination before any socket was opened, or `cache_collision` when `--online-cache` already held a different file under an artefact's name and nothing was overwritten. Informational: whether the missing data mattered is answered by the chain that needed it, through `revocation_status_unknown`, which blocks. |
 | `ocsp_responder_trusted` | `info` | An OCSP response was accepted under the RFC 6960 section 2.2 trusted-responder model: the responder is not the issuing CA and that CA did not delegate to it, but its certificate carries `id-kp-OCSPSigning` and chains to a configured anchor. Reported because this rests on the caller's trust store rather than on the issuing CA's word. |
 | `trust_list_loaded` | `info` | A `--trust-list` file was read; the message says how many anchors it contributed. |
 | `trust_list_unverified` | `unknown` | A trusted list was used without `--trust-list-signer`, so its own signature was not checked. Blocking. |
 | `trust_list_signature_ok` | `passed` | The list's enveloped XMLDSig signature verified against the supplied signer certificate and covers the whole document. |
 | `trust_list_signature_invalid` | `failed` | It did not verify, does not cover the whole list, uses an algorithm or transform outside the allowlist, or is absent while a signer was demanded. |
+| `trust_list_service_not_granted` | never emitted | Reserved in `CheckCode` and never produced by this build: a service that is not granted at the validation time is reported through `certificate_not_qualified` instead. Listed here because the code is part of the stable enumeration a consumer may see in a later release. |
 | `certificate_qualified` | `info` | The chain ends at a trusted-list CA/QC service granted at the validation time, and any post-eIDAS certificate asserts `QcCompliance`. |
 | `certificate_not_qualified` | `info` | The trusted list does not record the anchor's service as granted then, or a post-eIDAS certificate carries no `QcCompliance`. |
 | `certificate_qualified_unknown` | `info` | No trusted list covers the anchor, so qualified status is not determined. Distinct from `certificate_not_qualified`. |
@@ -2556,6 +2839,40 @@ else. Distinguishing a failed RSA unwrap from a bad content-key length from a
 bad PKCS#7 padding is exactly the distinction a padding oracle is built out of,
 so the tool does not make it — not even in the human output.
 
+### RSA key transport: chosen-ciphertext exposure
+
+The RSA ciphertext `unwrap_key` (`openszigno-core::decrypt::cms`) decrypts —
+the `RecipientInfo`'s encrypted content-encryption key — comes from the
+dossier being processed, not from the operator. For PKCS#1 v1.5 key
+transport that matters: whether decryption is fast or slow, and whether it
+succeeds or fails, both depend on the ciphertext, which is exactly the setup
+a Bleichenbacher/Marvin-style chosen-ciphertext attack (RUSTSEC-2023-0071)
+needs. An attacker able to submit many crafted dossiers to the same
+`--decrypt-key` and observe timing or success/failure across calls can, in
+principle, recover the content-encryption key without ever holding the RSA
+private key.
+
+`unwrap_key` calls `RsaPrivateKey::decrypt_blinded` (blinded with an
+`OsRng`-seeded factor) rather than plain `decrypt`. That removes the timing
+signal the private-key modular exponentiation itself would otherwise leak. It
+does **not** remove the success/failure signal, because that comes from the
+PKCS#1 v1.5 unpadding step, not the exponentiation, and `rsa` 0.9 — the
+version this workspace is pinned to — has no constant-time or oracle-free
+decrypt for this padding scheme. See the `RUSTSEC-2023-0071` entry in
+`deny.toml` for the full write-up, including why `rsa` 0.10 (which fixes
+this) is not yet adoptable without pulling pre-release dependency versions
+into `Cargo.lock`.
+
+**Practically**, this is a low-severity residual for openSzigno used the way
+it is documented to be used: run once per dossier from a terminal or a
+pipeline stage, exiting after that one attempt. A single local run gives an
+attacker at most one observation, nowhere near enough to mount the attack.
+The risk model changes if openSzigno is wrapped by a service that decrypts
+many attacker-submitted dossiers against one long-lived key and exposes, even
+indirectly, whether each decryption succeeded — see
+[SECURITY.md](../SECURITY.md#rsa-key-transport-decryption-chosen-ciphertext-and-timing-limits)
+for what such a service should do about it.
+
 ## Verification boundary
 
 `verify` ships the complete M2 subset: canonicalization, reference digests, the
@@ -2598,8 +2915,9 @@ older dossiers, which is the correct trade and must not be misread.
 
 `--online` widens where revocation data may come from and nothing else. It
 never relaxes a rule: a fetched CRL or OCSP response is judged by exactly the
-offline rules, only URLs the certificates themselves publish are contacted, and
-a failed fetch is `revocation_status_unknown`, which blocks. A run that reaches
+offline rules, only URLs published by certificates that reach a configured
+trust anchor are contacted, only destinations the policy permits are opened,
+and a failed fetch is `revocation_status_unknown`, which blocks. A run that reaches
 `valid` with `--online` reached it on evidence that would have supported the
 same verdict had the operator downloaded the same files by hand.
 

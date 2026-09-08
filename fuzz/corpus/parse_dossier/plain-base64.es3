@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<es:Dossier xmlns:es="https://www.microsec.hu/ds/e-szigno30#" xmlns:ds="http://www.w3.org/2000/09/xmldsig#">
+  <es:DossierProfile Id="DossierProfile1" OBJREF="Object0">
+    <es:Title>Unsigned synthetic plain fixture</es:Title>
+    <es:E-category>electronic dossier</es:E-category>
+    <es:CreationDate>2026-01-01T00:00:00Z</es:CreationDate>
+  </es:DossierProfile>
+  <es:Documents Id="Object0">
+    <es:Document>
+      <es:DocumentProfile Id="DocumentProfile1" OBJREF="DocumentObject1">
+        <es:Title>hello.txt</es:Title>
+        <es:E-category>electronic data</es:E-category>
+        <es:CreationDate>2026-01-01T00:00:00Z</es:CreationDate>
+        <es:Format><es:MIME-Type type="text" subtype="plain" extension="txt" charSet="UTF-8"/></es:Format>
+        <es:SourceSize sizeValue="41" sizeUnit="B"/>
+        <es:BaseTransform><es:Transform Algorithm="base64"/></es:BaseTransform>
+      </es:DocumentProfile>
+      <ds:Object Id="DocumentObject1">SGVsbG8gZnJvbSBvcGVuU3ppZ25vIHN5bnRoZXRpYyBmaXh0dXJlLgo=</ds:Object>
+    </es:Document>
+  </es:Documents>
+</es:Dossier>

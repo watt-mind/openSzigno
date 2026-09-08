@@ -1,0 +1,17 @@
+{
+  "command": "extract",
+  "data": null,
+  "errors": [
+    {
+      "code": "unresolved_objref",
+      "message": "every OBJREF must resolve to exactly one XML ID"
+    }
+  ],
+  "input": {
+    "bytes": 340,
+    "format": null
+  },
+  "ok": false,
+  "schema_version": 1,
+  "warnings": []
+}

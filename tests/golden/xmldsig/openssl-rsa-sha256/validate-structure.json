@@ -1,0 +1,22 @@
+{
+  "command": "validate-structure",
+  "data": {
+    "conformance_warnings": 0,
+    "cryptographic_verification_performed": false,
+    "documents": 1,
+    "valid_structure": true
+  },
+  "errors": [],
+  "input": {
+    "bytes": 4280,
+    "format": "microsec-es3"
+  },
+  "ok": true,
+  "schema_version": 1,
+  "warnings": [
+    {
+      "code": "cryptographic_verification_not_performed",
+      "message": "signature and timestamp material was counted but not verified"
+    }
+  ]
+}
