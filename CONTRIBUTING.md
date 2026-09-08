@@ -120,6 +120,7 @@ CI additionally runs, on every pull request:
 | Semver checks (`openszigno-core`, `openszigno-verify` against crates.io) | `cargo semver-checks -p <crate>` |
 | Coverage quality gate | `python3 scripts/coverage_gate.py --lcov lcov.info --base origin/develop` |
 | Mutation testing (nightly, not a required check) | `cargo mutants -p <crate> --timeout-multiplier 2 -j 2` then `python3 scripts/mutants_gate.py --dir mutants.out --crate <crate>` |
+| Fuzzing (nightly, not a required check) | `cargo +nightly fuzz run <target> -- -max_total_time=600 -jobs=1`; see [docs/testing.md](docs/testing.md#fuzzing) |
 
 Any of these can be reproduced locally with the same command. The
 container job runs `inspect`, `list`, `validate-structure`, `extract`, and

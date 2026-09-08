@@ -207,6 +207,117 @@ crate's mutants (`--shard 1/4`), not a full run, because of the host time
 budget available when it was seeded; the first nightly run replaces it with
 the true value, and the ratchet tolerance absorbs the difference until then.
 
+## Fuzzing
+
+`fuzz/` is a [`cargo-fuzz`](https://github.com/rust-fuzz/cargo-fuzz) package,
+excluded from the root workspace (`[workspace] exclude` in the root
+`Cargo.toml`) with its own `Cargo.lock`, so its nightly toolchain and
+libFuzzer/AddressSanitizer instrumentation never touch the stable,
+MSRV-pinned build the rest of the workspace is held to. Coverage, not a
+crash count, is the yardstick: every target below asserts only that the
+function under it never panics, which is the property `docs/architecture.md`
+promises of anything that reads a hostile `.es3` input, a certificate, a CRL,
+an OCSP response, a timestamp token, or a trusted list.
+
+| Target | Exercises |
+| --- | --- |
+| `parse_dossier` | `openszigno_core::parse`, with both `Limits::default()` and a deliberately tiny `Limits`, so early limit-check bailouts get their own coverage. |
+| `sniff` | `openszigno_core::sniff`. |
+| `decode_payload` | The `base64` and `zip -> base64` document decode chains, through a synthetic minimal dossier wrapping the fuzzed bytes as one document's payload. |
+| `decrypt_cms` | The CMS `encrypt` transform decrypt path, through `decode_document_with` with a synthetic RSA recipient key and self-signed certificate generated at run time from a fixed seed (never committed; see the doc comment on `fuzz/fuzz_targets/decrypt_cms.rs`). |
+| `c14n` | `openszigno_verify::c14n`: parses arbitrary bytes as XML, then canonicalizes the whole document with every implemented `C14nAlgorithm` variant (inclusive/exclusive, with/without comments). |
+| `crl_parse` | CRL parsing via `openszigno_verify::revocation::classify`, the function a revocation store loader runs over every file. |
+| `ocsp_parse` | OCSP response parsing via the same `classify` function. |
+| `tsa_token` | RFC 3161 token parsing via `openszigno_verify::tsa::token_certificates`. |
+| `trustlist_parse` | `openszigno_verify::trustlist::load`, called with no signer certificates (the fully offline, `trust_list_unverified` mode). |
+| `certificate_parse` | X.509 candidate parsing via `openszigno_verify::certs::certificates_from_bytes`, exactly what a trust or revocation store loader runs over every file. |
+
+Every target bounds its own work (an oversized input is rejected before any
+parsing starts) and every target under this crate's own limits finishes
+comfortably under 2 seconds per input, so a hang is itself a finding.
+
+### Prerequisites
+
+```sh
+rustup toolchain install nightly --profile minimal
+cargo install cargo-fuzz --locked
+```
+
+### Running a target locally
+
+```sh
+cargo +nightly fuzz run <target> -- -max_total_time=60 -jobs=1
+```
+
+Build every target without running one (useful as a fast compile check):
+
+```sh
+cargo +nightly fuzz build
+```
+
+On a memory-constrained machine, cap the build's parallelism:
+
+```sh
+CARGO_BUILD_JOBS=4 cargo +nightly fuzz run <target> -- -max_total_time=60 -jobs=1
+```
+
+### Reproducing a crash artifact
+
+A crashing input is written to `fuzz/artifacts/<target>/`. Replay it directly:
+
+```sh
+cargo +nightly fuzz run <target> fuzz/artifacts/<target>/<crash-file>
+```
+
+Minimise it before filing or committing it:
+
+```sh
+cargo +nightly fuzz tmin <target> fuzz/artifacts/<target>/<crash-file>
+```
+
+A crash is a bug in the crate under test, never in the fuzz target: this
+project's policy is "never panics", so a found panic is fixed in
+`crates/openszigno-core` or `crates/openszigno-verify`, not worked around in
+`fuzz/fuzz_targets/`. See [SECURITY.md](../SECURITY.md#in-scope-for-a-report)
+for how a panic reached from a crafted input is reported when it is found
+outside this repository's own nightly run.
+
+### Corpus
+
+`fuzz/corpus/<target>/` holds a small, committed seed corpus (well under the
+2 MiB the project keeps it under), generated deterministically from
+`tests/fixtures/` and from small hand-built ASN.1 and XML seeds — never from
+`samples/` or any private corpus. Regenerate it with:
+
+```sh
+fuzz/seed.sh
+```
+
+which runs the generator at `fuzz/seeds/src/main.rs`
+(`cargo run --manifest-path fuzz/seeds/Cargo.toml`). The generator is
+idempotent: rerunning it overwrites the same fixed filenames rather than
+accumulating files, so a libFuzzer-discovered addition to a target's own
+`fuzz/corpus/<target>/` directory (from a local run) survives a reseed.
+
+### Adding a target
+
+1. Add a `fuzz_targets/<name>.rs` using `libfuzzer_sys::fuzz_target!`, bound
+   its input size, and call only the crate's public API — see the existing
+   targets for the pattern of "parse a fixed-shape wrapper around the fuzzed
+   bytes, then call the function under test".
+2. Add a matching `[[bin]]` section to `fuzz/Cargo.toml`.
+3. Add seeds for it in `fuzz/seeds/src/main.rs` and run `fuzz/seed.sh`.
+4. Add a row to the CI matrix in `.github/workflows/fuzz.yml`.
+5. Add a row to the table above.
+
+### Continuous fuzzing
+
+`.github/workflows/fuzz.yml` runs every target nightly (`-max_total_time=600`,
+one job per target, a 20-minute budget each) and on manual dispatch with a
+chosen target and duration. A crash uploads the minimised artifact and opens
+or refreshes a single tracking issue; see that workflow for the exact
+schedule and permissions.
+
 ## Public fixtures
 
 The repository contains only synthetic, redistributable test dossiers. They

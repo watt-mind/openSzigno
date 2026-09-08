@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<TrustServiceStatusList xmlns="http://uri.etsi.org/02231/v2#">
+  <SchemeInformation>
+    <TSLSequenceNumber>1</TSLSequenceNumber>
+    <SchemeTerritory>HU</SchemeTerritory>
+  </SchemeInformation>
+  <TrustServiceProviderList>
+  </TrustServiceProviderList>
+</TrustServiceStatusList>

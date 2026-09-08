@@ -258,6 +258,26 @@ The safety mechanisms behind these are documented in
 [docs/architecture.md](docs/architecture.md#parser-safety-model) and
 [docs/architecture.md](docs/architecture.md#extraction-policy).
 
+## Fuzzing
+
+The parser safety model above is a claim about every hostile input, not just
+the ones covered by a handwritten unit test. `fuzz/` fuzzes the crates'
+public parsing surface with `cargo-fuzz`/libFuzzer against exactly the
+threat-model bullet that says a crafted input must never reach a panic,
+an unbounded read, or an unhandled crash instead of a stable error code:
+dossier parsing and payload decoding, CMS decryption, C14N canonicalization,
+and CRL, OCSP, RFC 3161 timestamp, trusted-list, and certificate parsing all
+have a target. Every target asserts only "never panics" — a target that
+returns `Err` for malformed input is working as designed.
+
+`.github/workflows/fuzz.yml` runs every target nightly and on manual
+dispatch; a crash uploads the minimised reproducer and opens or refreshes a
+single tracking issue. See [docs/testing.md](docs/testing.md#fuzzing) for how
+to run a target locally, reproduce a crash artifact, and add a new target. A
+panic a fuzzing run finds is exactly the kind of finding described under
+[In scope for a report](#in-scope-for-a-report) below; report it the same way
+you would one found by hand.
+
 ## In scope for a report
 
 - Memory exhaustion, stack overflow, unbounded allocation, or a panic reached

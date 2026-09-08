@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<es:Dossier xmlns:es="https://www.microsec.hu/ds/e-szigno30#">
+  <es:DossierProfile Id="DossierProfile1" OBJREF="Missing"><es:Title>Unsigned unresolved-reference fixture</es:Title><es:CreationDate>2026-01-01T00:00:00Z</es:CreationDate></es:DossierProfile>
+  <es:Documents Id="Object0"/>
+</es:Dossier>

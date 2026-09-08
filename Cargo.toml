@@ -1,6 +1,11 @@
 [workspace]
 members = ["crates/openszigno-core", "crates/openszigno-verify", "crates/openszigno-cli"]
 resolver = "2"
+# `fuzz/` is its own cargo-fuzz package with its own lockfile (see
+# fuzz/Cargo.toml): it needs nightly and libFuzzer instrumentation that must
+# never leak into the stable-toolchain, MSRV-pinned build the rest of this
+# workspace is held to.
+exclude = ["fuzz"]
 
 # See CONTRIBUTING.md for the ratchet: this threshold is the smallest value
 # that passes today, paired with `too-many-lines-threshold` in clippy.toml.
