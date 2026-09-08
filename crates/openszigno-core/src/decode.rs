@@ -263,3 +263,49 @@ fn exceeds_ratio(expanded: u64, compressed: u64, limits: &Limits) -> bool {
         && (compressed == 0
             || expanded > compressed.saturating_mul(limits.max_zip_compression_ratio))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn limits(ratio: u64) -> Limits {
+        Limits {
+            max_zip_compression_ratio: ratio,
+            ..Limits::default()
+        }
+    }
+
+    /// Exactly at the limit (`expanded == compressed * ratio`) is allowed:
+    /// the check is strictly-greater-than, not greater-or-equal.
+    #[test]
+    fn at_the_ratio_boundary_is_not_exceeded() {
+        assert!(!exceeds_ratio(1_000, 10, &limits(100)));
+    }
+
+    /// One byte short of the boundary is also allowed.
+    #[test]
+    fn one_below_the_ratio_boundary_is_not_exceeded() {
+        assert!(!exceeds_ratio(999, 10, &limits(100)));
+    }
+
+    /// One byte past the boundary is rejected.
+    #[test]
+    fn one_above_the_ratio_boundary_is_exceeded() {
+        assert!(exceeds_ratio(1_001, 10, &limits(100)));
+    }
+
+    /// An expanded size of zero never exceeds the ratio, whatever the
+    /// compressed size or configured ratio is.
+    #[test]
+    fn zero_expanded_bytes_never_exceeds() {
+        assert!(!exceeds_ratio(0, 0, &limits(100)));
+        assert!(!exceeds_ratio(0, 10, &limits(1)));
+    }
+
+    /// A compressed size of zero with any positive expanded size is always
+    /// treated as exceeding the ratio, since no finite ratio is satisfiable.
+    #[test]
+    fn zero_compressed_bytes_with_positive_expanded_bytes_exceeds() {
+        assert!(exceeds_ratio(1, 0, &limits(u64::MAX)));
+    }
+}

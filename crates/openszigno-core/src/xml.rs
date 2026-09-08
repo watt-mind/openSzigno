@@ -154,6 +154,38 @@ fn declared_encoding(bytes: &[u8]) -> Option<String> {
     None
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A document with a `DOCTYPE` is rejected through the public
+    /// `XmlSource::decode` path, which is what `crate::parse` and every
+    /// caller actually go through.
+    ///
+    /// This is caught by `scan::prescan`'s unconditional rejection of any
+    /// `<!...>` markup (see `scan.rs`), which runs before `parse_tree` (and
+    /// so before `ParsingOptions.allow_dtd`) ever sees the text. The
+    /// `allow_dtd: false` wiring in `parse_tree` is deliberate defence in
+    /// depth for that same rule, not the only thing enforcing it here.
+    #[test]
+    fn a_doctype_is_rejected_before_the_tree_parser_runs() {
+        let xml = b"<!DOCTYPE a><a/>";
+        let error = XmlSource::decode(xml, &Limits::default()).unwrap_err();
+        assert_eq!(error.code(), ErrorCode::UnsafeXml);
+    }
+
+    /// Once text has passed the pre-scan (so contains no `<!` markup at
+    /// all), `parse_tree` builds a tree from it with `allow_dtd: false`. This
+    /// documents that a normal, DTD-free document still parses successfully
+    /// through the same options value the DOCTYPE case above never reaches.
+    #[test]
+    fn a_dtd_free_document_still_parses_with_the_hardened_options() {
+        let source = XmlSource::decode(b"<a><b/></a>", &Limits::default()).unwrap();
+        let tree = source.parse_tree(&Limits::default()).unwrap();
+        assert_eq!(tree.root_element().tag_name().name(), "a");
+    }
+}
+
 /// Map a parser error to a stable code without echoing document content.
 /// `roxmltree` error messages include element, attribute, and entity names,
 /// which may be confidential; only the position is kept.
