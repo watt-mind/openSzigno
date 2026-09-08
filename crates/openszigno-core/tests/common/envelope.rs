@@ -88,6 +88,17 @@ pub enum Naming {
 /// would do.
 const SEED: u64 = 0x006F_7065_6E53_5A00;
 
+/// The seed the RSA key wrapping uses for its padding bytes.
+///
+/// Real PKCS#1 v1.5 and OAEP padding is random, and a real encryptor must
+/// keep it that way. A *test* encryptor must not: the recipient side now
+/// answers an unusable wrapped key by decrypting under a synthetic key
+/// derived from the ciphertext, so a ciphertext that changes every run makes
+/// the resulting garbage, and anything downstream that inspects it, change
+/// every run too. Seeding this is what makes those assertions reproducible
+/// on every platform rather than a per-run coin flip.
+const WRAP_SEED: u64 = 0x006F_7065_6E53_5A02;
+
 /// The passphrase the passphrase-protected key helpers use. It protects a key
 /// that exists only inside one test run.
 pub const PASSPHRASE: &str = "correct horse battery staple";
@@ -495,15 +506,36 @@ fn wrap_key(message: &Message<'_>, recipient: &Recipient, damage: Option<Damage>
     if damage == Some(Damage::MismatchedContentKeyLength) {
         key.extend_from_slice(&[0x5a; 8]);
     }
-    let mut rng = rand_core::OsRng;
-    match message.transport {
+    wrap_bytes(recipient, message.transport, &key)
+}
+
+/// Wrap arbitrary bytes for `recipient` under `transport`, in valid padding.
+///
+/// A test that wants a well-formed wrap of something other than the message's
+/// own content key -- a key of the right length that is simply not the right
+/// key -- builds it with this.
+pub fn wrap_bytes(recipient: &Recipient, transport: KeyTransport, key: &[u8]) -> Vec<u8> {
+    // Seeded, not `OsRng`: the padding bytes are the last thing in a
+    // synthetic message that was not reproducible, and a message that
+    // changes from run to run makes any assertion about what the *recipient*
+    // then computes from it a coin flip. See the note on `WRAP_SEED`.
+    let mut rng = rand_chacha::ChaCha20Rng::seed_from_u64(WRAP_SEED);
+    match transport {
         KeyTransport::Pkcs1v15 | KeyTransport::UnsupportedOid => recipient
             .public
-            .encrypt(&mut rng, rsa::Pkcs1v15Encrypt, &key)
+            .encrypt(&mut rng, rsa::Pkcs1v15Encrypt, key)
             .expect("the content key wraps"),
         KeyTransport::OaepSha256 => recipient
             .public
-            .encrypt(&mut rng, rsa::Oaep::new::<sha2::Sha256>(), &key)
+            .encrypt(&mut rng, rsa::Oaep::new::<sha2::Sha256>(), key)
             .expect("the content key wraps"),
     }
+}
+
+/// Deterministic filler of `length` bytes, for a test that needs a key-shaped
+/// value that is not the message's own key.
+pub fn filler(length: usize, tag: u8) -> Vec<u8> {
+    (0..length)
+        .map(|byte| (byte as u8).wrapping_mul(31) ^ tag)
+        .collect()
 }
