@@ -42,5 +42,6 @@ zip.workspace = true
 
 [dev-dependencies]
 rand_chacha.workspace = true
+rand_core.workspace = true
 rcgen = { workspace = true, features = ["x509-parser"] }
 serde_json.workspace = true

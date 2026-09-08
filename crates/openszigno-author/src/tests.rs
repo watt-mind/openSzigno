@@ -294,6 +294,7 @@ fn a_built_document_serialises_the_documented_fields() {
     assert_eq!(
         keys,
         [
+            "encrypted",
             "index",
             "mime_type",
             "nested_dossier",

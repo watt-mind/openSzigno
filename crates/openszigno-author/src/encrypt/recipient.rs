@@ -117,7 +117,7 @@ fn first_certificate_block(bytes: &[u8]) -> Option<Vec<u8>> {
     let start = text.find(HEADER)?;
     let after = &text[start..];
     let end = after.find(FOOTER)? + FOOTER.len();
-    pem_rfc7468::decode_vec(after[..end].as_bytes())
+    pem_rfc7468::decode_vec(&after.as_bytes()[..end])
         .ok()
         .map(|(_, body)| body)
 }
