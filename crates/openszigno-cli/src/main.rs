@@ -22,6 +22,7 @@ use crate::args::{Cli, Command, MAX_NESTING_DEPTH};
 use crate::commands::extract::{extract, load_recipient_key};
 use crate::commands::inspect::inspect;
 use crate::commands::list::list;
+use crate::commands::skill::skill;
 use crate::commands::validate::validate_structure;
 use crate::commands::verify::verify_command;
 use crate::extract::ExtractRequest;
@@ -36,6 +37,14 @@ fn main() -> ExitCode {
         Ok(cli) => cli,
         Err(error) => return usage_failure(error),
     };
+    // `skill` writes the embedded document and nothing else: no envelope,
+    // no diagnostics, and no dossier is read.
+    if matches!(cli.command, Command::Skill) {
+        return match skill() {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(_) => ExitCode::from(3),
+        };
+    }
     let (command, json_mode, result) = match cli.command {
         Command::Inspect(args) => {
             let result = inspect(&args.file, &args.parse_options());
@@ -87,6 +96,8 @@ fn main() -> ExitCode {
             let result = verify_command(&args);
             ("verify", args.json, result)
         }
+        // Handled above, before any envelope machinery is set up.
+        Command::Skill => unreachable!("skill is handled before the dispatch"),
     };
 
     match result {

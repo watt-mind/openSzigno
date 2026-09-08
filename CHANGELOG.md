@@ -10,6 +10,24 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-09-08
+
+### Added
+
+- `crates/openszigno-cli/skills/openszigno/SKILL.md`, an Agent Skills
+  document that tells an AI agent how to drive the CLI on a dossier: the
+  always-`--json` rule, exit statuses, the inspect, list, extract, decrypt
+  and verify workflow, the trust-material recipe, the check codes behind
+  most `indeterminate` verdicts, and how to report a result without
+  overstating it. Linked from the README and the documentation index.
+- `openszigno skill`, which writes that document to stdout byte for byte
+  and nothing else, so the single distributed binary carries the skill:
+  `openszigno skill > .claude/skills/openszigno/SKILL.md` installs it with
+  no checkout. It takes no `FILE` and no `--json`, and emits no JSON
+  envelope.
+  A `.gitattributes` rule keeps Markdown at LF on every checkout, so the
+  embedded bytes are the same whichever host built the binary.
+
 ## [0.5.1] - 2026-09-08
 
 ### Fixed
@@ -1444,7 +1462,8 @@ This release performs no cryptographic verification of any kind.
 
 [0.1.0]: https://github.com/watt-mind/openSzigno/releases/tag/v0.1.0
 [0.2.0]: https://github.com/watt-mind/openSzigno/compare/v0.1.0...v0.2.0
-[Unreleased]: https://github.com/watt-mind/openSzigno/compare/v0.5.1...develop
+[Unreleased]: https://github.com/watt-mind/openSzigno/compare/v0.6.0...develop
+[0.6.0]: https://github.com/watt-mind/openSzigno/compare/v0.5.1...v0.6.0
 [0.5.1]: https://github.com/watt-mind/openSzigno/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/watt-mind/openSzigno/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/watt-mind/openSzigno/compare/v0.3.0...v0.4.0
