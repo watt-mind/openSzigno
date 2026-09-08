@@ -871,8 +871,11 @@ store remain the only external material a run consults on its own.
 Per `ds:Signature`, in document order, stopping early where continuing would be
 meaningless:
 
-1. **Structure and policy.** `ds:SignedInfo` and `ds:SignatureValue` are
-   present; the signature sits at `//es:Document/ds:Signature`,
+1. **Structure and policy.** The element children of `ds:Signature`, its
+   `ds:SignedInfo`, and each `ds:Reference` match the cardinality and order
+   the XMLDSig schema fixes (see
+   [XMLDSig structural rules](#xmldsig-structural-rules)); the signature sits
+   at `//es:Document/ds:Signature`,
    `//es:Dossier/ds:Signature`, or inside an `xades:CounterSignature` (see
    [Countersignatures](#countersignatures)); the canonicalization, signature,
    and digest algorithms are inside the pinned allowlist; every transform is
@@ -916,6 +919,45 @@ meaningless:
    asked about: its revocation is not a question the PKI it roots can answer,
    and asking would invite a self-signed CRL to speak for itself.
 
+### XMLDSig structural rules
+
+Stage A1 reads each critical child of a signature by name. That is only sound
+once something has established that exactly one such child exists, in the
+position the schema puts it: a second `ds:SignatureValue` appended after the
+real one, or a `ds:DigestValue` placed before its `ds:DigestMethod`, would
+otherwise let one consumer read what another ignores while openSzigno still
+reported the first copy as verified.
+
+So stage A1 first walks the element children of `ds:Signature`, of its
+`ds:SignedInfo`, and of each `ds:Reference` in document order and checks the
+sequence against the XMLDSig schema:
+
+| Element | Required sequence |
+| --- | --- |
+| `ds:Signature` | one `ds:SignedInfo`, one `ds:SignatureValue`, at most one `ds:KeyInfo`, then zero or more `ds:Object`. |
+| `ds:SignedInfo` | one `ds:CanonicalizationMethod`, one `ds:SignatureMethod`, then one or more `ds:Reference`. |
+| `ds:Reference` | at most one `ds:Transforms`, then one `ds:DigestMethod` and one `ds:DigestValue`. |
+
+A duplicated child, a child out of that order, or a child the sequence does not
+name is a `sig_structure_invalid` failure whose message says which element and
+which of the three it is. The verdict is `invalid`, as it is for every failed
+check, and no later stage runs, so such a signature can never reach a passed
+`signature_value_ok`.
+
+The schema's extension points stay open. The content of `ds:Object` and of
+`ds:KeyInfo` is unconstrained here and is never inspected by this pass, so
+XAdES `xades:QualifyingProperties`, which live inside a `ds:Object`, and any
+key material a `ds:KeyInfo` carries are unaffected. The `Id` attribute of
+`ds:Signature` is untouched. Whitespace text and comments between children are
+ignored, so an indented signature reads the same as a compact one. What the
+schema does *not* allow is a foreign-namespace element as a direct child of
+`ds:Signature`, `ds:SignedInfo`, or `ds:Reference`, so one appearing there is a
+structure error too.
+
+Only duplication, order, and unexpected children are decided by this pass. A
+required element that is simply absent is reported by the same code with the
+message it always had.
+
 ### Module map
 
 `openszigno-verify` is organised as the pipeline above, one module per stage.
@@ -928,7 +970,7 @@ The split is internal; the crate's public API is unchanged.
 | `references` | One `ds:Reference`: parsing, same-document resolution on the validated ID space, the transform allowlist and its application, the effective node set (`ReferenceScope`) every coverage rule shares, and digest recomputation. |
 | `scope` | Placement classification (`Placement`, `placement_of`), the mandated e-dossier reference sets, and `reference_scope_check`. |
 | `countersign` | Countersignature detection, the binding check, and the reported role, parent and `countersigns` set. |
-| `signature` | The per-signature driver (stages A and B): `signed_info.rs` parses `ds:SignedInfo` and applies the signature-level algorithm policy, `collect.rs` gathers the timestamp tokens and the octets each one covers, and `mod.rs` keeps signer selection and `ds:SignatureValue` verification. |
+| `signature` | The per-signature driver (stages A and B): `structure.rs` checks XMLDSig cardinality and order before anything is read by name, `signed_info.rs` parses `ds:SignedInfo` and applies the signature-level algorithm policy, `collect.rs` gathers the timestamp tokens and the octets each one covers, and `mod.rs` keeps signer selection and `ds:SignatureValue` verification. |
 | `coverage` | What a signature's resolved references cover, and the per-document coverage report and its dossier-level checks. |
 | `xades` | Stage C: the XAdES qualifying properties and the signed `SigningCertificate` binding. |
 | `certs` | Stage D: `extensions.rs` decodes a certificate's extensions, `purpose.rs` holds the `extendedKeyUsage` policy per `PathPurpose`, `names.rs` implements RFC 5280 name constraints, `path.rs` builds and validates a path, and `mod.rs` keeps the public types, `check_path` and public-key signature verification. |
@@ -2433,8 +2475,8 @@ verify), and `revocation_not_checked` (the caller switched revocation off).
 | `documents_all_covered` | `passed` / `info` | Every modelled document is covered. `passed` when each is covered by a signature that verified; `info` when at least one is covered only by signatures that did not verify, because that finding is already on those signatures. See [Document coverage](#document-coverage). |
 | `documents_uncovered` | `unknown` | One or more modelled documents are covered by no signature; the message names the count and the indexes. Blocking, so a dossier with an unsigned document cannot be `valid`. `unknown`, not `failed`: an unsigned sibling is missing information, not evidence against a signature that did verify. |
 | `documents_coverage_undetermined` | `unknown` | The coverage of one or more modelled documents could not be determined, because a signature that might cover them could not be evaluated. The message names the count. Blocking, for the same reason. |
-| `sig_structure` | `passed` | `ds:SignedInfo`, `ds:SignatureValue`, the methods, and at least one reference are present and within limits. |
-| `sig_structure_invalid` | `failed` | One of those is missing, malformed, or over a limit. |
+| `sig_structure` | `passed` | `ds:SignedInfo`, `ds:SignatureValue`, the methods, and at least one reference are present, within limits, and in the cardinality and order the XMLDSig schema fixes. |
+| `sig_structure_invalid` | `failed` | One of those is missing, duplicated, out of order, malformed, or over a limit, or one of the three sequenced elements carries an unexpected child. The message names the element and which of those it is. See [XMLDSig structural rules](#xmldsig-structural-rules). |
 | `sig_placement` | `passed` | The signature is at a placement this build describes: `//es:Document/ds:Signature`, `//es:Dossier/ds:Signature`, or the `ds:Signature` inside an `xades:CounterSignature`. |
 | `sig_placement_invalid` | `failed` | It is not, and the message names the reason. On its own this does **not** make the dossier `invalid`; see `signatures_unsupported` and [Countersignatures](#countersignatures). |
 | `countersignature_binding_ok` | `passed` | The countersignature's references resolve to the `ds:SignatureValue` it must attest. |
