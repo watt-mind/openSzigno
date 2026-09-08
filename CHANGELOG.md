@@ -200,6 +200,15 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
   [CONTRIBUTING.md](CONTRIBUTING.md#required-checks) for how to reproduce it
   locally and how to record a dependency that is only reachable through a
   macro or a feature.
+- Nightly fuzzing of the parsers with `cargo-fuzz`: a `fuzz/` package (LAB-268,
+  excluded from the workspace so it never touches the stable MSRV build) with
+  ten targets covering dossier parsing, payload decoding, CMS decryption,
+  C14N canonicalization, and CRL, OCSP, RFC 3161 timestamp, trusted-list, and
+  certificate parsing, each asserting only that the function under it never
+  panics. `.github/workflows/fuzz.yml` runs every target nightly and on
+  manual dispatch; a crash uploads the minimised reproducer and opens or
+  refreshes a tracking issue. See
+  [docs/testing.md](docs/testing.md#fuzzing).
 - Golden output contract tests under `tests/golden/`: the stdout and exit
   status of `inspect`, `list`, `validate-structure`, `verify` and `extract`
   over every fixture in `tests/fixtures/`, in `--json` and human mode, plus
