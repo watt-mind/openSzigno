@@ -60,6 +60,42 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
   `no_recipients`, and `encrypt_failed` (exit 4) and the warning
   `recipient_certificate_expired`. Additive: `schema_version` stays `1`.
   See [Encrypting for a recipient](docs/architecture.md#encrypting-for-a-recipient).
+- `openszigno sign`, which writes a signed copy of a dossier: one enveloped
+  XMLDSig/XAdES signature per document, or one over the dossier with
+  `--scope dossier`. It writes the reference set the e-dossier scope rules
+  mandate, exclusive canonicalization and SHA-256 throughout,
+  `xades:SigningTime` and `xades:SigningCertificateV2` in the signed
+  properties, `xades:CertificateValues` from `--chain` and `--tsa-cert`, and
+  the signer certificate in `ds:KeyInfo`. Flags: `--output`, `--key`,
+  `--cert`, `--passphrase-file`, `--chain`, `--scope`, `--document`, `--tsa`,
+  `--tsa-cert`, `--signing-time`, `--algorithm`, `--online-allow-private`,
+  `--online-proxy`, and `--json`. RSA PKCS#1 v1.5 with SHA-256 is the default
+  and is deterministic given the same key, time and inputs; `rsa-pss-sha256`
+  and `ecdsa-p256-sha256` are offered and are randomised. The key, its
+  certificate and its passphrase come from files or from the existing
+  `OPENSZIGNO_DECRYPT_PASSPHRASE`, never from `argv`. Signing verifies
+  nothing, and every successful run warns `signed_dossier_unverified`. See
+  [The sign command](docs/architecture.md#the-sign-command).
+- `--tsa URL` on `sign`, which posts an RFC 3161 `TimeStampReq` and embeds the
+  token as an `xades:SignatureTimeStamp`. It is the only thing that makes
+  `sign` open a socket, and it goes through the same transport, destination
+  policy, address pinning, timeouts and size caps `verify --online` uses;
+  `--online-allow-private` and `--online-proxy` mean there what they mean
+  there.
+- The signing library in `openszigno-author` (`sign` module): the `Signer`
+  trait a later remote backend implements, `SoftwareSigner` for a local
+  PKCS#8 key, the XMLDSig and XAdES rendering, and RFC 3161 requests and
+  responses as bytes in and bytes out. The crate still reads no file and
+  opens no socket.
+- Stable codes for signing: `invalid_signing_key`,
+  `invalid_signing_certificate`, `signing_certificate_required`,
+  `signing_key_mismatch`, `document_not_signable`, `document_already_signed`,
+  `tsa_failed`, and `sign_failed`, plus the warning
+  `signed_dossier_unverified`. `document_not_found`, `invalid_output_path`,
+  `output_exists`, `unsafe_output_directory` and `io_error` are reused with
+  their existing meanings. Additive: `schema_version` stays `1`.
+- A `sign` refusal in the golden matrix. A successful signing run cannot be a
+  golden: it needs a private key, and this repository commits none.
 
 ### Changed
 

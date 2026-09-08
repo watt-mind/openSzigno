@@ -36,10 +36,13 @@ checked.
 - CMS recipient forms other than `KeyTransRecipientInfo`, and content
   encryption outside the subset in [Decryption](#decryption).
 
-Authoring is no longer a non-goal: `create` writes a new, unsigned dossier,
-and signing, timestamping, and encrypting one are planned in
-[roadmap.md](roadmap.md). None of them exists yet, and nothing below is
-softened by that plan.
+Authoring is no longer a non-goal: `create` writes a new, unsigned dossier
+and encrypts its documents for a recipient, and `sign` writes a signed copy of
+one. What is still planned in [roadmap.md](roadmap.md) is a container
+`es:TimeStamp` and a remote signing backend, and neither exists yet. Nothing
+below is softened by any of it: `sign` produces a signature and checks none,
+and only a remote backend would keep the key out of this process (see
+[remote-signing.md](remote-signing.md)).
 
 Permanent non-goals for this tool:
 
@@ -101,7 +104,9 @@ crates/openszigno-cli/src/
   response.rs         # the JSON envelope, CliError, and its exit statuses
   render/             # writing the envelope (json.rs) and the summary (human.rs)
   commands/           # one module per command: inspect, list, validate,
-                      #   extract, verify, create, skill
+                      #   extract, verify, create, sign, skill
+  key_material.rs     # where a key, a certificate and a passphrase may come
+                      #   from, shared by `extract --decrypt-key` and `sign`
   extract/            # select.rs (--document), plan.rs (decode, names, nesting),
                       #   names.rs (filename safety), write.rs (writing and
                       #   rollback), output_dir.rs (race-resistant output)
@@ -158,6 +163,12 @@ crates/openszigno-author/src/
   lib.rs      # DossierSpec/DocumentSpec, the limit checks, and build()
   render.rs   # the XML text: element order, escaping, fixed whitespace
   mime.rs     # extension to media type, and the caller's own type/subtype
+  sign/       # the signer behind `sign`: mod.rs (what to sign and the three
+              #   passes that fill it in), dsig.rs (ds:SignedInfo and the
+              #   octets each reference digests), xades.rs (the qualifying
+              #   properties), signer.rs (the Signer seam and SoftwareSigner),
+              #   tsa.rs (RFC 3161 requests and responses, bytes in and out),
+              #   error.rs (the codes a refused signing run reports)
   title.rs    # the title rules extraction and authoring both apply
   archive.rs  # the one-member ZIP a `zip -> base64` document carries
   encrypt/    # the CMS EnvelopedData an `encrypt` document carries
@@ -167,10 +178,13 @@ crates/openszigno-author/src/
 ```
 
 The crate reads no file, opens no socket, and calls no clock: the caller
-passes the bytes and the creation date in. Its one non-deterministic corner
-is `encrypt/`, which draws a content key, an initialisation vector, and
+passes the bytes, the creation date, and the signing time in, reaches the
+private key through the `Signer` trait, and carries every RFC 3161 request to
+the timestamp authority itself. Its one non-deterministic corner is
+`encrypt/`, which draws a content key, an initialisation vector, and
 key-transport padding from `OsRng`; without recipients it consults no random
-source at all. See [The create command](#the-create-command).
+source at all. See [The create command](#the-create-command) and
+[The sign command](#the-sign-command).
 
 ## Format scope
 
@@ -429,6 +443,7 @@ configurable on the command line; see [roadmap.md](roadmap.md).
 | `validate-structure FILE` | Apply the project's strict structural rules without validating signatures. | No |
 | `verify FILE` | Verify every `ds:Signature`: canonicalization, reference digests, the signature value, the e-dossier reference-scope rules, the XAdES signed `SigningCertificate` binding, RFC 3161 signature timestamps, the certificate path, and revocation. Reports a per-signature verdict of `valid`, `invalid`, or `indeterminate`. | No |
 | `create --output FILE --title TITLE` | Build one new, unsigned dossier from files on disk, without overwriting anything. The only command that writes a dossier. See [The create command](#the-create-command). | No: it reads its inputs only |
+| `sign FILE --output FILE --key KEY` | Write a signed copy of a dossier: one enveloped XMLDSig/XAdES signature per selected document, or one over the dossier. It verifies nothing. See [The sign command](#the-sign-command). | No: it reads its input only |
 | `skill` | Write the agent skill the binary embeds (`crates/openszigno-cli/skills/openszigno/SKILL.md`) to stdout, byte for byte and with nothing added. Reads no dossier and emits no envelope. | No |
 
 In every command except `create` and `skill` `FILE` is either a path to a
@@ -474,6 +489,24 @@ These flags apply to every command that reads a dossier:
 | `--embed <FILE>` | An existing dossier to embed as one document. Repeatable. |
 | `--created <TIME>` | The creation date, as an RFC 3339 timestamp. Without it the current time is used. |
 | `--allow-namespace <URI>` | Also accept an `--embed` dossier rooted in this namespace. Repeatable. |
+
+`sign` takes a `FILE` and accepts:
+
+| Flag | Meaning |
+| --- | --- |
+| `-o`, `--output <FILE>` | The signed dossier to write. Required. An existing file is never overwritten. |
+| `--key <FILE>` | The signing key: PKCS#8, DER or PEM, plain or passphrase-protected, RSA or NIST P-256. Required, and never taken from `argv`. |
+| `--cert <FILE>` | The certificate belonging to `--key`, PEM or DER. Optional when the key file is PEM and carries the certificate too. |
+| `--passphrase-file <FILE>` | Read the passphrase of an encrypted `--key` from this file. It takes precedence over `OPENSZIGNO_DECRYPT_PASSPHRASE`. |
+| `--chain <FILE>` | A certificate for `xades:CertificateValues`, so a verifier can build the signer's path without a store of its own. Repeatable; a PEM bundle may hold several. |
+| `--scope <document\|dossier>` | What the signature covers. `document` (the default) writes one signature per selected document; `dossier` writes one over the whole dossier. |
+| `--document <SELECTOR>` | Sign only the named documents, by `object_ref` or as `#<index>`. Repeatable. Without it every document is signed. See [Selecting documents](#selecting-documents). |
+| `--tsa <URL>` | Ask this RFC 3161 timestamp authority for a token over each signature value. The only thing that makes `sign` open a socket. |
+| `--tsa-cert <FILE>` | A timestamp authority certificate for `xades:CertificateValues`. Repeatable. |
+| `--signing-time <TIME>` | The `xades:SigningTime` to write, RFC 3339, normalised to UTC seconds. Without it the current time is used. |
+| `--algorithm <NAME>` | `rsa-sha256` (default for an RSA key), `rsa-pss-sha256`, or `ecdsa-p256-sha256` (default for a P-256 key). |
+| `--online-allow-private` | Permit `--tsa` to contact loopback, private, link-local and unique-local addresses. Requires `--tsa`. |
+| `--online-proxy <URL>` | Route the `--tsa` request through this proxy. Requires `--tsa`. |
 
 In JSON mode, stdout contains exactly one JSON object and diagnostics go to
 stderr. Document ordering is the source XML order. No command writes XML
@@ -577,7 +610,7 @@ The envelope fields are always present:
 | --- | --- | --- |
 | `schema_version` | number | Currently `1`. |
 | `ok` | boolean | `false` on any failure. |
-| `command` | string | `inspect`, `list`, `extract`, `validate-structure`, `verify`, `create`, or `usage`. `skill` never appears: it emits no envelope. |
+| `command` | string | `inspect`, `list`, `extract`, `validate-structure`, `verify`, `create`, `sign`, or `usage`. `skill` never appears: it emits no envelope. |
 | `input` | object | `format` is `"microsec-es3"` or `null`; `bytes` is the input size or `null`. |
 | `data` | object or null | Command-specific; `null` on failure. |
 | `warnings` | array | Objects with stable `code` and human `message`. |
@@ -648,6 +681,7 @@ writes one compact line; this is pretty-printed:
 | `extract` | `extracted` (array of `document_index`, `dossier_path`, `filename`, `path`, `bytes`, `detected_type`, `declared_type`, `decrypted`), `extracted_count`, `skipped_count`, `nested_dossiers_extracted`, `selected`. |
 | `validate-structure` | `valid_structure`, `documents`, `conformance_warnings`, `cryptographic_verification_performed` (always `false`). |
 | `create` | `output`, `bytes`, `created`, and `documents`: an array in the order written with `index`, `title`, `mime_type`, `source_size`, `transforms`, `nested_dossier`, and `object_ref`. See [The create command](#the-create-command). |
+| `sign` | `output`, `bytes`, and `signatures`: an array in the order written with `id`, `scope`, `document_index`, `algorithm`, `signing_time`, and `timestamped`. See [The sign command](#the-sign-command). |
 | `verify` | `verdict`, `verification_time`, `policy`, `limits`, `counts`, `checks`, `documents`, `signatures`, `timestamps`. `documents` is the per-document coverage inventory and `timestamps` the container `es:TimeStamp` reports; both are always present, as empty arrays when there is nothing to report. See [The `verify` command](#the-verify-command). |
 
 `valid_structure` stays `true` whenever parsing succeeded;
@@ -846,11 +880,19 @@ I/O and extraction policy.
 | `unsupported_recipient_key` | author | 4 | A `create --encrypt-for` certificate carries a public key that is not RSA, or an RSA key too small to wrap the content-encryption key. |
 | `no_recipients` | author | 4 | Encryption was asked for with no recipient certificate. Unreachable through the CLI, which only builds an encryption request from `--encrypt-for`. |
 | `encrypt_failed` | author | 4 | The CMS `EnvelopedData` could not be built. Not reachable through any input this tool accepts: every value in it is built by this tool and within every bound the DER encoders check. |
-| `invalid_output_path` | CLI | 4 | The `create --output` path does not name a file. |
+| `invalid_signing_key` | author | 4 | `--key` is not an RSA or NIST P-256 private key in PKCS#8 DER or PEM form, its passphrase is missing or wrong, or `--algorithm` names a scheme that key cannot produce. "Wrong passphrase" is deliberately not told apart from "not a PKCS#8 file". |
+| `invalid_signing_certificate` | author | 4 | `--cert`, `--chain`, `--tsa-cert`, or the certificate inside the key file is not a readable X.509 certificate. |
+| `signing_certificate_required` | author | 4 | `--key` was given with no `--cert` and the key file carries none, so nothing would bind the signature to a certificate. |
+| `signing_key_mismatch` | author | 4 | The certificate's public key is not the signing key's public key. |
+| `document_not_signable` | author | 4 | A selected document has no payload `ds:Object` or no `es:DocumentProfile` with an `Id`, so the mandated reference set cannot be written for it. |
+| `document_already_signed` | author | 4 | Adding this signature would invalidate one the dossier already carries. See [Signing a dossier that is already signed](#signing-a-dossier-that-is-already-signed). |
+| `tsa_failed` | author, CLI | 5 | The `--tsa` request could not be made, was refused by the destination policy, or the answer was not a granted RFC 3161 response carrying a token over the requested imprint. The message names the reason. |
+| `sign_failed` | author | 5 | Signing could not be completed: an identifier the signature needs is already used in the dossier, an element could not be canonicalized, or the key refused to sign. |
+| `invalid_output_path` | CLI | 4 | The `create --output` or `sign --output` path does not name a file. |
 | `unsafe_output_name` | CLI | 5 | A document title or declared extension cannot be used as a filename, or the derived `<file>.d` directory name would be too long. |
 | `output_name_collision` | CLI | 5 | Residual: two outputs still map to the same name in one directory after deduplication. |
 | `output_exists` | CLI | 5 | A destination file already exists or cannot be created safely. |
-| `document_not_found` | CLI | 4 | A `--document` selector matches no document, is not a decimal index after `#`, or names a document inside an embedded dossier. |
+| `document_not_found` | CLI, author | 4 | A `--document` selector matches no document, is not a decimal index after `#`, or names a document inside an embedded dossier. `sign` reports it for its own selectors. |
 | `document_ambiguous` | CLI | 4 | A `--document` `object_ref` selector matches more than one document. Unreachable through a parsed dossier, whose XML IDs are unique. |
 | `stdout_requires_single_document` | CLI | 4 | `--stdout` did not resolve to exactly one document, or the one it resolved to embeds a dossier while recursion is on. |
 | `document_not_extractable` | CLI | 5 | The document `--stdout` selected is encrypted or uses an unsupported transform chain. |
@@ -883,6 +925,7 @@ Warning codes. Warnings never change the exit status by themselves:
 | `nested_dossier_depth_limit` | `extract` | An embedded dossier was kept as a file because `--max-depth` was reached. |
 | `recipient_certificate_expired` | `create` | An `--encrypt-for` certificate has already expired; the document was encrypted for it anyway, because decryption never consults a recipient certificate's validity. The message names the recipient by its position on the command line. |
 | `created_dossier_unsigned` | `create` | The dossier that was written carries no signature and no timestamp. Every successful `create` reports it, last. |
+| `signed_dossier_unverified` | `sign` | A signature was produced and nothing was checked. Every successful `sign` reports it. |
 | `nested_dossier_invalid` | `extract` | An embedded dossier could not be parsed; the raw payload was kept and the run continued. |
 
 ## The `verify` command
@@ -2980,6 +3023,230 @@ for every other command whose input could not be used.
 Every successful run warns `created_dossier_unsigned`. Creating a dossier
 proves nothing about its contents, and the envelope says so on every run.
 
+## The sign command
+
+`sign` writes a signed copy of a dossier. It is the only command that produces
+a signature, and it is not the command that judges one: producing a signature
+and checking one are different operations, and this tool keeps them in
+different commands on purpose. Every successful run warns
+`signed_dossier_unverified`.
+
+```sh
+openszigno sign FILE.es3 --output SIGNED.es3 --key KEY.pem --cert CERT.pem \
+  [--passphrase-file F] [--chain CA.pem]... [--scope document|dossier] \
+  [--document SELECTOR]... [--tsa URL] [--tsa-cert CERT]... \
+  [--signing-time RFC3339] [--algorithm NAME] \
+  [--online-allow-private] [--online-proxy URL] [--json]
+```
+
+The signing itself lives in `openszigno-author`, which reads no file and opens
+no socket: the CLI reads the dossier and the key material, reaches the private
+key through the `Signer` trait, and carries every RFC 3161 request to the
+timestamp authority itself. That split is what makes a remote signing backend
+a matter of implementing one trait; see
+[remote-signing.md](remote-signing.md).
+
+### What it writes
+
+One `ds:Signature` per signature, placed where the e-dossier format puts it:
+inside the `es:Document` for `--scope document`, and as a direct child of
+`es:Dossier` for `--scope dossier`. This is the shape, with the Base64 values
+trimmed:
+
+```xml
+<ds:Signature xmlns:ds="http://www.w3.org/2000/09/xmldsig#" Id="sig-doc0">
+  <ds:SignedInfo>
+    <ds:CanonicalizationMethod Algorithm="http://www.w3.org/2001/10/xml-exc-c14n#"/>
+    <ds:SignatureMethod Algorithm="http://www.w3.org/2001/04/xmldsig-more#rsa-sha256"/>
+    <ds:Reference Id="ref-sig-doc0-object" URI="#obj0">
+      <ds:Transforms><ds:Transform Algorithm="http://www.w3.org/2001/10/xml-exc-c14n#"/></ds:Transforms>
+      <ds:DigestMethod Algorithm="http://www.w3.org/2001/04/xmlenc#sha256"/>
+      <ds:DigestValue>a7MWc68BhZJ5YGEE...</ds:DigestValue>
+    </ds:Reference>
+    <ds:Reference Id="ref-sig-doc0-document-profile" URI="#profile0">...</ds:Reference>
+    <ds:Reference Id="ref-sig-doc0-signature-profile" URI="#profile-sig-doc0">...</ds:Reference>
+    <ds:Reference Id="ref-sig-doc0-signed-properties" URI="#signed-props-sig-doc0"
+                  Type="http://uri.etsi.org/01903#SignedProperties">...</ds:Reference>
+  </ds:SignedInfo>
+  <ds:SignatureValue>h3Gu+iByx4xAmcZr...</ds:SignatureValue>
+  <ds:KeyInfo><ds:X509Data><ds:X509Certificate>MIIC+TCC...</ds:X509Certificate></ds:X509Data></ds:KeyInfo>
+  <ds:Object Id="profile-sig-doc0">
+    <es:SignatureProfile xmlns:es="https://www.microsec.hu/ds/e-szigno30#" Id="sigprof-sig-doc0">
+      <es:Type>signature</es:Type><es:Generator>openSzigno</es:Generator>
+    </es:SignatureProfile>
+  </ds:Object>
+  <ds:Object Id="xades-sig-doc0">
+    <xades:QualifyingProperties xmlns:xades="http://uri.etsi.org/01903/v1.3.2#" Target="#sig-doc0">
+      <xades:SignedProperties Id="signed-props-sig-doc0">
+        <xades:SignedSignatureProperties>
+          <xades:SigningTime>2026-01-02T00:00:00Z</xades:SigningTime>
+          <xades:SigningCertificateV2><xades:Cert><xades:CertDigest>
+            <ds:DigestMethod Algorithm="http://www.w3.org/2001/04/xmlenc#sha256"/>
+            <ds:DigestValue>+cSXgp1X6XtBY5rx...</ds:DigestValue>
+          </xades:CertDigest></xades:Cert></xades:SigningCertificateV2>
+        </xades:SignedSignatureProperties>
+        <xades:SignedDataObjectProperties>
+          <xades:DataObjectFormat ObjectReference="#ref-sig-doc0-object">
+            <xades:MimeType>text/plain</xades:MimeType>
+          </xades:DataObjectFormat>
+        </xades:SignedDataObjectProperties>
+      </xades:SignedProperties>
+      <xades:UnsignedProperties><xades:UnsignedSignatureProperties>
+        <xades:SignatureTimeStamp>
+          <xades:EncapsulatedTimeStamp>MIIF...</xades:EncapsulatedTimeStamp>
+        </xades:SignatureTimeStamp>
+        <xades:CertificateValues>
+          <xades:EncapsulatedX509Certificate>MIID...</xades:EncapsulatedX509Certificate>
+        </xades:CertificateValues>
+      </xades:UnsignedSignatureProperties></xades:UnsignedProperties>
+    </xades:QualifyingProperties>
+  </ds:Object>
+</ds:Signature>
+```
+
+### What each reference covers, and why
+
+The reference set is not a choice: it is what
+[Reference scope](#reference-scope) requires the verifier to insist on, so
+writing anything less produces a signature this tool would refuse.
+
+| Placement | References written |
+| --- | --- |
+| `document` | the document's payload `ds:Object`, its `es:DocumentProfile`, the signature's own profile object, and the `xades:SignedProperties`. |
+| `dossier` | `/es:Dossier/es:DossierProfile`, `/es:Dossier/es:Documents`, the signature's own profile object, and the `xades:SignedProperties`. |
+
+Every reference is same-document (`#id`), carries exactly one transform —
+Exclusive XML Canonicalization 1.0 — and is digested with SHA-256, and
+`ds:SignedInfo` is canonicalized the same way. There is no
+enveloped-signature transform anywhere, and there is nothing to remove: every
+reference names a sibling of the signature or a child of it, so no reference's
+node set ever contains the signature it is written in. That is also why the
+`xades:SignedProperties` and the signature-profile object each get a reference
+of their own rather than riding along inside a `URI=""` one, which would
+cover neither.
+
+The `xades:SignatureTimeStamp` is the one exception to "exclusive
+everywhere". It covers the canonicalized `ds:SignatureValue` **element**, and
+because the element this build writes names no `ds:CanonicalizationMethod`,
+XAdES clause 7.1.4.3.1 makes inclusive C14N 1.0 the default for it. The
+signer computes the inclusive form for exactly that reason: the two differ by
+the ancestor namespace declarations `ds:SignatureValue` does not visibly use,
+and a token over the wrong one is a token nobody recomputes.
+
+### Identifiers and determinism
+
+| Element | `Id` |
+| --- | --- |
+| `ds:Signature` | `sig-doc<N>` for document scope, `sig-dossier` for dossier scope. |
+| the signature-profile `ds:Object` | `profile-<signature id>`. |
+| the qualifying-properties `ds:Object` | `xades-<signature id>`. |
+| `xades:SignedProperties` | `signed-props-<signature id>`. |
+| each `ds:Reference` | `ref-<signature id>-<what it covers>`. |
+
+No identifier is random, and one already in use in the dossier is a refusal
+rather than a collision. Given the same input, key, signing time and flags,
+**RSA PKCS#1 v1.5 produces byte-identical output**: the signature is a
+deterministic function of what it signs. RSA-PSS salts its input and ECDSA
+draws a nonce, so those two do not, and `--signing-time` is what pins the one
+other moving part; without it the current time is written.
+
+A dossier declared ISO-8859-2 is decoded to UTF-8 before it is signed and its
+declaration is rewritten to say so. That changes no signature already in the
+file: canonical XML is UTF-8 whatever the source encoding was, so every
+existing digest is computed over exactly the same octets as before.
+
+### Algorithms
+
+| `--algorithm` | `ds:SignatureMethod` | Deterministic |
+| --- | --- | --- |
+| `rsa-sha256` (default for an RSA key) | `...xmldsig-more#rsa-sha256` | Yes |
+| `rsa-pss-sha256` | `...2007/05/xmldsig-more#sha256-rsa-MGF1` | No |
+| `ecdsa-p256-sha256` (default for a P-256 key) | `...xmldsig-more#ecdsa-sha256` | No |
+
+RSA PKCS#1 v1.5 with SHA-256 is the default rather than PSS because it is what
+Hungarian e-akta verifiers universally accept. All three are inside the pinned
+[algorithm policy](#algorithm-policy) `verify` enforces, and an ECDSA
+signature is written as the raw `r || s` pair XMLDSig prescribes.
+
+### Timestamping
+
+`--tsa URL` posts an RFC 3161 `TimeStampReq` — `application/timestamp-query`,
+SHA-256 imprint, `certReq` set, no nonce — for each signature, and embeds the
+token it gets back as an `xades:SignatureTimeStamp` with the implicit data
+selection. It is the only thing that makes `sign` open a socket, and it goes
+through the same transport `verify --online` uses: the same destination
+policy (`http`/`https` only, no userinfo, and no loopback, private,
+link-local or unique-local address without `--online-allow-private`), the
+same address pinning, the same timeouts, the same refusal to follow a redirect
+to another host, and no proxy from the environment.
+
+The answer is checked for the two things a caller cannot check: that it is a
+granted response carrying a token, and that the token stamps the imprint that
+was asked about. Anything else is `tsa_failed`, the output file is never
+written, and nothing partial is left behind. A token is embedded evidence, not
+a verified one: only `verify` checks a timestamp's signature, its authority's
+`extendedKeyUsage`, and its path.
+
+A signing time later than the token's `genTime` is worth avoiding: `verify`
+reports `timestamp_before_signing_time` for it, which leaves the token
+unverified. `--signing-time` should not be in the future.
+
+### Signing a dossier that is already signed
+
+A second signature can be added to a dossier that already carries one, and a
+document that already has a signature can be given another: neither
+signature's references reach inside the other, so nothing that verified stops
+verifying.
+
+Two cases are refused with `document_already_signed`, because writing them
+would silently break what is already there:
+
+- adding a document signature to a dossier that carries a dossier-level
+  signature or a dossier-level `es:TimeStamp`, both of which cover
+  `es:Documents` and would stop matching the moment a document changes;
+- adding anything to a dossier carrying a signature with a `URI=""`
+  reference, which covers everything outside itself.
+
+Nothing this tool writes falls into either case, so the limitation is about
+dossiers from elsewhere. `sign` never rewrites or removes a signature.
+
+### The JSON shape
+
+| `data` field | Type | Meaning |
+| --- | --- | --- |
+| `output` | string | The output path exactly as the caller gave it. It is never resolved or made absolute. |
+| `bytes` | number | The size of the file written. |
+| `signatures` | array | One entry per signature written, in the order written. |
+
+| `signatures[]` field | Type | Meaning |
+| --- | --- | --- |
+| `id` | string | The `Id` of the `ds:Signature` element. |
+| `scope` | string | `document` or `dossier`. |
+| `document_index` | number or null | The index of the document the signature sits in; `null` for dossier scope. |
+| `algorithm` | string | The `--algorithm` name actually used. |
+| `signing_time` | string | The `xades:SigningTime` written, RFC 3339 UTC seconds. |
+| `timestamped` | boolean | Whether an `xades:SignatureTimeStamp` was embedded. It says a token was obtained, never that it was verified. |
+
+### Writing the output
+
+The output file is created with `O_EXCL` through the same
+descriptor-relative machinery `create` and `extract` use, so the same rules
+hold: an existing destination is `output_exists`, a path component that is a
+symlink or is not a directory is `unsafe_output_directory`, and a failed write
+removes what this run created rather than leaving a half-written file that
+looks like a signed dossier.
+
+### Key material
+
+`--key`, `--cert` and `--passphrase-file` are files, and the passphrase may
+alternatively come from `OPENSZIGNO_DECRYPT_PASSPHRASE` — the same variable
+`extract --decrypt-key` reads, because a second variable would be a second
+place for a secret to be left set. Nothing comes from `argv`. Key bytes, the
+passphrase, and anything derived from either never appear in a message, a
+warning, or the JSON envelope, and "wrong passphrase" is deliberately not told
+apart from "not a PKCS#8 file". A certificate that does not belong to the key
+is `signing_key_mismatch` and is refused before anything is signed.
+
 ## Extraction policy
 
 - Decode Base64 as bytes, never by treating a dossier as locale-dependent
@@ -3275,8 +3542,8 @@ trusted list whose own signature was not checked yields `indeterminate` too.
 output states the verdict and the revocation policy it was reached under on
 every run.
 
-The rule for the other five commands is unchanged: `inspect`, `list`,
-`extract`, `validate-structure`, and `create` verify nothing,
+The rule for the other six commands is unchanged: `inspect`, `list`,
+`extract`, `validate-structure`, `create`, and `sign` verify nothing,
 `signatures_verified` and
 `cryptographic_verification_performed` stay `false`, and the warning
 `cryptographic_verification_not_performed` keeps its meaning for them. The
@@ -3288,7 +3555,18 @@ evidence at all. See [Signature inventory](#signature-inventory). It is
 deliberately *not* emitted by `verify`, which reports what it actually did.
 
 Creating a dossier says nothing about its contents either: `create` signs
-nothing, and every run of it warns `created_dossier_unsigned`.
+nothing, and every run of it warns `created_dossier_unsigned`. **Signing one
+says nothing about it either.** `sign` produces a signature with the key it
+was given over the elements the format mandates, and checks none of it: not
+the key, not the certificate, not the chain, not the token a `--tsa` returned
+beyond that it stamps the right imprint. Every successful run warns
+`signed_dossier_unverified`. Running `verify` on what `sign` wrote is the only
+way to learn whether it holds — and a `valid` verdict over a self-signed test
+chain means only that the chain the caller chose to trust verified, which is
+not a statement about anybody's identity and not a qualified electronic
+signature. A qualified signature needs a key on a qualified device, which by
+construction is not a key this process can hold; see
+[remote-signing.md](remote-signing.md).
 Extracting a document is never proof that it was signed or that the signature
 is valid, and neither is decrypting one: `--decrypt-key` shows that a key could
 unwrap a payload, which says nothing about who produced it. A rejection is

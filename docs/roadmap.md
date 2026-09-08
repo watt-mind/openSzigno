@@ -30,8 +30,13 @@ with the code-level detail, is
   DES-EDE3-CBC. Such a document is named and skipped.
 - Configurable limits: they are compile-time defaults today. See
   [Engineering items](#engineering-items).
-- Signing, timestamping, and encrypting a dossier. `create` writes an
-  unsigned one; the rest is [M5](#m5-authoring--in-progress).
+- Encrypting a dossier, and writing a container `es:TimeStamp`. `create`
+  writes an unsigned dossier and `sign` signs one, optionally with a
+  `xades:SignatureTimeStamp`; the rest is
+  [M5](#m5-authoring--in-progress).
+- Signing with a key this process does not hold. `sign` takes a software key,
+  which cannot produce a qualified electronic signature; a remote backend is
+  LAB-291, and [remote-signing.md](remote-signing.md) has the research.
 
 Outside the plan altogether:
 
@@ -466,9 +471,9 @@ dependency tree of a caller who only reads stays as it is, and so that
 | --- | --- | --- |
 | LAB-288 | `create`: build an unsigned dossier from files on disk, deterministically, bounded by the same limits, never overwriting the output. | Done |
 | LAB-289 | `--encrypt-for`: write a document as `encrypt -> base64` for one or more recipient certificates, the forward direction of `extract --decrypt-key`. AES-256-CBC content encryption, RSAES-OAEP with SHA-256 key transport by default and RSAES-PKCS1-v1_5 under `--legacy-key-transport`. | Done |
-| LAB-290 | `sign` with a software key: XMLDSig over the dossier's own reference scope, with the XAdES signed properties `verify` already checks. | Planned |
+| LAB-290 | `sign` with a software key: XMLDSig over the dossier's own reference scope, with the XAdES signed properties `verify` already checks, and an optional `--tsa` RFC 3161 timestamp. | Done |
 | LAB-291 | A CSC (Cloud Signature Consortium) remote signing backend, so the key never reaches this process at all. | Planned |
-| LAB-292 | Timestamping what was signed: an RFC 3161 request to a configured TSA, and the `es:TimeStamp` or `xades:SignatureTimeStamp` that carries the token. | Planned |
+| LAB-292 | Timestamping what was signed. The `xades:SignatureTimeStamp` half shipped with LAB-290; what is left is the container `es:TimeStamp`, and timestamping a dossier without signing it. | Partly done |
 | LAB-293 | An e-Szignó interop check: everything this milestone writes is opened by the Microsec reference tool, and every difference is recorded rather than assumed away. | Planned |
 
 Open questions this milestone must answer rather than assume:
@@ -480,8 +485,13 @@ Open questions this milestone must answer rather than assume:
   openSzigno's own nested-dossier detection fire, which is why `create`
   writes it; LAB-293 is where that gets checked against the reference tool.
 - What a signature this project writes must cover for the reference tool to
-  accept it, which is the same reference-scope question `verify` answers from
-  the reading side.
+  accept it. `sign` writes the set the e-dossier reference-scope rules require
+  and this tool's own `verify` accepts; whether the Microsec reference tool
+  agrees is LAB-293, and is the one thing that cannot be settled from inside
+  this repository.
+- Whether `xades:SigningCertificateV2` without an `IssuerSerialV2`, which is
+  what `sign` writes, is accepted everywhere the older `SigningCertificate`
+  form is. The digest is the binding either way.
 - Which key transport the Microsec reference tool writes. Its documented
   `-encryptor_symm_alg` option covers the content cipher only and defaults to
   `des-ede3-cbc`; no source available here names a key-transport default or

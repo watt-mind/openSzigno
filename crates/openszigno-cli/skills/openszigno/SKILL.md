@@ -1,7 +1,8 @@
 ---
 name: openszigno
 description: >-
-  Inspect, list, extract, decrypt, verify and create Microsec e-Szigno dossiers
+  Inspect, list, extract, decrypt, verify, create and sign Microsec e-Szigno
+  dossiers
   (.es3, .dosszie, "e-akta") with the openszigno CLI. Use whenever a task
   involves an .es3 file, a Hungarian court or company-registry e-akta, a
   signed or encrypted e-Szigno dossier, XAdES signature or timestamp
@@ -21,8 +22,9 @@ dossier, lists and extracts the documents inside it (including nested
 dossiers and, given a key, encrypted ones), and verifies XMLDSig/XAdES
 signatures, timestamps, certificate paths and revocation against trust
 material you supply, and can build a new, unsigned dossier from files on
-disk. It never contacts the network unless told to, never
-overwrites a file, and never takes key material from the command line.
+disk and write a signed copy of one with a key you supply. It never contacts
+the network unless told to, never overwrites a file, and never takes key
+material from the command line.
 
 ## Rules that always apply
 
@@ -327,6 +329,48 @@ openszigno create --output OUT.es3 --title 'Dossier title' \
   file are the proof it holds what was asked for.
 - Every successful run warns `created_dossier_unsigned`. Pass that on.
 
+### 7. Sign a dossier
+
+Only when the user asks for a dossier to be *signed* and has supplied a key
+and its certificate. `sign` writes a signed copy and **verifies nothing** —
+not the key, not the certificate, not the chain — so never present its
+output as authentic, valid, or legally effective.
+
+```sh
+openszigno sign IN.es3 --output SIGNED.es3 \
+  --key signer.p8 --cert signer.crt [--passphrase-file PASS] \
+  [--chain issuing-ca.pem] [--scope document|dossier] [--document '#N'] \
+  [--tsa https://tsa.example/tsa --tsa-cert tsa-ca.pem] \
+  [--signing-time 2026-01-02T00:00:00Z] [--algorithm rsa-sha256] --json
+```
+
+- The key, the certificate and the passphrase come from files, never from
+  the command line. Never echo, print or log any of them; the passphrase
+  may alternatively come from `OPENSZIGNO_DECRYPT_PASSPHRASE`.
+- `--scope document` (the default) writes one signature per document;
+  `--scope dossier` writes one over the whole dossier. Every document must
+  end up covered, or `verify` caps the dossier at `indeterminate`.
+- The output file is never overwritten: an existing path is
+  `output_exists` (exit 5).
+- A certificate that does not belong to the key is `signing_key_mismatch`
+  (exit 4); an unreadable key is `invalid_signing_key` (exit 4). A failed
+  `--tsa` request is `tsa_failed` (exit 5) and nothing is written.
+- **`verify` reports `valid` only for a signature that has a fully verified
+  timestamp and fresh revocation data.** Without `--tsa` the best a signed
+  dossier reaches is `indeterminate` with `signature_timestamp_absent`, and
+  without revocation data (`--revocation-store` or `--online`) it is capped
+  by `revocation_status_unknown` too. Say so rather than letting the user
+  read `indeterminate` as a failure.
+- Check the result by verifying it: run `verify` with the user's own trust
+  material and report what it says.
+- Every successful run warns `signed_dossier_unverified`. Pass that on.
+- **This is not a qualified electronic signature.** A qualified signature
+  needs a key on a qualified device, which is not a key this process can
+  hold; a `valid` verdict over a chain the user assembled means only that
+  the chain they chose to trust verified. See `docs/remote-signing.md` in
+  the openSzigno repository before telling a user their signature will be
+  accepted anywhere.
+
 ## Reporting to the user
 
 State, in this order and in plain words:
@@ -355,6 +399,8 @@ openszigno extract FILE --document '#N' --stdout > payload.bin
 openszigno extract FILE --json --output DIR --decrypt-key K --decrypt-cert C
 openszigno create --output OUT.es3 --title T --document PATH[::TITLE[::MIME]] \
   [--zip] [--embed DOSSIER.es3] [--created RFC3339] --json
+openszigno sign IN.es3 --output OUT.es3 --key K --cert C [--chain CA] \
+  [--scope dossier] [--tsa URL --tsa-cert CA] [--signing-time RFC3339] --json
 openszigno verify FILE --json --trust-store DIR [--trust-list TL --lotl LOTL \
   --trust-list-signer CERT] [--online --online-cache DIR | --revocation-store DIR] \
   [--at TIME] [--allow-legacy-algorithms]
