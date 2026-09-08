@@ -98,7 +98,7 @@ pub(crate) struct VerifyArgs {
     /// Do not check revocation at all. Documented as producing at most
     /// `indeterminate`: a signature whose certificate might have been revoked
     /// is not one this tool will call valid.
-    #[arg(long = "no-revocation", conflicts_with_all = ["online", "online_cache", "online_proxy"])]
+    #[arg(long = "no-revocation", conflicts_with_all = ["online", "online_cache", "online_proxy", "online_allow_private"])]
     pub(crate) no_revocation: bool,
     /// Fetch revocation data the offline material does not cover, from the CRL
     /// distribution points and AIA OCSP responders the certificates themselves
@@ -114,6 +114,14 @@ pub(crate) struct VerifyArgs {
     /// a `--revocation-store`, so a later offline run reproduces this result.
     #[arg(long = "online-cache", value_name = "DIR", requires = "online")]
     pub(crate) online_cache: Option<PathBuf>,
+    /// Permit `--online` to contact loopback, private (RFC 1918), link-local
+    /// and unique-local addresses, and the host name `localhost`. Refused by
+    /// default: the URL comes out of a certificate the caller has not yet
+    /// established trust in, so without this flag a dossier cannot point the
+    /// verifier at a service on the machine or the network it runs on. Give it
+    /// only for an internal CA that really does publish there.
+    #[arg(long = "online-allow-private", requires = "online")]
+    pub(crate) online_allow_private: bool,
     /// Route `--online` fetches through this proxy. Without it no proxy is
     /// used at all — in particular, none from `HTTP_PROXY` or its relatives,
     /// which are deliberately ignored.

@@ -138,16 +138,17 @@ pub(crate) fn verify_command(args: &VerifyArgs) -> CliResult {
                 online_ocsp: &[],
             };
             let fetcher =
-                online::Fetcher::new(args.online_proxy.as_deref()).map_err(|message| {
-                    failure(
-                        input.clone(),
-                        CliError {
-                            code: "online_options_invalid",
-                            message,
-                            exit: 3,
-                        },
-                    )
-                })?;
+                online::Fetcher::new(args.online_proxy.as_deref(), args.online_allow_private)
+                    .map_err(|message| {
+                        failure(
+                            input.clone(),
+                            CliError {
+                                code: "online_options_invalid",
+                                message,
+                                exit: 3,
+                            },
+                        )
+                    })?;
             let limits = openszigno_verify::VerifyLimits::default();
             let anchors: Vec<Vec<u8>> = trust
                 .anchors()
@@ -169,8 +170,16 @@ pub(crate) fn verify_command(args: &VerifyArgs) -> CliResult {
                 })?;
             }
             online_checks = fetched.checks;
-            store.extend_online(fetched.crls, fetched.ocsp);
-            store = store.into_online();
+            // With no anchor configured nothing was fetched and nothing could
+            // have been: revocation data is only fetched for a certificate on
+            // a path to one. The reported policy says that rather than a bare
+            // `online`, so a caller who got no data learns why.
+            store = if anchors.is_empty() {
+                store.into_online_without_anchors()
+            } else {
+                store.extend_online(fetched.crls, fetched.ocsp);
+                store.into_online()
+            };
         }
         offline = store;
         &offline

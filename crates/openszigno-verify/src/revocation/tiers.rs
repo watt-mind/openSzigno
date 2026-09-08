@@ -266,9 +266,9 @@ fn message_for(
                 // The gap is the *reason* nothing was fetched, so it is named
                 // here rather than left to the policy check alone: a reader of
                 // this sentence is the one who has to act on it.
-                RevocationPolicy::OnlineNoAnchors => &format!(
-                    "{source}, and --online fetched nothing because no trust anchors are configured, so no certificate sits on a path to one"
-                ),
+                RevocationPolicy::OnlineNoAnchors => {
+                    &format!("{source}{}", super::unfetched(input.policy))
+                }
                 RevocationPolicy::NotChecked | RevocationPolicy::Offline => source,
             };
             format!(

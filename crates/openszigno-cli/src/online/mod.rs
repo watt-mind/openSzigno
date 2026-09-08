@@ -9,20 +9,26 @@
 //!
 //! # The policy, and why each part of it is there
 //!
+//! - **Only for certificates the run actually trusts the shape of.** A URL is
+//!   contacted only for a certificate that sits on a candidate path ending at
+//!   a configured trust anchor. Checking that an embedded issuer signed an
+//!   embedded certificate proves nothing — an attacker who writes the dossier
+//!   writes both — so without this rule any file handed to the tool could
+//!   choose the tool's next network destination. With no anchors configured
+//!   nothing is fetched at all, and the report says so.
 //! - **Only URLs the certificates themselves publish.** A CRL distribution
 //!   point and an AIA OCSP responder are fields a CA wrote into a certificate
 //!   that a trust anchor signed. No URL is ever taken from the dossier's XML,
 //!   from a redirect to another host, or from the environment.
-//! - **The scheme is what the certificate said.** `http` and `https` are both
-//!   fetched and neither is rewritten. Upgrading `http` to `https` would be a
-//!   guess about a host's configuration, and downgrading is obviously worse.
-//!   Confidentiality is not the point: the artefacts are public documents and
-//!   every one of them is signature-checked before it is believed, so TLS adds
-//!   nothing that the verification does not already provide.
+//! - **A destination policy on top of that.** `http` and `https` only, no
+//!   userinfo, and no loopback, private, link-local or unique-local address —
+//!   by literal *or* by what the name resolves to — unless
+//!   `--online-allow-private` is given. See [`destination`].
 //! - **Strict, small bounds.** Five seconds to connect, twenty in total, at
-//!   most three redirects and never to another host, 16 MiB for a CRL and
-//!   64 KiB for an OCSP response. A fetch that exceeds any of them is a
-//!   failure with a named class, never a hang.
+//!   most three redirects and never to another host,
+//!   [`MAX_REVOCATION_ITEM_BYTES`] for a CRL and 64 KiB for an OCSP response.
+//!   A fetch that exceeds any of them is a failure with a named class, never a
+//!   hang.
 //! - **No proxy from the environment.** `HTTP_PROXY` and friends are ignored
 //!   unless `--online-proxy` names one explicitly. A verifier that silently
 //!   routed its revocation traffic through whatever the shell happened to set
@@ -32,11 +38,18 @@
 //! - **Fetching only fills gaps.** Nothing is fetched for a certificate the
 //!   caller's own material already answers for, which is decided by asking the
 //!   verifier's own offline code, not by a cheaper approximation of it.
+//! - **One request per question, not per URL.** CRLs are deduplicated by URL,
+//!   because a CRL is a list and one copy answers for everyone on it. OCSP is
+//!   deduplicated by responder *and* `certID`, because a response answers
+//!   about one certificate: two certificates behind one responder are two
+//!   questions, and asking only the first left the second uncovered.
 //! - **A failure is `revocation_status_unknown`, never a crash.** Every
 //!   failure is reported with the URL and a failure class — `timeout`,
-//!   `http status`, `too large`, `redirect`, `invalid`, `transport` — so a
-//!   caller can tell "the CA's server was down" apart from "the CA served
-//!   something that is not a CRL".
+//!   `http status`, `too large`, `redirect`, `invalid`, `transport`,
+//!   `destination_refused` — so a caller can tell "the CA's server was down"
+//!   apart from "the CA served something that is not a CRL".
+
+mod destination;
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -45,16 +58,20 @@ use std::time::Duration;
 
 use openszigno_verify::certs::{CertificateSource, ParsedCertificate, dedup};
 use openszigno_verify::revocation::{
-    RevocationData, RevocationItemKind, classify, is_covered, ocsp_request,
+    RevocationData, RevocationItemKind, classify, is_covered, ocsp_cert_id, ocsp_request,
 };
-use openszigno_verify::{Check, CheckCode, VerifyLimits};
+use openszigno_verify::{Check, CheckCode, MAX_REVOCATION_ITEM_BYTES, VerifyLimits};
+
+use destination::{Refusal, host_of, permitted, resolve, scheme_of};
 
 /// How long to wait for the connection itself.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 /// How long one whole fetch may take, connection included.
 const TOTAL_TIMEOUT: Duration = Duration::from_secs(20);
 /// The largest CRL that will be read. Real national CA CRLs run to megabytes.
-const MAX_CRL_BYTES: u64 = 16 * 1024 * 1024;
+/// It is the verifier's own limit, so that nothing this fetches can be too
+/// large for the code that has to judge it.
+const MAX_CRL_BYTES: u64 = MAX_REVOCATION_ITEM_BYTES as u64;
 /// The largest OCSP response that will be read. A response about one
 /// certificate is a few kilobytes; anything near this cap is already wrong.
 const MAX_OCSP_BYTES: u64 = 64 * 1024;
@@ -65,15 +82,36 @@ const MAX_REDIRECTS: usize = 3;
 /// one dossier can generate.
 const MAX_CERTIFICATES: usize = 32;
 const MAX_URLS_PER_CERTIFICATE: usize = 4;
+/// The largest number of issuer-signature checks the trust reachability scan
+/// will perform, so that a bag of name-matching certificates cannot turn the
+/// scan itself into the expensive part of a run.
+const MAX_ANCHOR_LINK_CHECKS: usize = 256;
+/// How far the reachability scan will walk away from an anchor. It matches the
+/// verifier's own `max_chain_length`.
+const MAX_ANCHOR_DEPTH: usize = 8;
 
 /// What one run fetched, and what it could not.
 #[derive(Debug, Default)]
 pub struct Fetched {
     pub crls: Vec<Vec<u8>>,
+    /// DER OCSP responses, in the order they were fetched.
     pub ocsp: Vec<Vec<u8>>,
-    /// One `revocation_status_unknown` per failure, naming the URL and the
-    /// failure class.
+    /// The hex SHA-256 of the DER `CertID` each entry of `ocsp` was asked
+    /// about, in the same order. Kept alongside rather than inside so that
+    /// `ocsp` stays the `&[Vec<u8>]` the verifier's own coverage code takes;
+    /// the only reader is [`write_cache`], which names a cached response by
+    /// the question it answers.
+    ocsp_cert_ids: Vec<String>,
+    /// One `online_fetch_failed` per failure, naming the URL and the failure
+    /// class.
     pub checks: Vec<Check>,
+}
+
+impl Fetched {
+    fn push_ocsp(&mut self, der: Vec<u8>, cert_id: String) {
+        self.ocsp.push(der);
+        self.ocsp_cert_ids.push(cert_id);
+    }
 }
 
 /// Why one fetch did not produce a usable artefact.
@@ -81,15 +119,18 @@ pub struct Fetched {
 /// The class is part of the report because the remedies differ: a timeout is
 /// somebody else's outage, a `404` is a stale URL in an old certificate, and
 /// "not a CRL" is a server answering with an HTML error page — which is what a
-/// captive portal or a misconfigured proxy looks like from here.
+/// captive portal or a misconfigured proxy looks like from here. A refused
+/// destination is different again: nothing was contacted at all, and the
+/// reason names the rule.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum FailureClass {
     Timeout,
     HttpStatus(u16),
-    TooLarge,
+    TooLarge(u64),
     Redirect,
     Invalid,
     Transport,
+    DestinationRefused(&'static str),
 }
 
 impl FailureClass {
@@ -97,10 +138,11 @@ impl FailureClass {
         match self {
             Self::Timeout => "timeout".to_owned(),
             Self::HttpStatus(status) => format!("http status {status}"),
-            Self::TooLarge => "too large".to_owned(),
+            Self::TooLarge(limit) => format!("too large: over the {limit}-byte cap"),
             Self::Redirect => "redirect".to_owned(),
             Self::Invalid => "invalid".to_owned(),
             Self::Transport => "transport".to_owned(),
+            Self::DestinationRefused(reason) => format!("destination_refused: {reason}"),
         }
     }
 }
@@ -109,12 +151,18 @@ impl FailureClass {
 /// same way.
 pub struct Fetcher {
     agent: ureq::Agent,
+    /// `--online-allow-private`: whether loopback and private destinations may
+    /// be contacted. It exists for two real cases — an internal CA that
+    /// publishes on the operator's own network, and this project's own test
+    /// suite, which serves a synthetic PKI from `127.0.0.1` — and it is opt-in
+    /// because the default has to be safe for a dossier nobody wrote.
+    allow_private: bool,
 }
 
 impl Fetcher {
     /// Build the agent. `proxy` is the `--online-proxy` value; without one, no
     /// proxy is used at all — in particular, none from the environment.
-    pub fn new(proxy: Option<&str>) -> Result<Self, String> {
+    pub fn new(proxy: Option<&str>, allow_private: bool) -> Result<Self, String> {
         let proxy = match proxy {
             Some(value) => Some(
                 ureq::Proxy::new(value)
@@ -134,6 +182,7 @@ impl Fetcher {
             .build();
         Ok(Self {
             agent: config.new_agent(),
+            allow_private,
         })
     }
 
@@ -143,6 +192,11 @@ impl Fetcher {
     /// carry; the issuer of each is looked up among them, because a
     /// certificate whose issuer is not to hand cannot have a CRL or an OCSP
     /// response checked against it anyway.
+    ///
+    /// `anchors` is what makes any of it happen. A certificate is fetched for
+    /// only when a candidate path from it reaches one of them, so a dossier
+    /// that chains to nothing the operator configured produces no traffic
+    /// whatsoever — not even a DNS lookup.
     pub fn fill_gaps(
         &self,
         certificates: &[Vec<u8>],
@@ -166,7 +220,15 @@ impl Fetcher {
             .filter_map(|der| ParsedCertificate::from_der(der, CertificateSource::TrustStore))
             .collect();
         let mut fetched = Fetched::default();
-        let mut tried: BTreeSet<String> = BTreeSet::new();
+        if anchors.is_empty() {
+            // Nothing to reach, so nothing to fetch. The report says why,
+            // through `revocation_policy` and every
+            // `revocation_status_unknown` message.
+            return fetched;
+        }
+        let trusted = anchored_certificates(&parsed, &anchors);
+        let mut crls_tried: BTreeSet<String> = BTreeSet::new();
+        let mut ocsp_tried: BTreeSet<(String, String)> = BTreeSet::new();
         let mut budget = MAX_CERTIFICATES;
 
         for subject in &parsed {
@@ -177,6 +239,12 @@ impl Fetcher {
             // question the PKI it roots can answer, and the verifier never
             // asks, so fetching for it would be traffic for nothing.
             if subject.is_self_signed() {
+                continue;
+            }
+            // The gate. Everything below this line contacts the network on
+            // behalf of this certificate, so this certificate has to be one
+            // the caller's own trust material vouches for.
+            if !trusted.contains(&subject.der) {
                 continue;
             }
             let Some(issuer) = parsed.iter().find(|candidate| {
@@ -192,19 +260,25 @@ impl Fetcher {
 
             // OCSP first: it answers about this certificate, where a CRL is a
             // list that may run to megabytes.
-            if let Some(request) = ocsp_request(subject, issuer) {
+            if let (Some(request), Some(cert_id)) =
+                (ocsp_request(subject, issuer), ocsp_cert_id(subject, issuer))
+            {
+                let cert_id = hex(&sha256(&cert_id));
                 for url in subject
                     .ocsp_responder_urls()
                     .into_iter()
                     .take(MAX_URLS_PER_CERTIFICATE)
                 {
-                    if !tried.insert(url.clone()) {
+                    // Two certificates from one CA name one responder and are
+                    // two different questions. Deduplicating by URL alone
+                    // asked the first question and dropped the second.
+                    if !ocsp_tried.insert((url.clone(), cert_id.clone())) {
                         continue;
                     }
                     match self.fetch(&url, Some(&request), MAX_OCSP_BYTES) {
                         Ok(bytes) => match classify(&bytes) {
                             Ok((RevocationItemKind::Ocsp, der)) => {
-                                fetched.ocsp.push(der);
+                                fetched.push_ocsp(der, cert_id.clone());
                                 break;
                             }
                             _ => fetched.checks.push(failure(&url, FailureClass::Invalid)),
@@ -236,7 +310,10 @@ impl Fetcher {
                 .into_iter()
                 .take(MAX_URLS_PER_CERTIFICATE)
             {
-                if !tried.insert(url.clone()) {
+                // A CRL is a list: one copy answers for every certificate on
+                // it, so the URL is the whole question and fetching it twice
+                // would be waste.
+                if !crls_tried.insert(url.clone()) {
                     continue;
                 }
                 match self.fetch(&url, None, MAX_CRL_BYTES) {
@@ -258,14 +335,16 @@ impl Fetcher {
     /// never leaving the host the certificate named.
     fn fetch(&self, url: &str, body: Option<&[u8]>, limit: u64) -> Result<Vec<u8>, FailureClass> {
         let origin = host_of(url).ok_or(FailureClass::Invalid)?;
-        if !matches!(scheme_of(url), Some("http" | "https")) {
-            // The scheme is whatever the CA published; anything that is not
-            // HTTP is not something this build speaks, and it is certainly not
-            // something to rewrite into one that it does.
-            return Err(FailureClass::Invalid);
-        }
         let mut current = url.to_owned();
         for _ in 0..=MAX_REDIRECTS {
+            // The destination policy is applied to every URL actually
+            // contacted, the redirect targets included: a redirect stays on
+            // the host the certificate named, but "the same name" and "the
+            // same address" are not the same statement.
+            permitted(&current, self.allow_private).map_err(|refusal| match refusal {
+                Refusal::Refused(reason) => FailureClass::DestinationRefused(reason),
+                Refusal::Unresolvable => FailureClass::Transport,
+            })?;
             let response = match body {
                 // The body is passed as a slice, which `ureq` sends with a
                 // known length: an explicit `Content-Length` and no chunked
@@ -316,7 +395,7 @@ impl Fetcher {
                 .limit(limit)
                 .read_to_vec()
                 .map_err(|error| match error {
-                    ureq::Error::BodyExceedsLimit(_) => FailureClass::TooLarge,
+                    ureq::Error::BodyExceedsLimit(_) => FailureClass::TooLarge(limit),
                     other => classify_transport(other),
                 })?;
             return Ok(bytes);
@@ -325,10 +404,59 @@ impl Fetcher {
     }
 }
 
+/// Every certificate that sits on a candidate path ending at a configured
+/// trust anchor.
+///
+/// This is deliberately *not* the verifier's `validate_path`: that answers
+/// about one leaf, for one purpose, and would refuse a timestamp authority's
+/// certificate under the signing purpose and vice versa. The question here is
+/// narrower and is only ever used to decide whether a URL may be contacted: is
+/// there a chain of real issuer signatures from this certificate up to
+/// something the operator configured? Whether the path is *acceptable* stays
+/// the verifier's answer to give, offline, afterwards.
+///
+/// The walk goes downwards from the anchors so that each issuer signature is
+/// checked at most once per candidate, and it is bounded twice over: by depth,
+/// and by the total number of signature checks.
+fn anchored_certificates(
+    parsed: &[ParsedCertificate],
+    anchors: &[ParsedCertificate],
+) -> BTreeSet<Vec<u8>> {
+    let mut trusted: BTreeSet<Vec<u8>> = anchors.iter().map(|anchor| anchor.der.clone()).collect();
+    let mut frontier: Vec<&ParsedCertificate> = anchors.iter().collect();
+    let mut checks = 0usize;
+    for _ in 0..MAX_ANCHOR_DEPTH {
+        let mut next: Vec<&ParsedCertificate> = Vec::new();
+        for issuer in &frontier {
+            for candidate in parsed {
+                if trusted.contains(&candidate.der) {
+                    continue;
+                }
+                if candidate.issuer_der() != issuer.subject_name_der() {
+                    continue;
+                }
+                checks += 1;
+                if checks > MAX_ANCHOR_LINK_CHECKS {
+                    return trusted;
+                }
+                if openszigno_verify::certs::verify_issued_by(candidate, issuer) {
+                    trusted.insert(candidate.der.clone());
+                    next.push(candidate);
+                }
+            }
+        }
+        if next.is_empty() {
+            break;
+        }
+        frontier = next;
+    }
+    trusted
+}
+
 fn classify_transport(error: ureq::Error) -> FailureClass {
     match error {
         ureq::Error::Timeout(_) => FailureClass::Timeout,
-        ureq::Error::BodyExceedsLimit(_) => FailureClass::TooLarge,
+        ureq::Error::BodyExceedsLimit(limit) => FailureClass::TooLarge(limit),
         ureq::Error::TooManyRedirects | ureq::Error::RedirectFailed => FailureClass::Redirect,
         ureq::Error::StatusCode(status) => FailureClass::HttpStatus(status),
         _ => FailureClass::Transport,
@@ -388,72 +516,40 @@ fn sanitize_url(url: &str) -> String {
         .collect()
 }
 
-fn scheme_of(url: &str) -> Option<&str> {
-    let (scheme, rest) = url.split_once("://")?;
-    if rest.is_empty() {
-        return None;
-    }
-    Some(scheme)
-}
-
-/// The authority of a URL, lower-cased, which is what "the same host" means
-/// here. The port is part of it: a redirect to another port on the same name
-/// is another endpoint.
-fn host_of(url: &str) -> Option<String> {
-    let (_, rest) = url.split_once("://")?;
-    let authority = rest
-        .split(['/', '?', '#'])
-        .next()
-        .filter(|value| !value.is_empty())?;
-    Some(authority.to_ascii_lowercase())
-}
-
-/// Resolve a `Location` header against the URL it came from.
-///
-/// Only the two forms a real CA server uses are handled — an absolute URL and
-/// a root-relative path — because anything else would be guesswork, and a
-/// redirect this function refuses to resolve is reported rather than followed.
-fn resolve(base: &str, location: &str) -> Option<String> {
-    let location = location.trim();
-    if location.is_empty() {
-        return None;
-    }
-    if location.contains("://") {
-        return Some(location.to_owned());
-    }
-    let (scheme, rest) = base.split_once("://")?;
-    let authority = rest.split(['/', '?', '#']).next()?;
-    if let Some(path) = location.strip_prefix('/') {
-        return Some(format!("{scheme}://{authority}/{path}"));
-    }
-    let directory = rest
-        .split(['?', '#'])
-        .next()
-        .and_then(|path| path.rfind('/').map(|index| &path[..index]))
-        .unwrap_or(authority);
-    Some(format!("{scheme}://{directory}/{location}"))
-}
-
 /// Write fetched artefacts into a `--revocation-store` shaped directory, so
 /// that a later run with `--revocation-store DIR` and no `--online` reproduces
 /// this run's answer without touching the network.
 ///
-/// Files are named by the SHA-256 of their own bytes, so re-running is
-/// idempotent and two artefacts never collide. Nothing is ever deleted: the
-/// cache only grows, and an operator who wants it pruned knows more about
-/// their retention policy than this tool does.
+/// A CRL is named by the SHA-256 of its own bytes: it is a list, it stands on
+/// its own, and two runs that fetch it twice write one file. An OCSP response
+/// is named by the `certID` it answers about **and** by its own bytes, because
+/// a responder's answer is only meaningful next to the question — two
+/// certificates behind one responder produce two files whose names say which
+/// is which, and a re-run that fetches a fresher answer for the same question
+/// adds a file rather than being mistaken for the old one.
+///
+/// Nothing is ever deleted: the cache only grows, and an operator who wants it
+/// pruned knows more about their retention policy than this tool does.
 pub fn write_cache(directory: &Path, fetched: &Fetched) -> Result<(), String> {
-    use sha2::{Digest as _, Sha256};
+    let ocsp_names: Vec<String> = fetched
+        .ocsp
+        .iter()
+        .zip(&fetched.ocsp_cert_ids)
+        .map(|(item, cert_id)| format!("{cert_id}-{}", hex(&sha256(item))))
+        .collect();
+    let crl_names: Vec<String> = fetched.crls.iter().map(|item| hex(&sha256(item))).collect();
 
-    for (subdirectory, items) in [("crls", &fetched.crls), ("ocsp", &fetched.ocsp)] {
+    for (subdirectory, items, names) in [
+        ("crls", &fetched.crls, &crl_names),
+        ("ocsp", &fetched.ocsp, &ocsp_names),
+    ] {
         if items.is_empty() {
             continue;
         }
         let path = directory.join(subdirectory);
         fs::create_dir_all(&path)
             .map_err(|_| "the online cache directory could not be created".to_owned())?;
-        for item in items {
-            let name = hex(&Sha256::digest(item));
+        for (item, name) in items.iter().zip(names) {
             let file = path.join(format!("{name}.der"));
             if file.exists() {
                 continue;
@@ -463,6 +559,12 @@ pub fn write_cache(directory: &Path, fetched: &Fetched) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+fn sha256(bytes: &[u8]) -> [u8; 32] {
+    use sha2::{Digest as _, Sha256};
+
+    Sha256::digest(bytes).into()
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -478,41 +580,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_redirect_to_another_host_is_not_resolved_as_the_same_host() {
-        let base = "http://crl.example/ca.crl";
-        let next = resolve(base, "http://evil.example/ca.crl").expect("resolves");
-        assert_ne!(host_of(&next), host_of(base));
-    }
-
-    #[test]
-    fn a_root_relative_redirect_stays_on_the_same_host() {
-        let base = "http://crl.example/pki/ca.crl";
-        let next = resolve(base, "/other.crl").expect("resolves");
-        assert_eq!(next, "http://crl.example/other.crl");
-        assert_eq!(host_of(&next), host_of(base));
-    }
-
-    #[test]
-    fn a_relative_redirect_is_resolved_against_the_directory() {
-        let next = resolve("http://crl.example/pki/ca.crl", "new.crl").expect("resolves");
-        assert_eq!(next, "http://crl.example/pki/new.crl");
-    }
-
-    #[test]
-    fn a_different_port_is_a_different_host() {
-        assert_ne!(
-            host_of("http://crl.example/a"),
-            host_of("http://crl.example:8080/a")
-        );
-    }
-
-    #[test]
-    fn only_http_schemes_are_recognised() {
-        assert_eq!(scheme_of("ldap://directory.example/cn=ca"), Some("ldap"));
-        assert_eq!(scheme_of("not a url"), None);
-    }
-
-    #[test]
     fn a_failure_names_the_url_and_its_class() {
         let check = failure("http://crl.example/ca.crl", FailureClass::Timeout);
         assert_eq!(check.code, CheckCode::OnlineFetchFailed);
@@ -523,6 +590,30 @@ mod tests {
         assert!(check.message.contains("timeout"));
         let check = failure("http://crl.example/ca.crl", FailureClass::HttpStatus(404));
         assert!(check.message.contains("http status 404"));
+    }
+
+    /// The class is a stable token a caller can match on, and the reason after
+    /// it is what tells them which rule refused the destination.
+    #[test]
+    fn a_refused_destination_names_the_class_and_the_rule() {
+        let check = failure(
+            "http://127.0.0.1/ca.crl",
+            FailureClass::DestinationRefused("the host is a loopback address"),
+        );
+        assert_eq!(check.code, CheckCode::OnlineFetchFailed);
+        assert_eq!(check.status, openszigno_verify::CheckStatus::Info);
+        assert!(check.message.contains("destination_refused"));
+        assert!(check.message.contains("loopback"));
+    }
+
+    /// The size cap the fetcher enforces is the verifier's own, so nothing
+    /// this fetches can be too large for the code that has to judge it.
+    #[test]
+    fn the_fetch_cap_is_the_verifiers_own_limit() {
+        assert_eq!(MAX_CRL_BYTES, MAX_REVOCATION_ITEM_BYTES as u64);
+        let check = failure("http://crl.example/ca.crl", FailureClass::TooLarge(16));
+        assert!(check.message.contains("too large"));
+        assert!(check.message.contains("16-byte"));
     }
 
     #[test]
