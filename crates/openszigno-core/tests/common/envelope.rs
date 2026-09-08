@@ -292,6 +292,11 @@ pub enum Damage {
     ShortInitialisationVector,
     /// No algorithm parameters at all, so there is no IV to be found.
     NoInitialisationVector,
+    /// A content-encryption key eight bytes longer than the announced cipher
+    /// takes, wrapped in otherwise valid PKCS#1 v1.5 padding. This is what a
+    /// Bleichenbacher probe that guessed the padding but not the payload
+    /// length looks like from the recipient's side.
+    MismatchedContentKeyLength,
 }
 
 /// Build a DER `ContentInfo` carrying `id-envelopedData` for one recipient.
@@ -331,7 +336,8 @@ fn build(message: &Message<'_>, recipient: &Recipient, damage: Option<Damage>) -
         version: CmsVersion::V0,
         rid: recipient.identifier(message.naming),
         key_enc_alg: key_transport_algorithm(message.transport),
-        enc_key: OctetString::new(wrap_key(message, recipient)).expect("the wrapped key encodes"),
+        enc_key: OctetString::new(wrap_key(message, recipient, damage))
+            .expect("the wrapped key encodes"),
     });
     let enveloped = EnvelopedData {
         version: CmsVersion::V0,
@@ -484,8 +490,11 @@ fn oaep_params_der(hash: &AlgorithmIdentifierOwned, mgf: &AlgorithmIdentifierOwn
     out
 }
 
-fn wrap_key(message: &Message<'_>, recipient: &Recipient) -> Vec<u8> {
-    let key = content_key(message.cipher);
+fn wrap_key(message: &Message<'_>, recipient: &Recipient, damage: Option<Damage>) -> Vec<u8> {
+    let mut key = content_key(message.cipher);
+    if damage == Some(Damage::MismatchedContentKeyLength) {
+        key.extend_from_slice(&[0x5a; 8]);
+    }
     let mut rng = rand_core::OsRng;
     match message.transport {
         KeyTransport::Pkcs1v15 | KeyTransport::UnsupportedOid => recipient

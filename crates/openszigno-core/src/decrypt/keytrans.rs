@@ -155,9 +155,8 @@ fn unpad(block: &[u8], key_bytes: usize) -> (Choice, Zeroizing<Vec<u8>>) {
 /// `candidate` when `usable`, else `fallback`, byte by byte.
 fn select(candidate: &[u8], fallback: &[u8], usable: Choice) -> Zeroizing<Vec<u8>> {
     let mut chosen = Zeroizing::new(vec![0u8; candidate.len()]);
-    for (slot, (from_block, from_secret)) in chosen
-        .iter_mut()
-        .zip(candidate.iter().zip(fallback.iter()))
+    for (slot, (from_block, from_secret)) in
+        chosen.iter_mut().zip(candidate.iter().zip(fallback.iter()))
     {
         *slot = u8::conditional_select(from_secret, from_block, usable);
     }

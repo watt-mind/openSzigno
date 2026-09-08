@@ -211,6 +211,111 @@ fn the_wrong_key_for_a_matching_recipient_is_a_plain_decryption_failure() {
     );
 }
 
+/// A tampered RSA ciphertext and a tampered content ciphertext must be
+/// indistinguishable to the caller.
+///
+/// This is the whole point of implicit rejection: the RSA half never reports
+/// that PKCS#1 v1.5 unpadding failed, so a probe aimed at the wrapped key
+/// reaches the caller as the content cipher's own failure. If the two ever
+/// diverge in code, message, or in one failing where the other succeeds, the
+/// padding oracle is back.
+#[test]
+fn a_tampered_wrapped_key_fails_exactly_as_a_tampered_body_does() {
+    let recipient = recipient();
+    let key = key_of(&recipient);
+    for cipher in [Cipher::Aes128Cbc, Cipher::Aes192Cbc, Cipher::Aes256Cbc] {
+        for transport in [KeyTransport::Pkcs1v15, KeyTransport::OaepSha256] {
+            let message = Message {
+                plaintext: PLAINTEXT,
+                cipher,
+                transport,
+                naming: Naming::IssuerAndSerial,
+            };
+            let intact = common::envelope::envelope(&message, &recipient);
+
+            // The wrapped key, with one byte of the RSA ciphertext flipped.
+            let mut wrapped_damage = intact.clone();
+            let wrapped = wrapped_key(&intact);
+            let at = find(&intact, &wrapped).expect("the wrapped key is in the message");
+            wrapped_damage[at + 100] ^= 0x01;
+
+            // The content ciphertext, with its last byte flipped. The
+            // encrypted content is the last field of the DER encoding.
+            let mut body_damage = intact.clone();
+            let last = body_damage.len() - 1;
+            body_damage[last] ^= 0x01;
+
+            let mut answers = Vec::new();
+            for damaged in [&wrapped_damage, &body_damage] {
+                let xml =
+                    dossier_with_payload(damaged, &["encrypt", "base64"], PLAINTEXT.len() as u64);
+                let error = decode(&xml, Some(&key), false).expect_err("tampering must fail");
+                answers.push((error.code(), error.message().to_owned()));
+            }
+            assert_eq!(
+                answers[0], answers[1],
+                "{cipher:?} {transport:?}: the two must be one answer"
+            );
+            assert_eq!(answers[0].0, ErrorCode::DecryptFailed);
+            assert_eq!(answers[0].1, "decryption failed");
+        }
+    }
+}
+
+/// A content key that unpads cleanly but is the wrong length for the
+/// announced cipher goes down the same path as any other unusable block.
+#[test]
+fn a_content_key_of_the_wrong_length_is_not_a_separate_answer() {
+    let recipient = recipient();
+    let key = key_of(&recipient);
+    for cipher in [Cipher::Aes128Cbc, Cipher::Aes192Cbc, Cipher::Aes256Cbc] {
+        let message = common::envelope::damaged(
+            &Message {
+                plaintext: PLAINTEXT,
+                cipher,
+                transport: KeyTransport::Pkcs1v15,
+                naming: Naming::IssuerAndSerial,
+            },
+            &recipient,
+            Damage::MismatchedContentKeyLength,
+        );
+        let xml = dossier_with_payload(&message, &["encrypt", "base64"], PLAINTEXT.len() as u64);
+        let error = decode(&xml, Some(&key), false).expect_err("a wrong-length key must fail");
+        assert_eq!(error.code(), ErrorCode::DecryptFailed, "{cipher:?}");
+        assert_eq!(error.message(), "decryption failed", "{cipher:?}");
+    }
+}
+
+/// Substitution is deterministic: the same dossier decrypted twice with the
+/// same key gives the same answer, so a repeat submission tells an attacker
+/// nothing a single one did not.
+#[test]
+fn an_unusable_wrapped_key_gives_the_same_answer_every_time() {
+    let recipient = recipient();
+    let key = key_of(&recipient);
+    let mut message = common::envelope::envelope(
+        &Message {
+            plaintext: PLAINTEXT,
+            cipher: Cipher::Aes256Cbc,
+            transport: KeyTransport::Pkcs1v15,
+            naming: Naming::IssuerAndSerial,
+        },
+        &recipient,
+    );
+    let wrapped = wrapped_key(&message);
+    let at = find(&message, &wrapped).expect("the wrapped key is in the message");
+    message[at + 7] ^= 0xff;
+    let xml = dossier_with_payload(&message, &["encrypt", "base64"], PLAINTEXT.len() as u64);
+
+    let first = decode(&xml, Some(&key), false)
+        .map(|_| ())
+        .map_err(|error| (error.code(), error.message().to_owned()));
+    let second = decode(&xml, Some(&key), false)
+        .map(|_| ())
+        .map_err(|error| (error.code(), error.message().to_owned()));
+    assert_eq!(first, second, "the same input must give the same outcome");
+}
+
 /// The `encryptedKey` OCTET STRING of a synthetic message: the last 256 bytes
 /// of an RSA-2048 wrap, which the builder places before the encrypted content.
 fn wrapped_key(message: &[u8]) -> Vec<u8> {
