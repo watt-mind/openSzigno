@@ -495,6 +495,83 @@ fn a_url_with_userinfo_is_refused_even_with_the_flag() {
     );
 }
 
+/// The connection is made to the addresses the policy vetted, not to whatever
+/// a second lookup would return, so a URL the policy could not turn into an
+/// address never reaches a socket at all.
+///
+/// The certificate names a host that resolves to nothing, on the port the
+/// loopback listener is actually serving. If the fetcher were still handing
+/// the *name* to the HTTP client to look up on its own, a resolver that
+/// answered where this one does not would have reached that listener. It sees
+/// nothing, and the failure is reported as `transport`: a fact about the
+/// network, not a policy refusal.
+#[test]
+fn a_host_with_no_vetted_address_never_reaches_a_socket() {
+    let (listener, address) = reserved();
+    // `.invalid` is reserved by RFC 2606 and resolves nowhere, so the vetted
+    // list for this host is empty however the machine is configured.
+    let pki = pki(
+        Some(&format!(
+            "http://openszigno.invalid:{}/ca.crl",
+            address.port()
+        )),
+        None,
+    );
+    let server = serve_on(
+        listener,
+        address,
+        vec![("/ca.crl", Reply::Body(good_crl(&pki)))],
+    );
+    let directory = scratch();
+    let (dossier_path, store) = write_all(directory.path(), &dossier(&pki), &pki.root_der);
+
+    let report = verify_online(&dossier_path, &store, &[]);
+    assert!(
+        server.seen().is_empty(),
+        "nothing may be contacted: {:?}",
+        server.seen()
+    );
+    let checks = checks(&report);
+    assert!(
+        checks
+            .iter()
+            .any(|check| check.starts_with("online_fetch_failed=info")
+                && check.contains("transport")),
+        "{checks:?}"
+    );
+    assert_eq!(report["data"]["verdict"].as_str(), Some("indeterminate"));
+}
+
+/// A redirect is a second destination, so it goes through the whole policy
+/// again and is dialled on its own vetted addresses. Two requests arrive and
+/// the CRL behind the redirect answers the certificate, which is only possible
+/// if the second hop was vetted and pinned in its own right: an unpinned hop
+/// cannot be resolved at all.
+#[test]
+fn a_redirect_target_is_vetted_and_dialled_in_its_own_right() {
+    let (_pki, dossier_path, store, fixture) = with_urls(Some("/ca.crl"), None, |pki| {
+        vec![
+            ("/ca.crl", Reply::Redirect("/moved.crl".to_owned())),
+            ("/moved.crl", Reply::Body(good_crl(pki))),
+        ]
+    });
+
+    let report = verify_online(&dossier_path, &store, &[]);
+    assert_eq!(
+        end_entity_source(&report).as_deref(),
+        Some("online_crl"),
+        "{:?}",
+        checks(&report)
+    );
+    let paths: Vec<String> = fixture
+        .server
+        .seen()
+        .into_iter()
+        .map(|request| request.path)
+        .collect();
+    assert_eq!(paths, vec!["/ca.crl".to_owned(), "/moved.crl".to_owned()]);
+}
+
 // ---------------------------------------------------------------------------
 // One request per question
 // ---------------------------------------------------------------------------

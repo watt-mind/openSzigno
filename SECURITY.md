@@ -170,6 +170,18 @@ attacker-supplied until something the operator configured vouches for it:
   against the same list before connecting, so a public name that resolves
   inwards is refused too. Refusals are reported as `online_fetch_failed`
   (`info`) with the class `destination_refused`, and nothing is contacted.
+- **The check is bound to the connection.** The addresses the policy approved
+  are pinned as the resolution for that host and port, so the socket goes where
+  the policy looked; a name that was not vetted for the fetch in hand does not
+  resolve at all, and there is no fallback to the system resolver. A zone that
+  answers with a public address and then with a private one therefore has no
+  window between the check and the socket. Only the address is pinned: the URL
+  is sent as published, so the `Host` header, the TLS SNI value and the
+  certificate host-name verification still use the name the certificate
+  published. A host that resolves to nothing is reported as `transport` and
+  nothing is contacted. With `--online-proxy` the request is sent to the proxy
+  and the proxy resolves the destination, so the destination policy still
+  checks the URL but the proxy is what opens the socket.
 - **The cache is written without following links.** `--online-cache` opens the
   directory with `O_DIRECTORY | O_NOFOLLOW`, walks it one component at a time,
   and creates each file with `O_CREAT | O_EXCL | O_NOFOLLOW`. No existing file
@@ -188,7 +200,8 @@ neither repeats a question nor skips one. The transport is bounded — 5 s to
 connect, 20 s per fetch, 16 MiB per CRL (the same limit the verifier will
 parse), 64 KiB per OCSP response, at most three redirects and never to another
 host — and no proxy is taken from the environment; `--online-proxy` is the only
-way to introduce one. Everything fetched is judged by exactly the
+way to introduce one, and with it the proxy rather than openSzigno resolves and
+connects to the destination. Everything fetched is judged by exactly the
 offline rules before it is believed, so `--online` can widen where evidence
 comes from and can never relax a rule.
 [docs/trust.md](docs/trust.md#online-fetching) has the details.
@@ -227,8 +240,9 @@ openSzigno aims to guarantee that a hostile input cannot:
   environment proxy, a scheme the certificate did not name, userinfo in a URL,
   a name that resolves to a loopback, private, link-local, unique-local,
   multicast or cloud-metadata address while `--online-allow-private` is absent,
-  or a certificate no signature or timestamp under evaluation had a validated
-  path to;
+  a second name lookup that disagrees with the one the destination policy
+  checked, or a certificate no signature or timestamp under evaluation had a
+  validated path to;
 - cause openSzigno to follow a symlink out of an `--online-cache` directory, or
   to truncate or replace any file already in it;
 - cause `verify` to report a signature as anything better than it is: to

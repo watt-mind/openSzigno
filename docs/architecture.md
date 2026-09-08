@@ -1986,12 +1986,23 @@ build is willing to open a socket to:
 | Scheme | `http` and `https` only | Every other scheme is refused, never rewritten into one this build speaks. |
 | Userinfo | refused, always | `user:password@host` is a way of writing a URL that reads as one host and names another, and it is credential material this tool has no business sending. `--online-allow-private` does not waive it. |
 | Address | loopback (`127/8`, `::1`), RFC 1918 private (`10/8`, `172.16/12`, `192.168/16`), link-local (`169.254/16`, `fe80::/10`), unique-local (`fc00::/7`), unspecified (`0.0.0.0/8`, `::`), broadcast (`255.255.255.255`) and multicast (`224/4`, `ff00::/8`) are all refused, as are the cloud metadata addresses `169.254.169.254` and `fd00:ec2::254` and the name `localhost` (and `*.localhost`) | Otherwise a dossier could point the verifier at `http://169.254.169.254/` — instance metadata, credentials included — or at a service on the operator's own subnet, turning a signature check into an SSRF primitive. An IPv4-mapped IPv6 address is judged as the IPv4 address it carries, so it is not a way round any of these. The two metadata addresses are named in their own refusal, because that is the one an operator wants to be told about explicitly. |
-| Resolved address | re-checked against the same ranges before connecting | A public name that resolves to `127.0.0.1` is refused on the address, not on the name, so DNS rebinding does not walk past the rule. `ureq` resolves again when it connects, so this is a mitigation and not a proof. |
-| Every hop | the URL the certificate published and **each redirect target** go through the whole policy | A redirect already may not leave the host, but "the same name" and "the same address" are different statements. |
+| Resolved address | re-checked against the same ranges before connecting | A public name that resolves to `127.0.0.1` is refused on the address, not on the name, so DNS rebinding does not walk past the rule. |
+| The address that is dialled | exactly the addresses the check approved | The policy hands its resolution to `ureq` as a pinned answer for that host and port, and a name that was not vetted for the fetch in hand does not resolve at all: there is no second lookup, so a zone that answers with a public address and then with a private one has no window between the check and the socket. A host that resolves to nothing is a `transport` failure and nothing is contacted. |
+| The name that is verified | unchanged | Pinning is an address decision only. The URL is sent as published, so the `Host` header, the TLS SNI value and the certificate host-name verification all still use the name the certificate named. |
+| Every hop | the URL the certificate published and **each redirect target** go through the whole policy, and each is pinned in its own right | A redirect already may not leave the host, but "the same name" and "the same address" are different statements. |
 
 `--online-allow-private` waives the address rules — and only those — for an
-internal CA that really does publish on a private network. This project's own
-test suite passes it, because it serves a synthetic PKI from `127.0.0.1`.
+internal CA that really does publish on a private network. It does not waive
+resolution: an address is still needed to connect to, and loopback with the
+flag is vetted down to the address like any other destination. This project's
+own test suite passes it, because it serves a synthetic PKI from `127.0.0.1`.
+
+With `--online-proxy` the request goes to the proxy and the proxy resolves the
+destination, so pinning cannot apply to the destination: `ureq` only asks about
+the proxy's own host, which is resolved normally. The destination policy still
+runs on the URL and still refuses a scheme, userinfo, or an address it does not
+permit; what it cannot promise is that the socket the *proxy* opens goes where
+the policy looked.
 
 **The transport policy.**
 
@@ -2002,7 +2013,7 @@ test suite passes it, because it serves a synthetic PKI from `127.0.0.1`.
 | Total timeout | 20 s per fetch | A fetch that exceeds it is a named failure, never a hang. |
 | Size cap | `MAX_REVOCATION_ITEM_BYTES` (16 MiB) for a CRL, 64 KiB for an OCSP response | Enforced by the reader, so a server that lies about `Content-Length` cannot make the run allocate more. The CRL cap is the *verifier's own* limit, re-exported: a download cap larger than what the tier walk will parse meant a CRL could arrive, be stored, and then answer nothing. |
 | Redirects | at most 3, **never to another host** | The authority for a URL is the certificate, and the certificate named one host. The port is part of the host. |
-| Proxy | none, unless `--online-proxy URL` | `HTTP_PROXY` and its relatives are ignored. A verifier that silently routed its revocation traffic through whatever the shell happened to set would hand an attacker who controls that variable a way to feed it chosen bytes. |
+| Proxy | none, unless `--online-proxy URL` | `HTTP_PROXY` and its relatives are ignored. A verifier that silently routed its revocation traffic through whatever the shell happened to set would hand an attacker who controls that variable a way to feed it chosen bytes. With a proxy the proxy does the connecting, so the destination policy still checks the URL but no longer decides which socket is opened. |
 | Requests | `GET` for a CRL; `POST` of an RFC 6960 `OCSPRequest` as `application/ocsp-request` for OCSP | The `certID` uses **SHA-256**, which is inside the pinned allowlist. No nonce is sent: a nonce defends a live request against replay, and the verifier deliberately ignores nonces because it must also read archived responses. |
 | Volume | at most 32 certificates per run, at most 4 URLs per certificate | Opening one dossier cannot generate unbounded traffic. |
 

@@ -191,6 +191,26 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
 
 ### Security
 
+- `--online` now connects to the addresses its destination policy actually
+  vetted. The policy resolved a host, judged the addresses it got back, and
+  then handed the *name* to `ureq`, which resolved it a second time; a zone
+  answering with a public address first and a private one second walked past
+  the address rules through the gap between the check and the socket.
+  `permitted` now returns the endpoint it approved together with its
+  addresses, and the fetcher pins exactly those as the resolution for that
+  host and port through a `ureq` `Resolver` that answers from the pinned map
+  and refuses every other name rather than falling back to system DNS. Every
+  hop is pinned in its own right, so a redirect target is dialled on its own
+  vetted addresses. Only the address is pinned: the URL is sent as published,
+  so the `Host` header, the TLS SNI value and the certificate host-name
+  verification still use the name the certificate published. A host that
+  resolves to nothing is reported as `transport` and nothing is contacted. No
+  new refusal rule and no output change. With `--online-proxy` the request is
+  sent to the proxy and the proxy resolves the destination, so the destination
+  policy still checks the URL but the proxy is what opens the socket; that is
+  now stated in [docs/trust.md](docs/trust.md#online-fetching),
+  [docs/architecture.md](docs/architecture.md) and
+  [SECURITY.md](SECURITY.md).
 - `--online` no longer fetches revocation data for a certificate the run does
   not trust. A URL is contacted only for a certificate on a certification path
   the verifier **validated to a configured trust anchor**, from `--trust-store`
