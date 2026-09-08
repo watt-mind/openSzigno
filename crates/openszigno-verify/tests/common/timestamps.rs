@@ -18,6 +18,16 @@ use super::pki::SigningKey;
 /// not itself produce the verification logic for, and it must never move into
 /// a shipped crate.
 pub fn build_timestamp_token(spec: &TimestampSpec, imprint_input: &[u8]) -> Vec<u8> {
+    build_timestamp_token_for_imprint(spec, &Sha256::digest(imprint_input))
+}
+
+/// Build one RFC 3161 token over an imprint that is already a digest.
+///
+/// A real timestamp authority never sees the data: it is handed the digest in
+/// a `TimeStampReq` and stamps that. The loopback authority the CLI suite runs
+/// needs exactly this entry point; [`build_timestamp_token`] is the same
+/// thing for a caller that holds the data instead.
+pub fn build_timestamp_token_for_imprint(spec: &TimestampSpec, imprint: &[u8]) -> Vec<u8> {
     use cms::cert::{CertificateChoices, IssuerAndSerialNumber};
     use cms::content_info::{CmsVersion, ContentInfo};
     use cms::signed_data::{
@@ -36,7 +46,7 @@ pub fn build_timestamp_token(spec: &TimestampSpec, imprint_input: &[u8]) -> Vec<
         parameters: None,
     };
 
-    let mut imprint = Sha256::digest(imprint_input).to_vec();
+    let mut imprint = imprint.to_vec();
     if spec.wrong_imprint {
         imprint[0] ^= 0xff;
     }

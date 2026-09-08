@@ -274,11 +274,19 @@ impl<'input> Lookup<'input> {
     /// (XMLDSig 4.4.3.3), so the signer drops comments exactly as the verifier
     /// does; a comment inserted afterwards then cannot change a digest.
     pub(crate) fn canonical(&self, node: Node<'_, 'input>) -> Result<Vec<u8>, SignError> {
+        self.canonical_with(node, C14nAlgorithm::Exclusive { comments: false })
+    }
+
+    fn canonical_with(
+        &self,
+        node: Node<'_, 'input>,
+        algorithm: C14nAlgorithm,
+    ) -> Result<Vec<u8>, SignError> {
         RoxmltreeC14n
             .canonicalize(
                 self.text,
                 &NodeSet::subtree(node).without_comments(),
-                C14nAlgorithm::Exclusive { comments: false },
+                algorithm,
                 &[],
             )
             .map_err(|_| SignError::failed("an element could not be canonicalized"))
@@ -317,12 +325,20 @@ impl<'input> Lookup<'input> {
 
     /// The octets an `xades:SignatureTimeStamp` covers: the canonicalized
     /// `ds:SignatureValue` element, start tag to end tag.
+    ///
+    /// Inclusive canonicalization, not the exclusive one every reference uses.
+    /// The timestamp element this build writes names no
+    /// `ds:CanonicalizationMethod`, and XAdES 7.1.4.3.1 makes inclusive
+    /// C14N 1.0 the default for that case, so that is what the verifier
+    /// recomputes. Signing the exclusive form instead produces a token over
+    /// octets nobody ever computes again: the two differ by exactly the
+    /// ancestor namespace declarations the element does not visibly use.
     pub(crate) fn canonical_signature_value(
         &self,
         signature_id: &str,
     ) -> Result<Vec<u8>, SignError> {
         let node = self.signature_child(signature_id, "SignatureValue")?;
-        self.canonical(node)
+        self.canonical_with(node, C14nAlgorithm::Inclusive { comments: false })
     }
 }
 
