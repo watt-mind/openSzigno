@@ -93,7 +93,7 @@ ES3_TEST_CORPUS_DIR=/private/corpus cargo test \
 | `crates/openszigno-core/src/` | `parse.rs`, `decode.rs`, `decrypt.rs`, `model.rs`, `scan.rs`, `error.rs` |
 | `crates/openszigno-verify/src/` | `c14n.rs`, `dsig.rs`, `certs.rs`, `policy.rs`, `codes.rs`, `trust.rs`, `report.rs` |
 | `crates/openszigno-verify/tests/` | Synthetic PKI and the in-tests XMLDSig signer (`common/`), which must never move into a shipped crate |
-| `crates/openszigno-cli/src/` | `main.rs` (commands, JSON protocol), `output_dir.rs` (safe extraction), `trust_store.rs` (`--trust-store` loader) |
+| `crates/openszigno-cli/src/` | `main.rs` (dispatch), `args.rs`, `input.rs`, `response.rs`, `render/`, `commands/`, `extract/` (planning, naming, `output_dir.rs`), `trust.rs`, `revocation_store.rs`, `online.rs` |
 | `tests/fixtures/` | Synthetic `.es3` fixtures + `LICENSE` + `README.md` |
 | `docs/` | `architecture.md` (CLI contract), `research.md` (sources), `testing.md` (fixture policy), `roadmap.md` (milestones, risks) |
 | `samples/` | Private dossiers, ignored — see boundary above |

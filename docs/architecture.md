@@ -74,6 +74,36 @@ namespace-aware XML parsing, `base64` and `zip` for bounded payload decoding,
 and `serde`/`serde_json` for the protocol. Dependency versions and licenses
 are captured by `Cargo.lock` and Cargo metadata.
 
+### Module map: `openszigno-cli`
+
+The binary is split along the path one run takes: parse the command line,
+read the input, run the command, render the response, exit. Nothing below is
+part of the public contract — it is where to look, not what is promised.
+
+```text
+crates/openszigno-cli/src/
+  main.rs             # fn main: dispatch, then write the response and exit
+  args.rs             # clap types, and the shared --allow-namespace plumbing
+  input.rs            # the bounded reader for a file or stdin, InputInfo, load
+  response.rs         # the JSON envelope, CliError, and its exit statuses
+  render/             # writing the envelope (json.rs) and the summary (human.rs)
+  commands/           # one module per command: inspect, list, validate,
+                      #   extract, verify
+  extract/            # select.rs (--document), plan.rs (decode, names, nesting),
+                      #   names.rs (filename safety), write.rs (writing and
+                      #   rollback), output_dir.rs (race-resistant output)
+  trust.rs            # --trust-store, --trust-list, and --lotl loading
+  revocation_store.rs # --revocation-store loading
+  online.rs           # --online fetching, the only code that opens a socket
+```
+
+Two boundaries are load-bearing rather than tidiness. Every command reaches
+its input through `input::load` alone, so the size cap in
+[Limits](#limits) cannot be bypassed by adding a command. And `extract`
+plans the whole output tree — decoding, naming, and collision checking —
+before `extract/write.rs` touches the filesystem, which is what makes the
+all-or-nothing guarantee in [Extraction policy](#extraction-policy) possible.
+
 ## Format scope
 
 - Root element `Dossier` in an allowed namespace, checked namespace-aware
