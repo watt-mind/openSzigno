@@ -9,6 +9,37 @@ Nothing here changes the rule stated in
 milestone exists, no openSzigno output may claim or imply that a signature,
 timestamp, certificate, or dossier is valid.
 
+## Not yet implemented
+
+The short list of what the current release does not do. These are planned
+milestones or deliberate exclusions, not accidents; the authoritative version,
+with the code-level detail, is
+[architecture.md](architecture.md#not-yet-implemented).
+
+- `xades:ArchiveTimeStamp` verification, XAdES level detection (B-B, B-T,
+  B-LT, B-LTA), scheme-level trusted-list `Qualifications` extensions, and
+  signature-policy processing.
+- Countersignature nesting beyond a single `ds:Signature` inside an
+  `xades:CounterSignature`.
+- CMS recipient forms other than `KeyTransRecipientInfo`, and content
+  encryption outside AES-CBC and, behind `--allow-legacy-ciphers`,
+  DES-EDE3-CBC. Such a document is named and skipped.
+- Configurable limits: they are compile-time defaults today. See
+  [Engineering items](#engineering-items).
+
+Outside the plan altogether:
+
+- e-dossier namespaces outside the documented allow-list, unless added with
+  `--allow-namespace`;
+- transform chains other than `base64`, `zip -> base64`, `encrypt -> base64`,
+  and `zip -> encrypt -> base64`;
+- XML encodings other than UTF-8 and ISO-8859-2;
+- DTDs, DOCTYPE declarations, and entity declarations, which are rejected by
+  design;
+- creating, editing, signing, timestamping, or encrypting dossiers;
+- declaring a dossier legally valid, which is a legal judgement rather than a
+  cryptographic result.
+
 ## Format and verification milestones
 
 The milestones are ordered. Each one is expected to keep the JSON envelope
