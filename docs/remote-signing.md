@@ -543,3 +543,96 @@ practical consequence for this project is that the population able to
 produce a qualified signature through a CSC-style API is about to grow a
 great deal, which is an argument for building against the wallet ecosystem's
 protocol rather than a vendor's.
+
+## 3. Remote QSCD providers
+
+### 3.1 How to read this table
+
+"CSC API version" records what the provider itself states publicly. A
+provider that is a Cloud Signature Consortium member is not thereby a
+provider with a CSC endpoint a third party can call, and several members
+document only a proprietary REST API. Pricing is "on request" unless a
+figure is actually published; nothing here is estimated.
+
+The consortium publishes a
+[members list](https://cloudsignatureconsortium.org/about-us/our-members/)
+but no conformance or certified-implementation registry, so there is no
+authoritative way to check a claim of CSC conformance short of calling the
+service. Neither Microsec nor NetLock appears on that members list.
+
+### 3.2 Hungarian providers
+
+| Provider | Country | Certificate type | Enrolment | CSC API version | Sandbox | Pricing | Documentation |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Microsec (e-Szigno) | HU | Natural person and seal | Video identification for e-Szigno mobile; registration authority | Proprietary; no public cloud signing API found | Unknown | On request | [e-Szigno Hitelesito Szerver](https://srv.e-szigno.hu/doc/eszigno_hitelesito_szerver/eszigno_hitelesito_szerver.html), [MicroSigner](https://eszigno.microsigner.com/esign/) |
+| NetLock | HU | Natural person and seal | Video identification; mobile registration authority | Proprietary REST, not documented publicly | Unknown; a demo portal exists | Public price list PDF; API tier on request | [NETLOCK Sign Enterprise](https://netlock.hu/termekek/netlock-sign-enterprise/), [price tables](https://netlock.hu/dijtablazatok/) |
+
+Microsec matters more to this project than any other provider, because ES3
+is their format, so it deserves a direct answer: there is no publicly
+documented remote signing API from Microsec that a third-party CLI could
+call. What is public is the
+[e-Szigno Hitelesito Szerver](https://srv.e-szigno.hu/doc/eszigno_hitelesito_szerver/eszigno_hitelesito_szerver.html)
+REST interface, with operations such as `xadessign` and `padessign`, but
+that is an on-premise product signing with locally held keys, not a cloud
+signature service. The MicroSigner product routes hash signing through a
+Microsec-hosted proxy server to a key that may be a remote key approved
+through e-Szigno Mobil, which is architecturally the right shape, but its
+developer documentation was not found on a Microsec domain. Treat
+"Microsec offers a third-party remote signing API" as unverified and, on
+present evidence, as requiring a sales conversation rather than a signup.
+
+NetLock's NETLOCK Sign Enterprise product page states that all functions,
+including signing, are reachable through a REST API and that a hash-only
+hybrid mode exists, which is the relevant capability, but no API
+documentation is public.
+
+### 3.3 Other providers
+
+| Provider | Country | Certificate type | Enrolment | CSC API version | Sandbox | Pricing | Documentation |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Swisscom Trust Services (All-in Signing Service) | CH | Natural person and seal | Registration authority app, video ident, German eID, auto ident | Proprietary REST and SOAP | Yes, a documented 90-day trial claimed identity | On request | [downloads and documents](https://trustservices.swisscom.com/en/esignature-hub/downloads-and-documents), [GitHub](https://github.com/SwisscomTrustServices) |
+| InfoCert (GoSign, Sign API) | IT | Natural person and seal | Onboarding platform, eID gateway | CSC, version not stated | Unknown | On request | [CSC API product page](https://developers.infocert.digital/e-signature-and-e-sealing/csc-api/) |
+| Namirial (eSignAnyWhere) | IT | Natural person and seal | Video ident, eID, own registration authority | CSC, version not stated | Yes, public Swagger on a demo host | On request | [docs.namirial.app](https://docs.namirial.app/), [demo API](https://demo.esignanywhere.net/Api) |
+| Intesi Group (PkBox Remote, Time4Mind) | IT | Natural person, seal, timestamp | Unknown | CSC, version not stated | On request, development trial licence | On request | [integration page](https://www.intesigroup.com/en/digital-signature-integration/) |
+| D-Trust (sign-me, seal-me) | DE | sign-me natural person; seal-me seals | German eID, VideoIdent, point of sale | CSC, version not stated | Unknown | Portal coins published: 100 for EUR 34.90, 500 for EUR 139.90 including VAT, QES 5 coins | [sign-me API](https://www.d-trust.net/en/solutions/sign-me-api) |
+| Evrotrust | BG | Natural person and seal | Remote document scan with liveness; operator fallback | Proprietary REST | Yes, a named sandbox host | On request | [docs.evrotrust.com](https://docs.evrotrust.com/docs/integration) |
+| Certinomis (Docaposte) | FR | Natural person and seal | ANSSI substantial level identity | CSC, version not stated | Unknown | On request | [CSC member page](https://cloudsignatureconsortium.org/member/certinomis/), [certinomis.fr](https://www.certinomis.fr/) |
+| Entrust (Remote Signing Service, Signing Automation Service) | US, EU operations | RSS natural person; SAS organisational seals | In-workflow identity verification plus an authenticator app | CSC 0.1.7.9 for RSS, CSC 1.0.4.0 for the Remote Signing Engine | Unknown | On request | [RSS datasheet](https://www.entrust.com/sites/default/files/documentation/datasheets/remote-signing-service-ds.pdf), [SAS user guide](https://api.managed.entrust.com/sas/Entrust_Signing_Automation_Service_-_User_Guide.pdf) |
+| GlobalSign (Digital Signing Service) | BE | Natural person and organisation identities | Organisation vetted once, identities minted by API | Proprietary REST | Unknown | On request | [DSS API documentation](https://www.globalsign.com/en/resources/apis/api-documentation/digital-signing-service-api-documentation.html), [docs.globalsign.com](https://docs.globalsign.com/solutions/services/dss) |
+| Ascertia (SigningHub, ADSS) | UK | Depends on the connected trust service provider | Delegated; OTP, PIN or OAuth 2.0 at signing | CSC 1.0.4.0 in SigningHub; ADSS also exposes a CSC server interface | Yes, a free trial tier | Tiers published but rendered client side | [CSC product page](https://www.ascertia.com/products/cloud-signature-consortium/) |
+| PrimeSign (Cryptas) | AT | Natural person, EC keys | German eID, ID Austria, or a primeSign account | CSC 1.0.4.0 and 2.1.0.1 | Yes, an open test host with a Postman collection | On request | [hash signing API](https://primesign.cryptas.com/en/hash-signing-api), [developer page](https://primesign.cryptas.com/en/developer) |
+| Cleverbase (Vidua) | NL | v1 qualified natural person; v2 beta non-qualified | Vidua app; v2 beta needs wallet person identification data | CSC 1.0.4.0 for v1, CSC 2.2.0.0 for the v2 beta | Yes, a reachable lab host with OpenAPI | On request | [signing API reference](https://cleverbase.com/en/dev-docs/signing/api-reference/), [v2 beta](https://cleverbase.com/en/dev-docs/signing-v2-beta/) |
+| Buypass | NO | Natural person, short-lived keys | Through a contracted identity proofing provider | CSC 2.0, stated as parts of the REST API | Yes, a formal test and quality assurance onboarding | On request | [developer space](https://buypassdev.atlassian.net/wiki/spaces/BCSS/pages/3413311489/) |
+| A-Trust | AT | Natural person | ID Austria | CSC 1.4 per the vendor's sample client | Yes, the sample repository ships test credentials | On request | [CSC_HashSignClient](https://github.com/A-Trust/CSC_HashSignClient) |
+| Digidentity | NL, UK | Natural person | Digidentity app, push and PIN | CSC v1, patch version unknown | Unknown | On request | [CSC flow documentation](https://connect.digidentity.com/flows/CSC/) |
+| Universign (Signaturit) | FR | Natural person and seal | OTP; prevalidated identity for qualified | Proprietary REST | Yes, an alpha API host | On request | [API documentation](https://apps.universign.com/docs/api/) |
+| Uanataca (Namirial) | ES, IT | Natural person and seal | Registration authority officer through an API | Proprietary | Yes, a test mode and playground | On request | [developers.uanataca.com](https://developers.uanataca.com/) |
+| certSIGN | RO | Natural person | Remote video identification | CSC, version not stated | Unknown | On request | [remote electronic signature](https://www.certsign.ro/en/products/eidas-trust-services/remote-electronic-signature/) |
+| Trans Sped | RO | Natural person and seal | Unknown | CSC, version not stated | On request | On request | [CSC member page](https://cloudsignatureconsortium.org/member/trans-sped/) |
+| TrustPro | IE, IT | Natural person and qualified seal | Unknown | CSC member, version not stated | Unknown | Published: free 1 signature per 10 days; EUR 13 per month for 5; EUR 28 per year for 100; EUR 48 per year unlimited | [electronic signature page](https://www.trustpro.eu/electronic-signature/) |
+| Camerfirma (InfoCert) | ES | Natural person | Online video identification with an operator | Unknown; signing through GoSign | Unknown | Published: EUR 83 excluding VAT for three years | [remote signature certificate](https://www.camerfirma.com/certificados-digitales/certificado-digital-firma-remota/) |
+| SK ID Solutions (Smart-ID) | EE | Natural person | Smart-ID application | Not CSC; own relying party REST API | A demo environment exists, not verified | On request | [digital signing for e-services](https://www.smart-id.com/e-service-providers/smart-id-digital-signing-for-your-e-service/) |
+| Halcom One | SI | Natural person | Bank branch or registration authority, mobile app | Proprietary XML over POST | Unknown | On request | [integration page](https://one.halcom.si/en/halcom-one-integration) |
+| Bit4id (SignCloud) | ES, IT | Unknown | Own credential management system | Proprietary | Unknown | On request | [SignCloud](https://www.bit4id.com/en/solutions/signcloud/) |
+| CertEurope (Oodrive) | FR | Signature, server seal, timestamp | Unknown | Proprietary SignAPI | Unknown | On request | [signature API](https://www.certeurope.fr/solutions-sur-mesure/api-de-signature/) |
+| Izenpe | ES | Cloud certificate for professionals | Public administration registration authority | Unknown | Unknown | On request | [technical documentation](https://www.izenpe.eus/descarga-de-certificados/webize01-cndoctecnica/es/) |
+| ANF AC | ES | Signature and seal | Unknown | Proprietary signature API | None mentioned | On request | [API de Firma](https://www.anf.ac/api-firma/) |
+| DigiSign | RO | Qualified certificates | Unknown | Unknown, no public API documentation | Unknown | On request | [electronic signature](https://digisign.ro/products-services/electronic-signature/) |
+
+### 3.4 The shortlist that actually matters
+
+Filtering for a provider that publishes a CSC version number, documents the
+API without a sales call, and offers a reachable sandbox leaves a short
+list:
+
+1. **PrimeSign**, CSC 1.0.4.0 and 2.1.0.1, open test host, Postman
+   collection. The only provider found that names two CSC versions and
+   recommends one.
+2. **Cleverbase**, CSC 1.0.4.0 in production and CSC 2.2.0.0 in a beta with
+   a reachable lab host and an OpenAPI description. The CSC 2.2 beta matches
+   the version the EUDI reference deployment reports.
+3. **Buypass**, CSC 2.0, public developer documentation, formal test
+   onboarding.
+
+A-Trust and Digidentity are useful for CSC v1 compatibility testing.
+Everything Hungarian is behind a sales conversation.
