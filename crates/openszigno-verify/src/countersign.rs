@@ -9,7 +9,7 @@ use openszigno_core::roxmltree::Node;
 
 use crate::codes::{Check, CheckCode};
 use crate::dsig::{Context, direct_child};
-use crate::references::Reference;
+use crate::references::{Reference, effective_node_sets};
 use crate::report::{SignatureRole, SignatureScope};
 use crate::scope::{Placement, owning_signature, signature_index, signature_profile_type};
 
@@ -84,7 +84,29 @@ pub(crate) fn countersignature_binding(
     let parent_value = placement
         .enclosing
         .and_then(|parent| direct_child(parent, XMLDSIG_NAMESPACE, "SignatureValue"));
-    for node in resolved.iter().flatten() {
+    // A reference binds a `ds:SignatureValue` only if it still digests it:
+    // resolution names the candidate, and the effective node set says whether
+    // the transform chain kept it. A signature that references a
+    // `ds:SignatureValue` nested inside itself — an enveloped countersignature
+    // in its own unsigned properties — and then removes itself with the
+    // enveloped-signature transform digests none of that value, and binds
+    // nothing.
+    //
+    // The reverse case cannot arise: the enveloped-signature transform removes
+    // only the `ds:Signature` the reference is written in (XMLDSig 1.1 clause
+    // 6.6.4), and an enveloped countersignature sits *inside* the signature it
+    // attests, so its own removal never takes the parent's
+    // `ds:SignatureValue` with it. What that removal does take is the
+    // countersignature's own signed properties and profile object, which the
+    // reference-scope check catches.
+    let scopes = effective_node_sets(signature, references, resolved);
+    for (scope, node) in scopes.iter().zip(resolved) {
+        let Some(node) = node else {
+            continue;
+        };
+        if !scope.covers(*node) {
+            continue;
+        }
         if !(node.is_element()
             && node.tag_name().namespace() == Some(XMLDSIG_NAMESPACE)
             && node.tag_name().name() == "SignatureValue")
