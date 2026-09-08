@@ -20,7 +20,7 @@ use x509_cert::ext::pkix::name::GeneralName;
 use x509_cert::ext::pkix::{BasicConstraints, KeyUsage, NameConstraints, SubjectAltName};
 use x509_cert::name::Name;
 
-use crate::codes::{Check, CheckCode};
+use crate::codes::{Check, CheckCode, CheckStatus};
 use crate::policy::{Digest as PolicyDigest, MIN_RSA_BITS, SignatureScheme, VerifyLimits};
 use crate::trust::{UnixTime, format_rfc3339};
 
@@ -1528,4 +1528,90 @@ pub fn dedup(certificates: Vec<ParsedCertificate>) -> Vec<ParsedCertificate> {
         .into_iter()
         .filter(|certificate| seen.insert(certificate.der.clone()))
         .collect()
+}
+
+/// The validated path of one signing certificate, as stage D leaves it for
+/// stage E.
+pub(crate) struct SignerPath {
+    /// The validated path, end-entity first and trust anchor last. Empty when
+    /// no path was built.
+    pub(crate) path: Vec<ParsedCertificate>,
+    /// The chain as it will be reported, still to be told about revocation.
+    pub(crate) chain: Vec<ChainEntry>,
+    /// The untrusted certificates the path was built from, which stage E
+    /// offers as CRL signers and OCSP responders.
+    pub(crate) candidates: Vec<ParsedCertificate>,
+}
+
+/// Stage D: build a path from the signing certificate to a configured anchor,
+/// validate it at this signature's validation time, and report the anchor's
+/// provenance and the chain's qualified status.
+pub(crate) fn verify_signer_path(
+    context: &crate::Context<'_, '_, '_, '_>,
+    signer: &ParsedCertificate,
+    extra_certificates: &[ParsedCertificate],
+    signature_time: UnixTime,
+    report: &mut crate::report::SignatureReport,
+) -> SignerPath {
+    // Candidates: the signature's own certificates (ds:KeyInfo and the XAdES
+    // CertificateValues) plus the trust store's intermediates.
+    let mut candidates = extra_certificates.to_vec();
+    candidates.extend(context.store_intermediates.iter().cloned());
+    let candidates = dedup(candidates);
+    let path = validate_path(
+        signer,
+        &candidates,
+        &context.anchors,
+        signature_time,
+        &context.options.limits,
+        PathPurpose::Signing,
+    );
+    let mut chain = path.chain;
+    report.checks.extend(path.advisories);
+    let status = match path.code {
+        CheckCode::CertPathOk => CheckStatus::Passed,
+        // Giving up is not a finding: an exhausted search means the tool
+        // stopped looking, not that no path exists.
+        CheckCode::CertPathUnknown | CheckCode::CertPathSearchExhausted => CheckStatus::Unknown,
+        _ => CheckStatus::Failed,
+    };
+    report
+        .checks
+        .push(Check::new(path.code, status, path.message));
+
+    // --- The anchor's provenance, and what the chain makes it -------------
+    if let Some(anchor) = path.path.last() {
+        // When the same certificate is both a store anchor and a trusted-list
+        // identity, the list is the stronger provenance and the one worth
+        // reporting: it says *who* vouches for the CA, where a directory only
+        // says that somebody copied it in.
+        let listed = context.services.iter().any(|service| {
+            matches!(&service.identity, crate::trust::ServiceIdentity::Certificate(der) if *der == anchor.der)
+        });
+        let provenance = context
+            .anchor_provenance
+            .iter()
+            .find(|(der, _)| *der == anchor.der)
+            .map(|(_, anchor)| *anchor);
+        if let Some(entry) = chain.last_mut() {
+            entry.trust_anchor_origin = if listed {
+                Some(crate::trust::TrustAnchorOrigin::TrustList)
+            } else {
+                provenance.map(|anchor| anchor.origin)
+            };
+        }
+        let outcome = crate::trustlist::qualification(context.services, &path.path, signature_time);
+        report.qualified = outcome.qualified;
+        report.qualified_signature_device = outcome.device;
+        report.qualified_service = outcome.service.clone();
+        if let Some(certificate) = report.signing_certificate.as_mut() {
+            certificate.qualified = outcome.qualified;
+        }
+        report.checks.push(outcome.check);
+    }
+    SignerPath {
+        path: path.path,
+        chain,
+        candidates,
+    }
 }

@@ -18,6 +18,13 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
   change — every flag, help text, message, stable code, exit status, and byte
   of JSON and human output is what it was. See
   [docs/architecture.md](docs/architecture.md#module-map-openszigno-cli).
+- `openszigno-verify` was split into one module per pipeline stage: internal
+  module split, no behaviour change. `dsig.rs` became `references`, `scope`,
+  `countersign`, `signature` and `coverage`; `lib.rs` now reads as the
+  documented stages A to F with one `Context` threaded through them. Every
+  check code, status, message, ordering and JSON field is unchanged, and the
+  crate's public API keeps the paths it had. See
+  [docs/architecture.md](docs/architecture.md#module-map).
 
 ## [0.4.0] - 2026-09-08
 

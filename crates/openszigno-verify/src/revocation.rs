@@ -1531,3 +1531,52 @@ pub fn classify(bytes: &[u8]) -> Result<(RevocationItemKind, Vec<u8>), String> {
     }
     Err("a revocation store file is neither a CRL nor an OCSP response".to_owned())
 }
+
+/// Stage E: ask the revocation material about every certificate in the
+/// signer's chain, and attach the answers to the reported chain.
+///
+/// `time_is_proven` says whether the validation time came from a fully
+/// verified signature timestamp rather than from `--at` or the clock. Only a
+/// timestamp *proves* it, and that difference decides whether a revocation
+/// dated after it may be dismissed.
+pub(crate) fn check_signer_chain(
+    context: &crate::Context<'_, '_, '_, '_>,
+    signer_path: crate::certs::SignerPath,
+    data: &RevocationData<'_>,
+    signature_time: UnixTime,
+    time_is_proven: bool,
+    report: &mut crate::report::SignatureReport,
+) {
+    let mut chain = signer_path.chain;
+    if signer_path.path.is_empty() {
+        // No validated path means no issuer to check anything against.
+        report.checks.push(match context.revocation_policy {
+            RevocationPolicy::NotChecked => Check::skipped(
+                CheckCode::RevocationNotChecked,
+                "revocation checking was switched off by the caller",
+            ),
+            RevocationPolicy::Offline | RevocationPolicy::Online => Check::unknown(
+                CheckCode::RevocationStatusUnknown,
+                "no validated certification path was available, so revocation could not be checked",
+            ),
+        });
+    } else {
+        let outcome = check_path(&PathRevocationInput {
+            anchors: &context.anchors,
+            path: &signer_path.path,
+            candidates: &signer_path.candidates,
+            data,
+            time: signature_time,
+            time_is_proven,
+            policy: context.revocation_policy,
+            role: ChainRole::Signer,
+            limits: &context.options.limits,
+        });
+        for (entry, status) in chain.iter_mut().zip(outcome.per_certificate) {
+            entry.revocation = Some(status);
+        }
+        report.checks.push(outcome.check);
+        report.checks.extend(outcome.notes);
+    }
+    report.chain = chain;
+}
