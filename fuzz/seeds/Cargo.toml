@@ -1,0 +1,36 @@
+[package]
+name = "openszigno-fuzz-seeds"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+# A generator, not a shipped crate: it writes fuzz/corpus/* deterministically
+# from `tests/fixtures` and small hand-built ASN.1/XML seeds, and is run with
+# `../seed.sh` or `cargo run --manifest-path fuzz/seeds/Cargo.toml`. Outside
+# both the root workspace and the fuzz package's own workspace (it is its own
+# one-crate workspace) so neither build is affected by its dependencies.
+[workspace]
+
+[dependencies]
+base64 = "0.23.1"
+der = { version = "0.7.10", features = ["alloc", "derive", "oid"] }
+x509-cert = "0.2.5"
+x509-ocsp = "0.2.1"
+cms = "0.2.3"
+const-oid = "0.9.6"
+# For `synthetic_certificate`: a run-time-generated RSA certificate, never a
+# committed one. See main.rs's doc comment and SECURITY.md.
+rsa = "0.9.8"
+rand_chacha = "0.3.1"
+rand_core = "0.6.4"
+rcgen = { version = "0.14.10", features = ["x509-parser"] }
+
+[profile.dev.package.num-bigint-dig]
+opt-level = 3
+
+[profile.dev.package.rsa]
+opt-level = 3
+
+[[bin]]
+name = "generate-seeds"
+path = "src/main.rs"

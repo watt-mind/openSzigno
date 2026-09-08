@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ec:Dossier xmlns:ec="http://www.e-cegjegyzek.hu/2014/e-cegeljaras#" xmlns:ds="http://www.w3.org/2000/09/xmldsig#">
+  <ec:DossierProfile Id="DossierProfile1" OBJREF="Documents1"><ec:Title>Unsigned synthetic company-court fixture</ec:Title><ec:CreationDate>2026-01-01T00:00:00Z</ec:CreationDate><ec:E-category>electronic dossier</ec:E-category></ec:DossierProfile>
+  <ec:SignatureProfile Id="SignatureProfile1" OBJREF="MissingSignature"/>
+  <ec:Documents Id="Documents1">
+    <ec:Document><ec:DocumentProfile Id="DocumentProfile1" OBJREF="DocumentObject1"><ec:Title>ruling.txt</ec:Title><ec:CreationDate>2026-01-01T00:00:00Z</ec:CreationDate><ec:Format><ec:MIME-Type type="text" subtype="plain" extension="txt"/></ec:Format><ec:SourceSize sizeValue="43" sizeUnit="B"/><ec:BaseTransform><ec:Transform Algorithm="base64"/></ec:BaseTransform></ec:DocumentProfile><ds:Object Id="DocumentObject1">Q29tcGFueS1jb3VydCBuYW1lc3BhY2Ugc3ludGhldGljIGZpeHR1cmUuCg==</ds:Object></ec:Document>
+    <ec:Document><ds:Object/></ec:Document>
+  </ec:Documents>
+</ec:Dossier>
