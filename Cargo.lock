@@ -803,6 +803,7 @@ dependencies = [
  "const-oid",
  "der",
  "des",
+ "openszigno-author",
  "openszigno-core",
  "openszigno-verify",
  "p256",

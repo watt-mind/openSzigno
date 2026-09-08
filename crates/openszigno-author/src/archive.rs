@@ -113,7 +113,6 @@ mod tests {
     #[test]
     fn the_reader_expands_what_this_writes() {
         let payload = b"round trip through zip and base64\n";
-        let archive = compress("round.txt", payload, &Limits::default()).expect("packs");
         let dossier = crate::build(
             &crate::DossierSpec {
                 title: "Round trip".to_owned(),
@@ -128,7 +127,6 @@ mod tests {
             &Limits::default(),
         )
         .expect("builds");
-        assert!(archive.len() > 0);
         let parsed =
             openszigno_core::parse(&dossier.bytes, &Limits::default()).expect("parses back");
         let DecodeOutcome::Decoded(decoded) = parsed

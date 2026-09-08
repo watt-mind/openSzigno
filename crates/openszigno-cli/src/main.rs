@@ -19,6 +19,7 @@ use openszigno_core::DecryptOptions;
 use serde_json::Value;
 
 use crate::args::{Cli, Command, MAX_NESTING_DEPTH};
+use crate::commands::create::create;
 use crate::commands::extract::{extract, load_recipient_key};
 use crate::commands::inspect::inspect;
 use crate::commands::list::list;
@@ -95,6 +96,10 @@ fn main() -> ExitCode {
         Command::Verify(args) => {
             let result = verify_command(&args);
             ("verify", args.json, result)
+        }
+        Command::Create(args) => {
+            let result = create(&args);
+            ("create", args.json, result)
         }
         // Handled above, before any envelope machinery is set up.
         Command::Skill => unreachable!("skill is handled before the dispatch"),
