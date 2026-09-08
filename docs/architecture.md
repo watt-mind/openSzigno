@@ -104,6 +104,34 @@ plans the whole output tree — decoding, naming, and collision checking —
 before `extract/write.rs` touches the filesystem, which is what makes the
 all-or-nothing guarantee in [Extraction policy](#extraction-policy) possible.
 
+### Module map: `openszigno-core`
+
+```text
+crates/openszigno-core/src/
+  lib.rs      # the crate's public re-exports and the parse/parse_with_options entry points
+  parse.rs    # namespace policy and the top-level Dossier parse
+  xml.rs      # the shared XmlSource and id_map that verify reads too
+  model.rs    # Dossier, Document, Limits, and the inventoried summary types
+  sniff.rs    # DetectedType detection ahead of full parsing
+  scan.rs     # structural scanning: duplicate IDs, objref resolution, warnings
+  decode.rs   # decode_document_with: base64/zip decoding and the encrypt handoff
+  decrypt/    # the encrypt transform; see below
+  inventory.rs # signature/timestamp inventory for the JSON envelope
+  error.rs    # Error, ErrorCode, and the stable-code table
+```
+
+`decrypt/` undoes the `encrypt` transform (CMS `EnvelopedData`, RFC 5652) and
+is split by concern, one module per stage of that pipeline. The split is
+internal; `DecryptOptions` and `RecipientKey` are the only public names, both
+re-exported from `decrypt::mod` at their original path.
+
+| Module | What it owns |
+| --- | --- |
+| `mod.rs` | The public entry points (`DecryptOptions`, `RecipientKey` re-export), `CmsOutcome`, and `decrypt_cms`, the orchestration that ties the other three modules together. |
+| `cms` | `ContentInfo` / `EnvelopedData` / `RecipientInfo` parsing and validation, and unwrapping the content-encryption key (RSAES-PKCS1-v1_5, RSAES-OAEP). |
+| `ciphers` | Content-encryption algorithm identification and AES-128/192/256-CBC and DES-EDE3-CBC decryption. |
+| `keys` | Loading the recipient's PKCS#8 private key (DER or PEM, plain or passphrase-protected), PEM scanning, and certificate matching by `issuerAndSerialNumber` or `subjectKeyIdentifier`. |
+
 ## Format scope
 
 - Root element `Dossier` in an allowed namespace, checked namespace-aware
