@@ -1,0 +1,34 @@
+{
+  "command": "extract",
+  "data": {
+    "extracted": [
+      {
+        "bytes": 5,
+        "declared_type": "text/plain",
+        "decrypted": false,
+        "detected_type": "text",
+        "document_index": 0,
+        "dossier_path": "0",
+        "filename": "openSzigno OpenSSL vector.txt",
+        "path": "openSzigno OpenSSL vector.txt"
+      }
+    ],
+    "extracted_count": 1,
+    "nested_dossiers_extracted": 0,
+    "selected": null,
+    "skipped_count": 0
+  },
+  "errors": [],
+  "input": {
+    "bytes": 4280,
+    "format": "microsec-es3"
+  },
+  "ok": true,
+  "schema_version": 1,
+  "warnings": [
+    {
+      "code": "cryptographic_verification_not_performed",
+      "message": "signature and timestamp material was counted but not verified"
+    }
+  ]
+}

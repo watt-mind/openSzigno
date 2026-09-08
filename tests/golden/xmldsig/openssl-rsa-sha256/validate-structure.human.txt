@@ -1,0 +1,3 @@
+Structure is valid for the supported e-Szigno profile.
+Conformance warnings: 0 (listed as warnings on stderr).
+Cryptographic verification was not performed.

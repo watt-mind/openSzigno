@@ -1,0 +1,9 @@
+Verification verdict: indeterminate
+Validation time: <MASKED-TIME>
+Signatures: 0
+  signature_count_within_limits: passed
+  revocation_policy: info
+  no_signatures: unknown
+  documents_uncovered: unknown
+document 0: uncovered (an embedded dossier; its own inner signatures are not verified by this run)
+Revocation policy: offline. A verdict of `valid` means every check passed at the stated validation time; it is not a legal opinion.

@@ -1,0 +1,39 @@
+{
+  "command": "extract",
+  "data": {
+    "extracted": [
+      {
+        "bytes": 903,
+        "declared_type": "application/nldossier2",
+        "decrypted": false,
+        "detected_type": "dossier",
+        "document_index": 0,
+        "dossier_path": "0",
+        "filename": "court.dosszie",
+        "path": "court.dosszie"
+      },
+      {
+        "bytes": 37,
+        "declared_type": "text/plain",
+        "decrypted": false,
+        "detected_type": "text",
+        "document_index": 0,
+        "dossier_path": "0/0",
+        "filename": "inner.txt",
+        "path": "court.dosszie.d/inner.txt"
+      }
+    ],
+    "extracted_count": 2,
+    "nested_dossiers_extracted": 1,
+    "selected": null,
+    "skipped_count": 0
+  },
+  "errors": [],
+  "input": {
+    "bytes": 2077,
+    "format": "microsec-es3"
+  },
+  "ok": true,
+  "schema_version": 1,
+  "warnings": []
+}

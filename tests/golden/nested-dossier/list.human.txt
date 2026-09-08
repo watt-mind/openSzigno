@@ -1,0 +1,3 @@
+Unsigned synthetic nesting fixture
+[0] court.dosszie | application/nldossier2 | 903 B | ["base64"] | nested dossier
+Signatures/timestamps are listed by presence only; none were verified.

@@ -1,0 +1,17 @@
+{
+  "command": "extract",
+  "data": null,
+  "errors": [
+    {
+      "code": "invalid_base64",
+      "message": "document payload is not valid canonical Base64"
+    }
+  ],
+  "input": {
+    "bytes": 852,
+    "format": "microsec-es3"
+  },
+  "ok": false,
+  "schema_version": 1,
+  "warnings": []
+}

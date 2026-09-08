@@ -1,0 +1,29 @@
+{
+  "command": "extract",
+  "data": {
+    "extracted": [
+      {
+        "bytes": 41,
+        "declared_type": "text/plain",
+        "decrypted": false,
+        "detected_type": "text",
+        "document_index": 0,
+        "dossier_path": "0",
+        "filename": "hello.txt",
+        "path": "hello.txt"
+      }
+    ],
+    "extracted_count": 1,
+    "nested_dossiers_extracted": 0,
+    "selected": null,
+    "skipped_count": 0
+  },
+  "errors": [],
+  "input": {
+    "bytes": 1109,
+    "format": "microsec-es3"
+  },
+  "ok": true,
+  "schema_version": 1,
+  "warnings": []
+}

@@ -1,0 +1,27 @@
+{
+  "command": "extract",
+  "data": {
+    "extracted": [],
+    "extracted_count": 0,
+    "nested_dossiers_extracted": 0,
+    "selected": null,
+    "skipped_count": 1
+  },
+  "errors": [],
+  "input": {
+    "bytes": 924,
+    "format": "microsec-es3"
+  },
+  "ok": true,
+  "schema_version": 1,
+  "warnings": [
+    {
+      "code": "encrypted_document_unsupported",
+      "message": "document 0 is encrypted; only `extract --decrypt-key` can read it"
+    },
+    {
+      "code": "document_skipped_encrypted",
+      "message": "document 0 was not extracted because it is encrypted and no --decrypt-key was given"
+    }
+  ]
+}

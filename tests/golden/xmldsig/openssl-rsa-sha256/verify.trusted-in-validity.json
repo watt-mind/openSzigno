@@ -1,0 +1,333 @@
+{
+  "command": "verify",
+  "data": {
+    "checks": [
+      {
+        "code": "signature_count_within_limits",
+        "message": "the number of signatures is within the verification limits",
+        "status": "passed"
+      },
+      {
+        "code": "revocation_policy",
+        "message": "revocation is checked offline, from the signature's own RevocationValues and the revocation store",
+        "status": "info"
+      },
+      {
+        "code": "documents_all_covered",
+        "message": "every one of the 1 modelled document(s) is covered, but 1 of them only by signatures that did not verify; those signatures' own verdicts carry the finding",
+        "status": "info"
+      }
+    ],
+    "counts": {
+      "documents_covered": 0,
+      "documents_uncovered": 0,
+      "documents_undetermined": 0,
+      "signatures": 1,
+      "signatures_indeterminate": 1,
+      "signatures_invalid": 0,
+      "signatures_valid": 0,
+      "timestamps": 0,
+      "timestamps_verified": 0
+    },
+    "documents": [
+      {
+        "coverage": "covered_unverified",
+        "covered_by": [
+          {
+            "signature_index": 0,
+            "verdict": "indeterminate",
+            "via": "direct"
+          }
+        ],
+        "index": 0,
+        "nested_dossier": false,
+        "object_ref": "obj0",
+        "reason": "no signature covering this document verified; the best verdict among the 1 covering signature(s) is indeterminate"
+      }
+    ],
+    "limits": {
+      "max_certificates": 64,
+      "max_chain_length": 8,
+      "max_paths": 32,
+      "max_references_per_signature": 32,
+      "max_revocation_items": 256,
+      "max_signatures": 64,
+      "max_timestamps_per_signature": 8,
+      "max_transforms_per_reference": 8
+    },
+    "policy": {
+      "c14n_algorithms": [
+        "http://www.w3.org/TR/2001/REC-xml-c14n-20010315",
+        "http://www.w3.org/TR/2001/REC-xml-c14n-20010315#WithComments",
+        "http://www.w3.org/2001/10/xml-exc-c14n#",
+        "http://www.w3.org/2001/10/xml-exc-c14n#WithComments"
+      ],
+      "digest_algorithms": [
+        "sha256",
+        "sha384",
+        "sha512"
+      ],
+      "legacy_algorithms_allowed": false,
+      "revocation": "offline",
+      "signature_algorithms": [
+        "rsa-pkcs1-sha256",
+        "rsa-pkcs1-sha384",
+        "rsa-pkcs1-sha512",
+        "rsa-pss-sha256",
+        "rsa-pss-sha384",
+        "rsa-pss-sha512",
+        "ecdsa-sha256",
+        "ecdsa-sha384"
+      ],
+      "transforms": [
+        "http://www.w3.org/2000/09/xmldsig#enveloped-signature",
+        "http://www.w3.org/2000/09/xmldsig#base64",
+        "http://www.w3.org/TR/2001/REC-xml-c14n-20010315",
+        "http://www.w3.org/TR/2001/REC-xml-c14n-20010315#WithComments",
+        "http://www.w3.org/2001/10/xml-exc-c14n#",
+        "http://www.w3.org/2001/10/xml-exc-c14n#WithComments"
+      ],
+      "trust_lists": [],
+      "trust_snapshot": null,
+      "trust_store": "configured"
+    },
+    "signatures": [
+      {
+        "chain": [
+          {
+            "is_trust_anchor": false,
+            "issuer_cn": "openSzigno OpenSSL Vector Root",
+            "not_after": "2046-09-02T18:49:40Z",
+            "not_before": "2026-09-07T18:49:40Z",
+            "revocation": {
+              "code": "revocation_status_unknown",
+              "detail": null,
+              "next_update": null,
+              "produced_at": null,
+              "reason": null,
+              "responder_model": null,
+              "revocation_time": null,
+              "source": null,
+              "status": "unknown",
+              "this_update": null
+            },
+            "serial_hex": "1001",
+            "source": "key_info",
+            "subject_cn": "openSzigno OpenSSL Vector Signer",
+            "trust_anchor_origin": null
+          },
+          {
+            "is_trust_anchor": true,
+            "issuer_cn": "openSzigno OpenSSL Vector Root",
+            "not_after": "2046-09-02T18:49:40Z",
+            "not_before": "2026-09-07T18:49:40Z",
+            "revocation": {
+              "code": "revocation_not_checked",
+              "detail": null,
+              "next_update": null,
+              "produced_at": null,
+              "reason": null,
+              "responder_model": null,
+              "revocation_time": null,
+              "source": null,
+              "status": "trust_anchor",
+              "this_update": null
+            },
+            "serial_hex": "728ab7924537549b823384c968b277b3d98b8255",
+            "source": "trust_store",
+            "subject_cn": "openSzigno OpenSSL Vector Root",
+            "trust_anchor_origin": "trust_store"
+          }
+        ],
+        "checks": [
+          {
+            "code": "sig_structure",
+            "message": "signature structure is well formed",
+            "status": "passed"
+          },
+          {
+            "code": "sig_placement",
+            "message": "the signature is placed on a document",
+            "status": "passed"
+          },
+          {
+            "code": "c14n_method_allowed",
+            "message": "ds:SignedInfo uses the exc-c14n canonicalization algorithm",
+            "status": "passed"
+          },
+          {
+            "code": "signature_algorithm_allowed",
+            "message": "ds:SignatureMethod is rsa-pkcs1-sha256",
+            "status": "passed"
+          },
+          {
+            "code": "digest_algorithm_allowed",
+            "message": "every ds:DigestMethod is inside the pinned allowlist",
+            "status": "passed"
+          },
+          {
+            "code": "transforms_allowed",
+            "message": "every transform is inside the allowlist",
+            "status": "passed"
+          },
+          {
+            "code": "references_same_document",
+            "message": "every reference is same-document",
+            "status": "passed"
+          },
+          {
+            "code": "references_resolve",
+            "message": "every reference resolves to exactly one node in the validated ID space",
+            "status": "passed"
+          },
+          {
+            "code": "reference_scope_complete",
+            "message": "every element the e-dossier format requires this signature to cover is covered",
+            "status": "passed"
+          },
+          {
+            "code": "reference_digest_ok",
+            "message": "3 of 3 reference digests matched",
+            "status": "passed"
+          },
+          {
+            "code": "signedinfo_canonicalization",
+            "message": "ds:SignedInfo canonicalized without error",
+            "status": "passed"
+          },
+          {
+            "code": "signing_certificate_available",
+            "message": "certificate 1 of 1 in ds:KeyInfo verifies the signature",
+            "status": "passed"
+          },
+          {
+            "code": "signature_value_ok",
+            "message": "the signature value verified over the canonical ds:SignedInfo",
+            "status": "passed"
+          },
+          {
+            "code": "xades_absent",
+            "message": "no XAdES qualifying properties were found for this signature, so nothing signed says which certificate signed it",
+            "status": "skipped"
+          },
+          {
+            "code": "xades_signing_certificate_absent",
+            "message": "the signature carries no xades:SigningCertificate, so nothing signed says which certificate signed it",
+            "status": "unknown"
+          },
+          {
+            "code": "signing_time_present",
+            "message": "no usable xades:SigningTime was found",
+            "status": "info"
+          },
+          {
+            "code": "signature_timestamp_absent",
+            "message": "the signature carries no xades:SignatureTimeStamp, so nothing proves when it existed",
+            "status": "unknown"
+          },
+          {
+            "code": "cert_path_ok",
+            "message": "path of length 2 built to a configured trust anchor",
+            "status": "passed"
+          },
+          {
+            "code": "certificate_qualified_unknown",
+            "message": "no trusted list was consulted, so this chain's qualified status is not determined",
+            "status": "info"
+          },
+          {
+            "code": "revocation_status_unknown",
+            "message": "in the signing certificate's chain, no usable revocation data covers the end-entity certificate issued by openSzigno OpenSSL Vector Root: the signature embeds none and no --revocation-store was given",
+            "status": "unknown"
+          }
+        ],
+        "countersigns": [],
+        "document_index": 0,
+        "index": 0,
+        "parent_signature_index": null,
+        "placement": "document",
+        "qualified": null,
+        "qualified_service": null,
+        "qualified_signature_device": null,
+        "references": [
+          {
+            "digest_algorithm": "sha256",
+            "index": 0,
+            "resolved_to": "Dossier/Documents/Document/Object",
+            "status": "passed",
+            "transforms": [
+              "http://www.w3.org/2001/10/xml-exc-c14n#"
+            ],
+            "uri": "#obj0"
+          },
+          {
+            "digest_algorithm": "sha256",
+            "index": 1,
+            "resolved_to": "Dossier/Documents/Document/DocumentProfile",
+            "status": "passed",
+            "transforms": [
+              "http://www.w3.org/2001/10/xml-exc-c14n#"
+            ],
+            "uri": "#prof0"
+          },
+          {
+            "digest_algorithm": "sha256",
+            "index": 2,
+            "resolved_to": "Dossier/Documents/Document/Signature/Object",
+            "status": "passed",
+            "transforms": [
+              "http://www.w3.org/2001/10/xml-exc-c14n#"
+            ],
+            "uri": "#sigobj0"
+          }
+        ],
+        "role": "signature",
+        "scope": "document",
+        "signature_id": "sig0",
+        "signing_certificate": {
+          "issuer_cn": "openSzigno OpenSSL Vector Root",
+          "key_algorithm": "rsa",
+          "key_bits": 2048,
+          "not_after": "2046-09-02T18:49:40Z",
+          "not_before": "2026-09-07T18:49:40Z",
+          "qualified": null,
+          "serial_hex": "1001",
+          "sha256_fingerprint": "2f76c350ea6ed55798329760900f57c739dc956bc6f0347a8b35edf3ade4f3d0",
+          "subject_cn": "openSzigno OpenSSL Vector Signer"
+        },
+        "signing_certificate_index": 0,
+        "signing_time": null,
+        "timestamps": [],
+        "validation_time": "2027-01-01T00:00:00Z",
+        "validation_time_source": "at_flag",
+        "verdict": "indeterminate",
+        "xades": {
+          "archive_timestamps": 0,
+          "present": false,
+          "signature_policy": null,
+          "signature_policy_id": null,
+          "signature_timestamps": 0,
+          "signing_certificate": null,
+          "signing_time": null,
+          "unvalidated_properties": []
+        },
+        "xades_level": null
+      }
+    ],
+    "timestamps": [],
+    "verdict": "indeterminate",
+    "verification_time": {
+      "effective": "<MASKED-TIME>",
+      "requested": "2027-01-01T00:00:00Z",
+      "source": "requested"
+    }
+  },
+  "errors": [],
+  "input": {
+    "bytes": 4280,
+    "format": "microsec-es3"
+  },
+  "ok": true,
+  "schema_version": 1,
+  "warnings": []
+}

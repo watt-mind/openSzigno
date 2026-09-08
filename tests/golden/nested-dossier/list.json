@@ -1,0 +1,49 @@
+{
+  "command": "list",
+  "data": {
+    "documents": [
+      {
+        "creation_date": "2026-01-01T00:00:00Z",
+        "index": 0,
+        "mime_type": {
+          "charset": null,
+          "extension": "dosszie",
+          "media_type": "application",
+          "subtype": "nldossier2"
+        },
+        "nested_dossier": true,
+        "object_ref": "DocumentObject1",
+        "source_size": 903,
+        "title": "court.dosszie",
+        "transforms": [
+          "base64"
+        ]
+      }
+    ],
+    "dossier": {
+      "category": null,
+      "creation_date": "2026-01-01T00:00:00Z",
+      "documents": 1,
+      "namespace": "https://www.microsec.hu/ds/e-szigno30#",
+      "nested_dossiers": 1,
+      "signature_inventory": {
+        "signatures": [],
+        "timestamps": [],
+        "verified": false
+      },
+      "signatures_present": 0,
+      "signatures_verified": false,
+      "timestamps_present": 0,
+      "title": "Unsigned synthetic nesting fixture",
+      "xml_encoding": "UTF-8"
+    }
+  },
+  "errors": [],
+  "input": {
+    "bytes": 2077,
+    "format": "microsec-es3"
+  },
+  "ok": true,
+  "schema_version": 1,
+  "warnings": []
+}

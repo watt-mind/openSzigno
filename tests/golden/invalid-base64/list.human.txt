@@ -1,0 +1,3 @@
+Unsigned invalid-Base64 fixture
+[0] invalid.txt | text/plain | 1 B | ["base64"]
+Signatures/timestamps are listed by presence only; none were verified.
