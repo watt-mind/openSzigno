@@ -491,10 +491,16 @@ curl -s -X POST https://walletcentric.signer.eudiw.dev/csc/v2/info \
   -H 'Content-Type: application/json' -d '{"lang":"en"}'
 ```
 
-Whether that host will accept an OAuth 2.0 client registration from an
-arbitrary third party, and whether it is intended to stay up, was not
-established and is unverified. The `info` endpoint being open says nothing
-about the rest of the flow.
+The `info` endpoint being open says nothing about the rest of the flow. An
+unauthenticated authorize request against the same host on 2026-09-09
+returned `302` to the redirect URI with
+`error=invalid_request&error_description=ClientId test from the request not
+found`, and `POST /connect/register` returned `404`. So the client has to be
+registered out of band; there is no dynamic client registration on the
+hosted instance. Whether the operators will register a third-party client at
+all, and whether the host is intended to stay up, was not established and is
+unverified. Running the QTSP locally sidesteps the question, at the cost of
+standing up MySQL and an OpenID4VP verifier.
 
 ### 2.4 What a command-line client needs
 
