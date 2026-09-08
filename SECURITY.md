@@ -98,14 +98,36 @@ that a trust anchor signed. No URL is ever taken from the dossier's XML, no
 reference in a dossier is ever dereferenced with or without the flag, and trust
 anchors and trusted lists are never fetched in any mode.
 
+Two further rules bound that class, because a certificate inside a dossier is
+attacker-supplied until something the operator configured vouches for it:
+
+- **Trust-gated.** A URL is contacted only for a certificate that sits on a
+  path to a **configured trust anchor** — from `--trust-store`, or from a
+  trusted list. With no anchors configured **nothing is fetched at all**, and
+  the report says so (`policy.revocation` reads `online_no_anchors`). Without
+  this rule, "an issuer in the dossier signed this certificate" — a statement
+  whoever wrote the dossier wrote on both sides of — was enough to make the
+  tool open a connection of the dossier's choosing.
+- **A destination policy.** Only `http` and `https`, exactly as published. A
+  URL carrying userinfo is always refused. A loopback, RFC 1918 private,
+  link-local, unique-local or unspecified address, or the name `localhost`, is
+  refused unless `--online-allow-private` is given — and the host's *resolved*
+  addresses are checked against the same ranges before connecting, so a public
+  name that resolves inwards is refused too. Refusals are reported as
+  `online_fetch_failed` (`info`) with the class `destination_refused`, and
+  nothing is contacted.
+
 The requests are `GET` for a CRL and a `POST` of an RFC 6960 `OCSPRequest` for
 OCSP. They carry no data about the dossier beyond the certificate serial number
 the OCSP request necessarily names, which is a privacy consideration worth
 knowing about: it tells the CA's responder that someone is validating that
-certificate now. The transport is bounded — 5 s to connect, 20 s per fetch,
-16 MiB per CRL, 64 KiB per OCSP response, at most three redirects and never to
-another host — and no proxy is taken from the environment; `--online-proxy` is
-the only way to introduce one. Everything fetched is judged by exactly the
+certificate now. Each certificate is asked about once per responder — OCSP
+requests are deduplicated by responder *and* `certID`, not by URL — so a run
+neither repeats a question nor skips one. The transport is bounded — 5 s to
+connect, 20 s per fetch, 16 MiB per CRL (the same limit the verifier will
+parse), 64 KiB per OCSP response, at most three redirects and never to another
+host — and no proxy is taken from the environment; `--online-proxy` is the only
+way to introduce one. Everything fetched is judged by exactly the
 offline rules before it is believed, so `--online` can widen where evidence
 comes from and can never relax a rule.
 [docs/trust.md](docs/trust.md#online-fetching) has the details.
@@ -139,9 +161,11 @@ openSzigno aims to guarantee that a hostile input cannot:
   key or passphrase material to reach stdout, stderr, the JSON envelope, or an
   extracted file;
 - cause openSzigno to make a network connection without `--online`, or, with
-  it, to any destination other than a URL published inside a certificate being
-  validated — including through a redirect, an environment proxy, or a scheme
-  the certificate did not name;
+  it, to any destination other than a URL published inside a certificate that
+  reaches a configured trust anchor — including through a redirect, an
+  environment proxy, a scheme the certificate did not name, userinfo in a URL,
+  or a name that resolves to a loopback or private address while
+  `--online-allow-private` is absent;
 - cause `verify` to report a signature as anything better than it is: to
   resolve a reference to a node other than the one the container semantics
   require (signature wrapping), to reach the network or the filesystem while

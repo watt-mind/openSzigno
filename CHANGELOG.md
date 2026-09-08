@@ -10,6 +10,46 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
 
 ## [Unreleased]
 
+### Security
+
+- `--online` no longer fetches revocation data for a certificate the run does
+  not trust. A URL is contacted only for a certificate that sits on a path to a
+  **configured trust anchor**, from `--trust-store` or from a trusted list;
+  with no anchors configured nothing is fetched at all. Previously the fetcher
+  only checked that an embedded issuer had signed the certificate — a statement
+  whoever wrote the dossier wrote on both sides of — so a synthetic dossier
+  with no trust store configured was enough to make openszigno open a
+  connection of the dossier's choosing.
+- `--online` now applies a destination policy before it opens a socket: `http`
+  and `https` only, no userinfo in a URL, and no loopback, RFC 1918 private,
+  link-local, unique-local or unspecified address, nor the name `localhost`,
+  unless the new `--online-allow-private` is given. The host's resolved
+  addresses are re-checked against the same ranges before connecting, so a
+  public name that resolves inwards — DNS rebinding — is refused too. Refusals
+  are reported as `online_fetch_failed` (`info`) with the class
+  `destination_refused` and the rule that refused them, and nothing is
+  contacted. See [SECURITY.md](SECURITY.md#network-exposure) and
+  [docs/trust.md](docs/trust.md#online-fetching).
+
+### Fixed
+
+- `--online` deduplicated fetches by URL alone, so two certificates issued by
+  the same CA — which name the same AIA responder — produced one OCSP request
+  and left the second certificate uncovered for a reason nothing in the report
+  named. OCSP is now deduplicated by responder URL **and** `certID`, and CRLs
+  by URL, which is the right key for a list. `--online-cache` names a cached
+  OCSP response by the `certID` it answers about as well as by its own bytes,
+  so two answers from one responder stay distinguishable.
+- Revocation evidence had three size limits: downloads and the
+  `--revocation-store` loader accepted 16 MiB while the tier walk silently
+  skipped anything over 8 MiB, so a CRL between the two figures loaded, was
+  stored, and then answered nothing. There is now one constant,
+  `openszigno_verify::MAX_REVOCATION_ITEM_BYTES` (16 MiB), used by the verifier,
+  the fetch cap and the store loader, and oversized evidence is reported —
+  as `revocation_data_invalid` in the tier walk, as a store-loading error, and
+  as an `online_fetch_failed` — naming the size and the limit instead of being
+  passed over in silence.
+
 ### Changed
 
 - Internal module split of the CLI crate: `crates/openszigno-cli/src/main.rs`
@@ -54,6 +94,15 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
 
 ### Added
 
+- `--online-allow-private` on `verify`, which permits `--online` to contact
+  loopback, private, link-local and unique-local destinations and the name
+  `localhost`. It requires `--online`, waives the address rules and nothing
+  else, and exists for an internal CA that really does publish on the
+  operator's own network.
+- `policy.revocation` has a fourth value, `online_no_anchors`, for a run given
+  `--online` with no trust anchor configured: nothing was fetched, and both the
+  `revocation_policy` check and every `revocation_status_unknown` message now
+  say why rather than leaving the caller with an unexplained gap.
 - `scripts/check-file-length.py`, run in CI's Documentation job, fails a
   tracked `crates/*/src/*.rs` file over 800 physical lines or a
   `crates/*/tests/*.rs` file over 1500, with a shrink-only allowlist in
