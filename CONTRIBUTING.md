@@ -86,6 +86,13 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
 
+CI's `lint` job also runs [`cargo-machete`](https://github.com/bnjbvr/cargo-machete)
+(`cargo machete`) to catch a dependency declared in a manifest but never
+used. If it flags a dependency that is only reached through a macro or a
+feature it cannot see, add it to that crate's
+`[package.metadata.cargo-machete] ignored = [...]` with a comment
+explaining why, rather than removing something still needed.
+
 `clippy::too_many_lines` is a workspace lint (`Cargo.toml`); `clippy.toml`
 sets `too-many-lines-threshold`. The ticket's target is 150, but the
 threshold is currently 484, the smallest value that passes today, because
