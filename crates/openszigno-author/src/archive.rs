@@ -122,7 +122,9 @@ mod tests {
                     media_type: None,
                     bytes: payload.to_vec(),
                     compress: true,
+                    encrypt: false,
                 }],
+                encryption: None,
             },
             &Limits::default(),
         )

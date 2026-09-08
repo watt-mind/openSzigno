@@ -20,6 +20,10 @@ pub enum ErrorCode {
     InvalidDossierTitle,
     InvalidMimeType,
     UnknownMimeType,
+    NoRecipients,
+    InvalidRecipientCertificate,
+    UnsupportedRecipientKey,
+    EncryptFailed,
 }
 
 impl ErrorCode {
@@ -35,6 +39,10 @@ impl ErrorCode {
             Self::InvalidDossierTitle => "invalid_dossier_title",
             Self::InvalidMimeType => "invalid_mime_type",
             Self::UnknownMimeType => "unknown_mime_type",
+            Self::NoRecipients => "no_recipients",
+            Self::InvalidRecipientCertificate => "invalid_recipient_certificate",
+            Self::UnsupportedRecipientKey => "unsupported_recipient_key",
+            Self::EncryptFailed => "encrypt_failed",
         }
     }
 }
@@ -82,6 +90,10 @@ mod tests {
             ErrorCode::InvalidDossierTitle,
             ErrorCode::InvalidMimeType,
             ErrorCode::UnknownMimeType,
+            ErrorCode::NoRecipients,
+            ErrorCode::InvalidRecipientCertificate,
+            ErrorCode::UnsupportedRecipientKey,
+            ErrorCode::EncryptFailed,
         ] {
             let text = code.as_str();
             assert!(!text.is_empty());
