@@ -579,7 +579,7 @@ writes one compact line; this is pretty-printed:
 | `list` | `dossier`, plus `documents`: an array in source order with `index`, `title`, `creation_date`, `mime_type` (`media_type`, `subtype`, `extension`, `charset`), `source_size`, `object_ref`, `transforms`, and `nested_dossier`. `source_size` is `null` when the profile omits `SourceSize`. |
 | `extract` | `extracted` (array of `document_index`, `dossier_path`, `filename`, `path`, `bytes`, `detected_type`, `declared_type`, `decrypted`), `extracted_count`, `skipped_count`, `nested_dossiers_extracted`, `selected`. |
 | `validate-structure` | `valid_structure`, `documents`, `conformance_warnings`, `cryptographic_verification_performed` (always `false`). |
-| `verify` | `verdict`, `verification_time`, `policy`, `limits`, `counts`, `checks`, `signatures`. See [The `verify` command](#the-verify-command). |
+| `verify` | `verdict`, `verification_time`, `policy`, `limits`, `counts`, `checks`, `documents`, `signatures`, `timestamps`. `documents` is the per-document coverage inventory and `timestamps` the container `es:TimeStamp` reports; both are always present, as empty arrays when there is nothing to report. See [The `verify` command](#the-verify-command). |
 
 `valid_structure` stays `true` whenever parsing succeeded;
 `conformance_warnings` counts the structural deviations, which are listed
