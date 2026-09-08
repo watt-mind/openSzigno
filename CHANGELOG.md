@@ -10,7 +10,14 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
 
 ## [Unreleased]
 
-Nothing yet.
+### Changed
+
+- Internal module split of the CLI crate: `crates/openszigno-cli/src/main.rs`
+  became `args`, `input`, `response`, `render/`, `commands/`, `extract/`, and
+  `trust`, and each unit test moved next to the code it covers. No behaviour
+  change — every flag, help text, message, stable code, exit status, and byte
+  of JSON and human output is what it was. See
+  [docs/architecture.md](docs/architecture.md#module-map-openszigno-cli).
 
 ## [0.4.0] - 2026-09-08
 
