@@ -311,13 +311,19 @@ fn ecdsa_p256_signature_verifies() {
 }
 
 /// An enveloped signature over the whole document: `URI=""` plus the
-/// enveloped-signature transform. It covers everything, so the scope is
-/// complete by construction.
+/// enveloped-signature transform. It covers everything *outside* the
+/// signature, which is the document's profile and payload object; the
+/// signature's own profile object is inside the subtree the transform removes,
+/// so it needs a reference of its own. See
+/// `an_enveloped_whole_document_reference_covers_nothing_inside_the_signature`.
 #[test]
 fn enveloped_signature_over_the_whole_document() {
     let pki = simple_pki();
     let mut signature = document_signature(pki.chain.clone());
-    signature.references = vec![RefSpec::to("").with_transforms(&[ENVELOPED_URI, C14N_EXC])];
+    signature.references = vec![
+        RefSpec::to("").with_transforms(&[ENVELOPED_URI, C14N_EXC]),
+        RefSpec::to("#sigobj-doc"),
+    ];
     signature.include_xades = false;
     let spec = DossierSpec {
         document_signature: Some(signature),
@@ -1307,13 +1313,15 @@ fn a_signed_properties_type_cannot_stand_in_for_resolution() {
 }
 
 /// A reference to the `ds:Object` that wraps the qualifying properties covers
-/// the `SignedProperties` inside it.
+/// the `SignedProperties` inside it: the ancestor is still in the effective
+/// node set, because no transform removed it.
 #[test]
 fn a_reference_to_an_ancestor_covers_the_signed_properties() {
     let pki = simple_pki();
     let mut signature = document_signature(pki.chain.clone());
-    // Cover the whole document instead of the individual elements.
-    signature.references = vec![RefSpec::to("").with_transforms(&[ENVELOPED_URI, C14N_EXC])];
+    // The qualifying-properties `ds:Object`, not the `SignedProperties` the
+    // other three references name directly.
+    signature.references[3] = RefSpec::to("#xadesobj-doc").with_transforms(&[C14N_EXC]);
     let spec = DossierSpec {
         document_signature: Some(signature),
         ..Default::default()
@@ -1322,6 +1330,59 @@ fn a_reference_to_an_ancestor_covers_the_signed_properties() {
     let report = run(&xml, vec![pki.root_der], "2020-06-01T00:00:00Z");
     assert_no_failures(&report);
     assert_check(&report, CheckCode::XadesPresent, CheckStatus::Passed);
+    assert_check(
+        &report,
+        CheckCode::ReferenceScopeComplete,
+        CheckStatus::Passed,
+    );
+    assert_eq!(
+        report.signatures[0].references[3].resolved_to.as_deref(),
+        Some("Dossier/Documents/Document/Signature/Object")
+    );
+}
+
+/// A whole-document reference carrying the enveloped-signature transform
+/// covers **nothing inside the signature it is written in**.
+///
+/// XMLDSig 1.1 clause 6.6.4: the transform "removes the whole `Signature`
+/// element containing T from the digest calculation of the `Reference` element
+/// containing T". The `xades:SignedProperties` — which carries the
+/// `SigningCertificate` binding — and the signature's own profile `ds:Object`
+/// both live there, so neither is in the digested bytes and neither may be
+/// credited to the reference. Treating them as covered let unauthenticated
+/// XAdES properties reach the later stages, which is what this regression
+/// guards.
+#[test]
+fn an_enveloped_whole_document_reference_covers_nothing_inside_the_signature() {
+    let pki = simple_pki();
+    let mut signature = document_signature(pki.chain.clone());
+    signature.references = vec![RefSpec::to("").with_transforms(&[ENVELOPED_URI, C14N_EXC])];
+    let spec = DossierSpec {
+        document_signature: Some(signature),
+        ..Default::default()
+    };
+    let xml = build(&spec, &[("doc", &pki.signer_key)]);
+    let report = run(&xml, vec![pki.root_der], "2020-06-01T00:00:00Z");
+    assert_check(
+        &report,
+        CheckCode::ReferenceScopeIncomplete,
+        CheckStatus::Failed,
+    );
+    let message = report.signatures[0]
+        .checks
+        .iter()
+        .find(|check| check.code == CheckCode::ReferenceScopeIncomplete)
+        .map(|check| check.message.clone())
+        .expect("the check was emitted");
+    assert!(message.contains("xades:SignedProperties"), "{message}");
+    assert!(
+        message.contains("ds:Signature/ds:Object holding es:SignatureProfile"),
+        "{message}"
+    );
+    // The document's own profile and payload object sit outside the removed
+    // subtree, so they stay covered and are not named.
+    assert!(!message.contains("es:DocumentProfile"), "{message}");
+    assert!(!message.contains("es:Document/ds:Object"), "{message}");
 }
 
 /// A caller must always see what each URI resolved to, even when the run
