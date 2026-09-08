@@ -195,6 +195,11 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
   `Fixes`/`Closes`/`Refs LAB-<n>` line unless the pull request is
   bot-authored or labelled `no-ticket`. See
   [CONTRIBUTING.md](CONTRIBUTING.md#commit-messages).
+- The CI `lint` job now runs `cargo machete` to catch dependencies declared
+  in a manifest but never used. See
+  [CONTRIBUTING.md](CONTRIBUTING.md#required-checks) for how to reproduce it
+  locally and how to record a dependency that is only reachable through a
+  macro or a feature.
 - Golden output contract tests under `tests/golden/`: the stdout and exit
   status of `inspect`, `list`, `validate-structure`, `verify` and `extract`
   over every fixture in `tests/fixtures/`, in `--json` and human mode, plus
