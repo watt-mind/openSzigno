@@ -12,8 +12,9 @@
 //! - **Only for certificates the run actually validated a path for.** A URL is
 //!   contacted only for a certificate on a certification path the verifier
 //!   built to a **configured trust anchor**, for a signature or a timestamp it
-//!   was evaluating — the set `VerifyReport::validated_path_certificates`
-//!   returns from an offline pre-pass. Checking that an embedded issuer signed
+//!   was evaluating: the set
+//!   `VerifyReport::validated_path_certificates_at` returns from an
+//!   offline-style pass. Checking that an embedded issuer signed
 //!   an embedded certificate proves nothing — whoever writes the dossier
 //!   writes both — so without this rule any file handed to the tool could
 //!   choose the tool's next network destination, and a certificate parked
@@ -43,9 +44,17 @@
 //!   would be handing an attacker who controls that variable a way to feed it
 //!   chosen bytes — bytes that would still have to verify, but that is not a
 //!   reason to accept the ambiguity.
-//! - **Fetching only fills gaps.** Nothing is fetched for a certificate the
-//!   caller's own material already answers for, which is decided by asking the
-//!   verifier's own offline code, not by a cheaper approximation of it.
+//! - **Fetching only fills gaps, at the time that matters.** Nothing is
+//!   fetched for a certificate the caller's own material already answers for,
+//!   which is decided by asking the verifier's own offline code, not by a
+//!   cheaper approximation of it. The question is asked at the validation time
+//!   each path was evaluated at, because coverage is a statement about an
+//!   instant: a CRL that expired years ago still covers a signer path a
+//!   verified timestamp pins to an instant inside its window.
+//! - **In bounded rounds.** Evidence fetched for one path can create another,
+//!   so the caller alternates verification and fetching a bounded number of
+//!   times and hands each round only the certificates that round made
+//!   eligible. See `commands::verify`.
 //! - **One request per question, not per URL.** CRLs are deduplicated by URL,
 //!   because a CRL is a list and one copy answers for everyone on it. OCSP is
 //!   deduplicated by responder *and* `certID`, because a response answers
