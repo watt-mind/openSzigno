@@ -32,6 +32,7 @@ mod encrypt;
 mod error;
 mod mime;
 mod render;
+pub mod sign;
 mod title;
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
