@@ -6,6 +6,15 @@
 //! `EnvelopedData` (and naming, rather than rejecting, `AuthEnvelopedData`),
 //! and unwrapping a `KeyTransRecipientInfo`'s encrypted key with
 //! RSAES-PKCS1-v1_5 or RSAES-OAEP.
+//!
+//! The unwrapping itself never fails. Reporting that a PKCS#1 v1.5 block was
+//! unusable is what turns this tool into a Bleichenbacher/Marvin oracle for
+//! whoever supplied the dossier, so [`keytrans`](super::keytrans) rejects
+//! *implicitly* instead: it substitutes a deterministic synthetic key of the
+//! announced length and lets the content cipher fail, exactly as OpenSSL
+//! 3.2+'s `RSA_PKCS1_IMPLICIT_REJECTION` and Go's `crypto/rsa` do, and as
+//! RFC 5246 §7.4.7.1 prescribes for the same problem. Everything after the
+//! RSA private operation therefore runs unconditionally.
 
 use cms::content_info::ContentInfo;
 use cms::enveloped_data::{EnvelopedData, KeyTransRecipientInfo};
@@ -18,7 +27,7 @@ use zeroize::Zeroizing;
 
 use crate::Error;
 
-use super::{CmsOutcome, ErrorCode, decrypt_failed, invalid_cms};
+use super::{CmsOutcome, ErrorCode, invalid_cms, keytrans};
 
 /// RFC 5652 §3: the `ContentInfo` content types this module can be handed.
 pub(super) const ID_ENVELOPED_DATA: ObjectIdentifier =
@@ -89,36 +98,38 @@ pub(super) enum Unwrapped {
 
 /// Unwrap a `KeyTransRecipientInfo`'s encrypted content-encryption key.
 ///
-/// `enc_key` is the RSA ciphertext, and it comes straight from the dossier: an
-/// attacker who can submit chosen dossiers and observe how long, or whether,
-/// this call fails controls the ciphertext in a Bleichenbacher/Marvin-style
-/// (RUSTSEC-2023-0071) chosen-ciphertext attack against PKCS#1 v1.5 key
-/// transport. Decryption is blinded (a fresh random factor masks the private
-/// exponentiation) to close the timing side-channel `rsa` 0.9's plain
-/// `decrypt` leaves open in its modular exponentiation; see `deny.toml` for
-/// what blinding does and does not mitigate here.
+/// `enc_key` is the RSA ciphertext, and it comes straight from the dossier, so
+/// an attacker who can submit chosen dossiers controls it. The result is
+/// therefore never an error and always exactly `key_bytes` long: a block that
+/// does not unpad, or one carrying a key of some other length, is answered
+/// with the synthetic key [`keytrans`](super::keytrans) derives, and the
+/// caller cannot tell the two apart. Both algorithms keep `rsa`'s `OsRng`
+/// blinding on the private exponentiation.
+///
+/// `key_bytes` is the content cipher's key length, which the caller has
+/// already resolved from the `contentEncryptionAlgorithm`. Only the choice of
+/// key-transport algorithm, which is public, decides anything here.
 pub(super) fn unwrap_key(
     recipient: &KeyTransRecipientInfo,
     private: &RsaPrivateKey,
+    key_bytes: usize,
 ) -> Result<Unwrapped, Error> {
     let algorithm = &recipient.key_enc_alg;
     let wrapped = recipient.enc_key.as_bytes();
-    let mut rng = rand_core::OsRng;
-    let key = if algorithm.oid == RSA_ENCRYPTION {
-        private
-            .decrypt_blinded(&mut rng, rsa::Pkcs1v15Encrypt, wrapped)
-            .map_err(|_| decrypt_failed())?
+    if algorithm.oid == RSA_ENCRYPTION {
+        Ok(Unwrapped::Key(keytrans::unwrap_pkcs1v15(
+            private, wrapped, key_bytes,
+        )))
     } else if algorithm.oid == RSAES_OAEP {
         match oaep_padding(algorithm)? {
-            Some(padding) => private
-                .decrypt_blinded(&mut rng, padding, wrapped)
-                .map_err(|_| decrypt_failed())?,
-            None => return Ok(Unwrapped::UnsupportedAlgorithm(RSAES_OAEP.to_string())),
+            Some(padding) => Ok(Unwrapped::Key(keytrans::unwrap_oaep(
+                private, padding, wrapped, key_bytes,
+            ))),
+            None => Ok(Unwrapped::UnsupportedAlgorithm(RSAES_OAEP.to_string())),
         }
     } else {
-        return Ok(Unwrapped::UnsupportedAlgorithm(algorithm.oid.to_string()));
-    };
-    Ok(Unwrapped::Key(Zeroizing::new(key)))
+        Ok(Unwrapped::UnsupportedAlgorithm(algorithm.oid.to_string()))
+    }
 }
 
 /// The OAEP padding an `id-RSAES-OAEP` algorithm identifier asks for, or

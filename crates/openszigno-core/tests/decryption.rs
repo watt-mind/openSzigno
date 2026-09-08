@@ -164,6 +164,15 @@ fn a_document_addressed_to_somebody_else_is_skipped_not_an_error() {
     );
 }
 
+/// A wrapped key only somebody else can unwrap is answered like any other
+/// unusable block.
+///
+/// Under implicit rejection this is not a fixed code either: the recipient's
+/// key turns the stranger's ciphertext into a block that does not unpad, so a
+/// synthetic key is substituted and the answer comes from
+/// `AFTER_SUBSTITUTION`, the same set a malformed block reaches. Asserting
+/// the set rather than one code is what keeps this test from depending on
+/// what the garbage happened to be.
 #[test]
 fn the_wrong_key_for_a_matching_recipient_is_a_plain_decryption_failure() {
     // The stranger's certificate names the recipient, but the key that can
@@ -202,13 +211,199 @@ fn the_wrong_key_for_a_matching_recipient_is_a_plain_decryption_failure() {
     message[at..at + foreign.len()].copy_from_slice(&foreign);
 
     let xml = dossier_with_payload(&message, &["encrypt", "base64"], PLAINTEXT.len() as u64);
-    let error = decode(&xml, Some(&key), false).expect_err("the wrong key must fail");
-    assert_eq!(error.code(), ErrorCode::DecryptFailed);
-    assert_eq!(
-        error.message(),
-        "decryption failed",
-        "the message must not describe which step failed"
+    let answer = outcome(decode(&xml, Some(&key), false));
+    assert!(answer.is_err(), "the wrong key must fail");
+    assert_says_nothing(&answer, "a stranger's wrapped key");
+}
+
+/// The codes the decode path may legitimately reach once an unusable
+/// content-encryption key has been substituted.
+///
+/// Implicit rejection moves the failure downstream instead of reporting it,
+/// so the outcome is whatever the content cipher and the checks after it make
+/// of a plaintext decrypted under the wrong key. Almost always the CBC PKCS#7
+/// padding is invalid and that is `decrypt_failed`; roughly once in 256 the
+/// padding happens to be valid, the "plaintext" is garbage of some other
+/// length, and the declared source size is what rejects it. Both are answers
+/// about the document, neither is an answer about the wrapped key, and which
+/// of the two a given dossier gets is a property of that dossier, not of the
+/// step that failed.
+const AFTER_SUBSTITUTION: [ErrorCode; 2] =
+    [ErrorCode::DecryptFailed, ErrorCode::SourceSizeMismatch];
+
+/// Words that would give the game away if they ever reached a message.
+const TELLTALE: [&str; 6] = [
+    "pad",
+    "wrap",
+    "unwrap",
+    "rsa",
+    "recipient key",
+    "key transport",
+];
+
+/// What one dossier turned into, reduced to what a caller can actually see.
+fn outcome(
+    result: Result<DecodeOutcome, openszigno_core::Error>,
+) -> Result<usize, (ErrorCode, String)> {
+    match result {
+        Ok(DecodeOutcome::Decoded(decoded)) => Ok(decoded.bytes.len()),
+        Ok(DecodeOutcome::Unsupported(reason)) => panic!("unexpected skip: {reason:?}"),
+        Err(error) => Err((error.code(), error.message().to_owned())),
+    }
+}
+
+fn assert_says_nothing(outcome: &Result<usize, (ErrorCode, String)>, case: &str) {
+    let Err((code, message)) = outcome else {
+        return;
+    };
+    assert!(
+        AFTER_SUBSTITUTION.contains(code),
+        "{case}: {code:?} is outside the set an unusable key may produce"
     );
+    let lowered = message.to_lowercase();
+    for word in TELLTALE {
+        assert!(
+            !lowered.contains(word),
+            "{case}: the message names {word:?}, which describes the failing step"
+        );
+    }
+}
+
+/// A malformed wrapped key and a well-formed wrap of the wrong key must be
+/// answered from the same closed set.
+///
+/// This is the whole point of implicit rejection. The first block does not
+/// unpad and is replaced by a synthetic key; the second unpads perfectly and
+/// is simply not the key the content was encrypted under. If the recipient
+/// ever answered those two differently -- a different code, a message naming
+/// the padding or the wrapped key, one failing where the other did not -- the
+/// difference would be a Bleichenbacher oracle, because the attacker chose
+/// which of the two to send.
+///
+/// The assertion is about the *set* the answers come from, not one fixed
+/// code, because what a substituted key produces downstream depends on the
+/// garbage it decrypts to. Both messages are seeded and so identical on every
+/// platform, but pinning one code would be pinning an accident of the
+/// garbage rather than the property under test.
+#[test]
+fn a_malformed_wrapped_key_and_a_well_formed_wrong_one_are_one_answer() {
+    let recipient = recipient();
+    let key = key_of(&recipient);
+    for cipher in [Cipher::Aes128Cbc, Cipher::Aes192Cbc, Cipher::Aes256Cbc] {
+        for transport in [KeyTransport::Pkcs1v15, KeyTransport::OaepSha256] {
+            let message = Message {
+                plaintext: PLAINTEXT,
+                cipher,
+                transport,
+                naming: Naming::IssuerAndSerial,
+            };
+            let intact = common::envelope::envelope(&message, &recipient);
+            let wrapped = wrapped_key(&intact);
+            let at = find(&intact, &wrapped).expect("the wrapped key is in the message");
+
+            // One byte of the RSA ciphertext flipped: the block will not
+            // unpad, and the substitution happens.
+            let mut malformed = intact.clone();
+            malformed[at + 100] ^= 0x01;
+
+            // A key of exactly the right length for the announced cipher,
+            // wrapped in valid padding for this very recipient. It unpads,
+            // and it is still the wrong key.
+            let mut wrong = intact.clone();
+            let replacement = common::envelope::wrap_bytes(
+                &recipient,
+                transport,
+                &common::envelope::filler(key_bytes(cipher), 0x3c),
+            );
+            assert_eq!(replacement.len(), wrapped.len());
+            wrong[at..at + replacement.len()].copy_from_slice(&replacement);
+
+            let case = format!("{cipher:?} {transport:?}");
+            let answers: Vec<_> = [&malformed, &wrong]
+                .into_iter()
+                .map(|body| {
+                    let xml =
+                        dossier_with_payload(body, &["encrypt", "base64"], PLAINTEXT.len() as u64);
+                    outcome(decode(&xml, Some(&key), false))
+                })
+                .collect();
+            for (which, answer) in ["a malformed block", "a well-formed wrong key"]
+                .into_iter()
+                .zip(answers.iter())
+            {
+                assert_says_nothing(answer, &format!("{case}: {which}"));
+                assert!(
+                    answer.is_err(),
+                    "{case}: {which} must not decode to the real plaintext"
+                );
+            }
+        }
+    }
+}
+
+/// A content key that unpads cleanly but is the wrong length for the
+/// announced cipher goes down the same path as any other unusable block.
+#[test]
+fn a_content_key_of_the_wrong_length_is_not_a_separate_answer() {
+    let recipient = recipient();
+    let key = key_of(&recipient);
+    for cipher in [Cipher::Aes128Cbc, Cipher::Aes192Cbc, Cipher::Aes256Cbc] {
+        let message = common::envelope::damaged(
+            &Message {
+                plaintext: PLAINTEXT,
+                cipher,
+                transport: KeyTransport::Pkcs1v15,
+                naming: Naming::IssuerAndSerial,
+            },
+            &recipient,
+            Damage::MismatchedContentKeyLength,
+        );
+        let xml = dossier_with_payload(&message, &["encrypt", "base64"], PLAINTEXT.len() as u64);
+        let answer = outcome(decode(&xml, Some(&key), false));
+        assert_says_nothing(&answer, &format!("{cipher:?}"));
+        assert!(answer.is_err(), "{cipher:?}: a wrong-length key must fail");
+    }
+}
+
+/// Substitution is deterministic: the same dossier decrypted twice with the
+/// same key gives the same answer, so a repeat submission tells an attacker
+/// nothing a single one did not.
+#[test]
+fn an_unusable_wrapped_key_gives_the_same_answer_every_time() {
+    let recipient = recipient();
+    let key = key_of(&recipient);
+    for offset in [7usize, 100, 200] {
+        let mut message = common::envelope::envelope(
+            &Message {
+                plaintext: PLAINTEXT,
+                cipher: Cipher::Aes256Cbc,
+                transport: KeyTransport::Pkcs1v15,
+                naming: Naming::IssuerAndSerial,
+            },
+            &recipient,
+        );
+        let wrapped = wrapped_key(&message);
+        let at = find(&message, &wrapped).expect("the wrapped key is in the message");
+        message[at + offset] ^= 0xff;
+        let xml = dossier_with_payload(&message, &["encrypt", "base64"], PLAINTEXT.len() as u64);
+
+        let first = outcome(decode(&xml, Some(&key), false));
+        let second = outcome(decode(&xml, Some(&key), false));
+        assert_eq!(
+            first, second,
+            "offset {offset}: the same input must give the same outcome"
+        );
+        assert_says_nothing(&first, &format!("offset {offset}"));
+    }
+}
+
+/// The key length the announced content cipher takes.
+fn key_bytes(cipher: Cipher) -> usize {
+    match cipher {
+        Cipher::Aes128Cbc => 16,
+        Cipher::Aes192Cbc | Cipher::TripleDesCbc => 24,
+        Cipher::Aes256Cbc | Cipher::Unsupported => 32,
+    }
 }
 
 /// The `encryptedKey` OCTET STRING of a synthetic message: the last 256 bytes

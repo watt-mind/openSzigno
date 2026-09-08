@@ -35,6 +35,30 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
   qualifying properties are unaffected, and whitespace and comments between
   children are ignored. See
   [docs/architecture.md](docs/architecture.md#xmldsig-structural-rules).
+- `extract --decrypt-key` no longer reports that a PKCS#1 v1.5 wrapped
+  content-encryption key failed to unpad. The RSA key transport now rejects
+  **implicitly**, the mitigation OpenSSL 3.2+ ships as
+  `RSA_PKCS1_IMPLICIT_REJECTION` and RFC 5246 section 7.4.7.1 prescribes: the
+  blinded private operation runs once, the block is unpadded in constant time
+  against the announced content cipher's key length, and any fault is answered
+  with a deterministic synthetic key derived from a per-key secret over the
+  ciphertext, after which content decryption runs unconditionally. A bad
+  wrapped key now fails as the content cipher does, with the same
+  `decrypt_failed` code and `decryption failed` message as a tampered body, so
+  a caller who submits chosen dossiers can no longer read a
+  Bleichenbacher/Marvin padding oracle (RUSTSEC-2023-0071) off the outcome,
+  the error, or the coarse timing. RSAES-OAEP takes the same shape. What
+  remains is `rsa` 0.9's non-constant-time private exponentiation, which
+  blinding masks and `rsa` 0.10 will retire; the `deny.toml` ignore now covers
+  only that. See
+  [SECURITY.md](SECURITY.md#rsa-key-transport-decryption-implicit-rejection)
+  and
+  [docs/architecture.md](docs/architecture.md#rsa-key-transport-implicit-rejection).
+  One consequence: an unusable wrapped key is decrypted under the synthetic
+  key, so the failure surfaces further down. Almost always that is the content
+  cipher's padding, as `decrypt_failed`; roughly once in 256 the padding of
+  garbage is valid by chance and the answer is `source_size_mismatch` instead.
+  Decryption never asserted authenticity.
 
 ## [0.5.0] - 2026-09-08
 

@@ -25,15 +25,18 @@
 //! could unwrap it, not that anybody signed it.
 //!
 //! The module is split by concern: [`cms`] parses and validates the CMS
-//! `ContentInfo` / `EnvelopedData` / `RecipientInfo` structure and unwraps the
-//! content-encryption key; [`ciphers`] identifies and runs the content
-//! cipher; [`keys`] loads the recipient's private key and matches it against
-//! a `RecipientIdentifier`. This module ties the three together and holds the
-//! public entry points.
+//! `ContentInfo` / `EnvelopedData` / `RecipientInfo` structure; [`keytrans`]
+//! runs the RSA private operation and unwraps the content-encryption key
+//! under implicit rejection, so an unusable key transport is never
+//! distinguishable from a usable one; [`ciphers`] identifies and runs the
+//! content cipher; [`keys`] loads the recipient's private key and matches it
+//! against a `RecipientIdentifier`. This module ties the four together and
+//! holds the public entry points.
 
 mod ciphers;
 mod cms;
 mod keys;
+mod keytrans;
 
 use ::cms::enveloped_data::RecipientInfo;
 use der::asn1::OctetString;
@@ -124,17 +127,18 @@ pub(crate) fn decrypt_cms(
         ));
     }
 
-    let content_encryption_key = match cms::unwrap_key(recipient, &key.private)? {
+    // The cipher is resolved first because the key length it announces is
+    // what the unwrap unpads against. `unwrap_key` cannot fail and always
+    // returns `cipher.key_bytes` bytes: an unusable RSA block is replaced by
+    // a synthetic key, and the run continues into the content cipher either
+    // way. There is deliberately no check here that would tell the two
+    // apart -- that check is the padding oracle.
+    let content_encryption_key = match cms::unwrap_key(recipient, &key.private, cipher.key_bytes)? {
         cms::Unwrapped::Key(cek) => cek,
         cms::Unwrapped::UnsupportedAlgorithm(oid) => {
             return Ok(CmsOutcome::UnsupportedAlgorithm(oid));
         }
     };
-    if content_encryption_key.len() != cipher.key_bytes {
-        // A CEK of the wrong length is what a wrong key usually produces, so
-        // it is answered exactly like a failed unwrap.
-        return Err(decrypt_failed());
-    }
 
     let initialisation_vector = enveloped
         .encrypted_content
@@ -200,7 +204,9 @@ fn invalid_cms() -> Error {
 ///
 /// It deliberately does not say whether the key unwrap, the CEK length, or the
 /// padding was what failed: telling those apart is exactly the distinction a
-/// padding oracle needs.
+/// padding oracle needs. Under implicit rejection the RSA half no longer
+/// raises it at all, so a failed key transport reaches the caller as the
+/// content cipher's own failure, indistinguishable from a tampered body.
 fn decrypt_failed() -> Error {
     Error::new(ErrorCode::DecryptFailed, "decryption failed")
 }
