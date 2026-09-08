@@ -96,7 +96,7 @@ ES3_TEST_CORPUS_DIR=/private/corpus cargo test \
 | `crates/openszigno-core/src/` | `lib.rs`, `parse.rs`, `xml.rs`, `model.rs`, `sniff.rs`, `scan.rs`, `decode.rs`, `decrypt/`, `inventory.rs`, `error.rs` |
 | `crates/openszigno-verify/src/` | `lib.rs`, `c14n.rs`, `dsig.rs`, `references.rs`, `scope.rs`, `countersign.rs`, `signature/`, `coverage.rs`, `xades.rs`, `certs/`, `revocation/`, `tsa/`, `estimestamp.rs`, `trustlist/`, `policy.rs`, `codes.rs`, `trust.rs`, `report.rs`, `embedded.rs` |
 | `crates/openszigno-verify/tests/` | Synthetic PKI and the in-tests XMLDSig signer (`common/`), which must never move into a shipped crate |
-| `crates/openszigno-cli/src/` | `main.rs` (dispatch), `args.rs`, `input.rs`, `response.rs`, `render/`, `commands/`, `extract/` (planning, naming, `output_dir.rs`), `trust.rs`, `revocation_store.rs`, `online/` |
+| `crates/openszigno-cli/src/` | `main.rs` (dispatch), `args.rs`, `input.rs`, `response.rs`, `render/`, `commands/`, `extract/` (planning, naming, `output_dir.rs`), `trust.rs`, `revocation_store.rs`, `online/` (`mod.rs` transport and cache, `gaps.rs` what to fetch and for whom, `destination.rs`, `pinned.rs`) |
 | `tests/fixtures/` | Synthetic `.es3` fixtures + `LICENSE` + `README.md` |
 | `docs/` | `index.md` lists them all: `architecture.md` (CLI contract), `trust.md` (trust and revocation material), `testing.md` (test layout, fixture policy), `roadmap.md` (milestones, risks), `releasing.md`, `es3-specification.md`, `references.md`, `research.md`, `verify-design.md` |
 | `samples/` | Private dossiers, ignored — see boundary above |

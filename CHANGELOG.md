@@ -163,6 +163,25 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
 
 ### Fixed
 
+- `--online` ran one offline pre-pass and then one fetch, so evidence a fetch
+  produced could not open a path the pre-pass had ruled out. A signer whose
+  certificate has expired has no validated path at the clock, and so nothing
+  may be fetched for it; fetching the revocation evidence its signature
+  timestamp's authority needed can verify that timestamp, move the signer's
+  validation time back to the instant the token proves and restore its path,
+  but by then fetching had finished and the signer's own revocation data was
+  never requested. Fetching now runs in at most three bounded rounds: each
+  round verifies with everything fetched so far and fetches only for the
+  certificates that round made eligible, stopping as soon as a round turns up
+  nothing new. Coverage is judged at the validation time each path was
+  actually evaluated at rather than at one global time, so evidence that is
+  fresh at a proven historical instant is no longer re-requested for being
+  stale at the clock. The certificate budget (32) is a budget for the run, the
+  trust gate, the destination policy, `--online-cache` and the
+  `online_fetch_failed` checks are unchanged, and the JSON envelope is
+  unchanged. `VerifyReport::validated_path_certificates_at` is the new
+  verify-crate method the CLI reads the set and its times from; the existing
+  `validated_path_certificates` keeps its signature and its meaning.
 - `--online` deduplicated fetches by URL alone, so two certificates issued by
   the same CA — which name the same AIA responder — produced one OCSP request
   and left the second certificate uncovered for a reason nothing in the report

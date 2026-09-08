@@ -432,10 +432,24 @@ openszigno verify dossier.es3 --json \
   the `authorityInfoAccess` OCSP responders, read out of the certificates
   themselves. Nothing is taken from the dossier's XML, and no reference in the
   dossier is ever dereferenced.
-- **Only gaps.** A certificate your own material already answers for is never
-  fetched for, and the question is put to the verifier's own offline code, not
-  to an approximation of it. Opening a dossier you already have data for
-  generates no traffic at all.
+- **Only gaps, judged at the time that matters.** A certificate your own
+  material already answers for is never fetched for, and the question is put
+  to the verifier's own offline code, not to an approximation of it. Opening a
+  dossier you already have data for generates no traffic at all. The question
+  is asked at the validation time each path was evaluated at: the `genTime` a
+  verified timestamp proves, for a historical signer path; the `genTime` a
+  token asserts, for the timestamp authority's own path; `--at` or the clock
+  otherwise. A CRL that expired in 2021 still covers a signature a verified
+  timestamp pins to 2020, so nothing is fetched for it, and the same CRL says
+  nothing about a path validated today, so that gap is fetched.
+- **In bounded rounds.** Evidence fetched for one path can create another. A
+  signer whose certificate has expired has no validated path at all until its
+  signature timestamp is verified, and verifying that timestamp can itself
+  need the timestamp authority's revocation data. So one `--online` run
+  alternates verification and fetching for at most three rounds: each round
+  verifies with everything fetched so far, fetches only for the certificates
+  that round made eligible, and the run stops as soon as a round turns up
+  nothing new. Every limit below is a limit on the run, not on a round.
 - **Only revocation data.** Never trust anchors, never trusted lists.
 - **The scheme the CA published.** `http` and `https` are the only two schemes
   fetched, and neither is rewritten. TLS is not what makes the answer
@@ -482,7 +496,8 @@ openszigno verify dossier.es3 --json \
   certificates behind one responder are two questions.
 - **Bounded.** 5 s to connect, 20 s per fetch, 16 MiB for a CRL — the same
   limit the verifier itself will parse — 64 KiB for an OCSP response, at most 3
-  redirects and **never to another host**, at most 32 certificates per run.
+  redirects and **never to another host**, at most 32 certificates per run,
+  rounds included.
 - **Judged offline.** Every fetched artefact goes through exactly the rules in
   [What makes data unusable](#what-makes-data-unusable). A CRL from the wrong
   CA, a stale one, or an HTML error page changes nothing.

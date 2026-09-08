@@ -15,11 +15,17 @@ mod online_support;
 
 use std::time::{Duration, Instant};
 
-use online_support::common::{CrlSpec, RevokedSpec, build_crl, keys, rsa_key};
+use online_support::common::{
+    CertSpec, CrlSpec, DossierSpec, OcspSpec, RevokedSpec, SigningCertificateSpec, TestKey,
+    TimestampSpec, authority_info_access_extension, build, build_crl, build_ocsp,
+    crl_distribution_point_extension, document_signature, extended_key_usage_extension, issued_by,
+    keys, rsa_key, self_signed,
+};
 use online_support::{
     AT, Reply, checks, dossier, end_entity_source, good_crl, good_ocsp, json, pki, reserved, run,
     scratch, serve_on, unauthorised_ocsp, verify_online, with_urls, write_all,
 };
+use rcgen::BasicConstraints;
 
 // ---------------------------------------------------------------------------
 // The happy paths
@@ -456,4 +462,177 @@ fn the_online_flags_require_online() {
         arguments.extend(extra);
         assert_eq!(run(&arguments).status.code(), Some(2));
     }
+}
+
+// ---------------------------------------------------------------------------
+// Bounded verification/fetch rounds
+// ---------------------------------------------------------------------------
+
+/// RFC 3161 section 2.3: the only extended key usage a TSA certificate may
+/// carry.
+const ID_KP_TIME_STAMPING: &str = "1.3.6.1.5.5.7.3.8";
+/// The instant the synthetic timestamp authority asserts the signature existed
+/// at. It is inside the signer's validity and inside every synthetic CRL and
+/// OCSP window, and years before the clock this test actually runs at.
+const GEN_TIME: &str = "2020-06-01T09:00:00Z";
+
+/// A root, a signer whose certificate has expired, and a timestamp authority
+/// under the same root. Each end-entity certificate publishes the URLs the
+/// test wants fetched.
+struct HistoricalPki {
+    root_der: Vec<u8>,
+    signer_der: Vec<u8>,
+    signer_key: TestKey,
+    tsa_der: Vec<u8>,
+}
+
+fn historical_pki(signer_crl: &str, tsa_ocsp: &str, tsa_crl: &str) -> HistoricalPki {
+    let root_key = rsa_key(keys::ROOT_RSA2048);
+    let root = self_signed(
+        &CertSpec::ca("openSzigno Test Root", BasicConstraints::Unconstrained),
+        &root_key,
+    );
+
+    let signer_key = rsa_key(keys::SIGNER_RSA2048);
+    let mut signer_spec = CertSpec::signer("openSzigno Test Signer");
+    // Expired long before the clock this test runs at, so the signer has no
+    // validated path until the timestamp is believed.
+    signer_spec.not_after = (2021, 1, 1);
+    signer_spec.custom_extensions = vec![crl_distribution_point_extension(signer_crl)];
+    let signer = issued_by(&signer_spec, &signer_key, &root, &root_key);
+
+    let mut tsa_spec = CertSpec::signer("openSzigno Test TSA");
+    tsa_spec.custom_extensions = vec![
+        extended_key_usage_extension(&[ID_KP_TIME_STAMPING], true),
+        authority_info_access_extension(tsa_ocsp),
+        crl_distribution_point_extension(tsa_crl),
+    ];
+    let tsa = issued_by(&tsa_spec, &rsa_key(keys::THIRD_RSA2048), &root, &root_key);
+
+    HistoricalPki {
+        root_der: root.der,
+        signer_der: signer.der,
+        signer_key,
+        tsa_der: tsa.der,
+    }
+}
+
+/// A document signature over the payload, with an RFC 3161 signature timestamp
+/// over its `ds:SignatureValue`.
+fn timestamped_dossier(pki: &HistoricalPki) -> String {
+    let mut signature = document_signature(vec![pki.signer_der.clone()]);
+    signature.signing_certificate = Some(SigningCertificateSpec::v1(pki.signer_der.clone()));
+    signature.timestamp = Some(TimestampSpec::new(
+        rsa_key(keys::THIRD_RSA2048),
+        pki.tsa_der.clone(),
+        GEN_TIME,
+    ));
+    let spec = DossierSpec {
+        document_signature: Some(signature),
+        ..Default::default()
+    };
+    build(&spec, &[("doc", &pki.signer_key)])
+}
+
+/// An OCSP response about the timestamp authority, signed by the CA that
+/// issued it, so no delegated responder certificate has to travel with it.
+fn ocsp_about(pki: &HistoricalPki, subject: &[u8]) -> Vec<u8> {
+    let mut spec = OcspSpec::new(
+        pki.root_der.clone(),
+        subject.to_vec(),
+        rsa_key(keys::ROOT_RSA2048),
+    );
+    spec.include_responder_certificate = false;
+    build_ocsp(&spec)
+}
+
+/// The finding this suite exists for.
+///
+/// The signer's certificate expired years ago, so at the clock it has no
+/// validated path and nothing may be fetched for it. Its signature timestamp
+/// is what restores that path, and the timestamp authority's own certificate
+/// needs revocation evidence that is only online. A run that fetched once and
+/// then verified would obtain the timestamp authority's evidence and stop,
+/// leaving the signer's own revocation data unfetched and the dossier
+/// `indeterminate` for want of a request it never made.
+///
+/// Both requests have to happen, and the verdict has to be `valid`.
+#[test]
+fn a_historical_signer_and_its_timestamp_authority_are_both_fetched_for() {
+    let (listener, address) = reserved();
+    let url = |path: &str| format!("http://{address}{path}");
+    let pki = historical_pki(&url("/signer.crl"), &url("/tsa.ocsp"), &url("/tsa.crl"));
+    let server = serve_on(
+        listener,
+        address,
+        vec![
+            ("/tsa.ocsp", Reply::Body(ocsp_about(&pki, &pki.tsa_der))),
+            (
+                "/signer.crl",
+                Reply::Body(build_crl(&CrlSpec::new(
+                    pki.root_der.clone(),
+                    rsa_key(keys::ROOT_RSA2048),
+                ))),
+            ),
+            // Never requested: the OCSP response above already covers the
+            // timestamp authority at the instant its path is evaluated at.
+            ("/tsa.crl", Reply::Status(500)),
+        ],
+    );
+
+    let directory = scratch();
+    let (dossier_path, store) =
+        write_all(directory.path(), &timestamped_dossier(&pki), &pki.root_der);
+    // No `--at`: the whole point is that the clock is now, the signer expired
+    // before it, and a verified timestamp is what moves the signer's own
+    // validation time back to the instant it proves.
+    let report = json(&run(&[
+        "verify",
+        dossier_path.to_str().expect("a UTF-8 path"),
+        "--json",
+        "--trust-store",
+        store.to_str().expect("a UTF-8 path"),
+        "--online",
+        "--online-allow-private",
+    ]));
+
+    assert_eq!(
+        report["data"]["verdict"].as_str(),
+        Some("valid"),
+        "{:?}",
+        checks(&report)
+    );
+    assert_eq!(
+        report["data"]["signatures"][0]["validation_time"].as_str(),
+        Some(GEN_TIME)
+    );
+    assert_eq!(
+        end_entity_source(&report).as_deref(),
+        Some("online_crl"),
+        "{:?}",
+        checks(&report)
+    );
+
+    let requested: Vec<String> = server
+        .seen()
+        .into_iter()
+        .map(|request| request.path)
+        .collect();
+    assert!(
+        requested.contains(&"/tsa.ocsp".to_owned()),
+        "the timestamp authority's evidence was not fetched: {requested:?}"
+    );
+    assert!(
+        requested.contains(&"/signer.crl".to_owned()),
+        "the historical signer's evidence was not fetched: {requested:?}"
+    );
+    // Coverage is judged at the time each path was evaluated at. The fetched
+    // OCSP response is long expired at the clock and perfectly fresh at the
+    // instant the timestamp authority's path is validated at, so asking the
+    // question at the clock would send a second, pointless request.
+    assert_eq!(
+        requested.len(),
+        2,
+        "exactly the two needed requests were expected: {requested:?}"
+    );
 }

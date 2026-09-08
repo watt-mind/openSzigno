@@ -100,8 +100,12 @@ crates/openszigno-cli/src/
   trust.rs            # --trust-store, --trust-list, and --lotl loading
   revocation_store.rs # --revocation-store loading
   online/             # --online fetching, the only code that opens a socket
-    mod.rs            #   the trust gate, the gap search, the transport, the cache
+    mod.rs            #   the transport, its bounds and failure classes, and
+                      #     the --online-cache writer
+    gaps.rs           #   what to fetch and for whom: the trust gate, coverage
+                      #     at each path's own validation time, the URL order
     destination.rs    #   which URLs and addresses may be contacted at all
+    pinned.rs         #   connecting only to the addresses the policy approved
 ```
 
 Two boundaries are load-bearing rather than tidiness. Every command reaches
@@ -1937,9 +1941,11 @@ does so under a fixed policy the caller cannot widen.
 the verifier **actually validated to a configured trust anchor** — from
 `--trust-store` or from an ETSI trusted list — for a signature or a timestamp
 it was evaluating. The set is not approximated: under `--online` the CLI runs
-one entirely offline verification pass first, purely to learn it, and
-`VerifyReport::validated_path_certificates` returns the certificates of every
-chain whose own path check passed (`cert_path_ok`, `timestamp_tsa_path_ok`).
+an entirely offline-style verification pass first, purely to learn it, and
+`VerifyReport::validated_path_certificates_at` returns the certificates of
+every chain whose own path check passed (`cert_path_ok`,
+`timestamp_tsa_path_ok`), each paired with the validation time that chain was
+evaluated at.
 Everything else in the file — including a certificate parked in `ds:KeyInfo`
 that chains perfectly well to the anchor but that no signature needed — is
 outside the set and generates no traffic.
@@ -1963,8 +1969,29 @@ dereferenced.
 
 **What is fetched, and when.** Nothing, for a certificate the caller's own
 material already answers for. Before any request is made, each certificate is
-put to the *same* offline code path the verdict will use; only a certificate
-that comes back without a definite answer is fetched for. OCSP is tried before
+put to the *same* offline code path the verdict will use, **at the validation
+time its path was evaluated at**; only a certificate that comes back without a
+definite answer is fetched for. That time is not one global instant: a signer
+path a verified timestamp restores is evaluated at the token's `genTime`, a
+timestamp authority's own path at the `genTime` it asserts, and everything
+else at `--at` or the clock. Asking at one global time both fetches for
+certificates the run already covers and calls a certificate covered by data
+that does not apply at the instant the verdict rests on.
+
+**In bounded rounds.** One pass is not enough, because evidence fetched for
+one path can create another. A signer whose certificate has expired has no
+validated path at the clock, so nothing may be fetched for it; fetching the
+revocation evidence its signature timestamp's authority needed can verify that
+timestamp, move the signer's validation time back to the proven instant and
+restore its path. A single fetch pass makes that discovery after fetching has
+finished, and the signer's own revocation data is never fetched. So the CLI
+runs at most `MAX_ONLINE_ROUNDS` (3) rounds: each round verifies with the
+store widened by everything fetched so far, computes the validated-path
+certificate set with its times, and fetches only for what became eligible in
+that round. The run stops as soon as a round turns up nothing new, which is
+the ordinary case after the first, and stops in any case at the bound with
+whatever it has. The certificate budget below belongs to the run, so rounds
+cannot multiply the traffic one dossier can generate. OCSP is tried before
 CRLs, because a response answers about one certificate where a CRL is a list
 that may run to megabytes. Certificates whose issuer is not to hand are skipped
 — a CRL could not be checked against them anyway — and so are self-signed
@@ -2015,7 +2042,7 @@ the policy looked.
 | Redirects | at most 3, **never to another host** | The authority for a URL is the certificate, and the certificate named one host. The port is part of the host. |
 | Proxy | none, unless `--online-proxy URL` | `HTTP_PROXY` and its relatives are ignored. A verifier that silently routed its revocation traffic through whatever the shell happened to set would hand an attacker who controls that variable a way to feed it chosen bytes. With a proxy the proxy does the connecting, so the destination policy still checks the URL but no longer decides which socket is opened. |
 | Requests | `GET` for a CRL; `POST` of an RFC 6960 `OCSPRequest` as `application/ocsp-request` for OCSP | The `certID` uses **SHA-256**, which is inside the pinned allowlist. No nonce is sent: a nonce defends a live request against replay, and the verifier deliberately ignores nonces because it must also read archived responses. |
-| Volume | at most 32 certificates per run, at most 4 URLs per certificate | Opening one dossier cannot generate unbounded traffic. |
+| Volume | at most 32 certificates per run, rounds included, at most 4 URLs per certificate | Opening one dossier cannot generate unbounded traffic. |
 
 **What fetching can and cannot do.** It can only *add* data. Every fetched
 artefact is classified and then judged by exactly the offline rules — issuer

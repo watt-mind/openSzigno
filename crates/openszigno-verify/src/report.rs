@@ -5,7 +5,7 @@ use serde::Serialize;
 use crate::certs::{CertificateSummary, ChainEntry};
 use crate::codes::{Check, CheckCode, CheckStatus, Verdict};
 use crate::policy::{PolicyReport, VerifyLimits};
-use crate::trust::TimeSource;
+use crate::trust::{TimeSource, UnixTime, parse_rfc3339};
 use crate::tsa::TimestampReport;
 use crate::xades::{SignaturePolicy, SigningCertificateForm};
 
@@ -313,15 +313,50 @@ impl VerifyReport {
     /// Only a chain whose own path check **passed** contributes: `cert_path_ok`
     /// for a signer, `timestamp_tsa_path_ok` for a timestamp authority. A path
     /// that was merely attempted is not a path the run validated.
+    ///
+    /// This is the set without its times.
+    /// [`Self::validated_path_certificates_at`] is the same set with the
+    /// validation time each path was evaluated at, which is what a caller
+    /// needs in order to ask whether a certificate is *already covered*.
     pub fn validated_path_certificates(&self) -> Vec<Vec<u8>> {
         let mut certificates: Vec<Vec<u8>> = Vec::new();
-        let mut take = |chain: &[crate::certs::ChainEntry], validated: bool| {
-            if !validated {
-                return;
+        for (der, _) in self.validated_path_certificates_at() {
+            if !certificates.contains(&der) {
+                certificates.push(der);
             }
+        }
+        certificates
+    }
+
+    /// The same certificates, each paired with the validation time the
+    /// verifier actually used for the path it sat on.
+    ///
+    /// A path is not evaluated at one global instant. A signer path backed by
+    /// a verified signature timestamp is evaluated at that token's `genTime`
+    /// — the proof of existence — and a timestamp authority's own path at the
+    /// `genTime` it asserts, while everything else is evaluated at `--at` or
+    /// at the clock. "Is this certificate already covered by revocation data?"
+    /// therefore has a different answer per path, and asking it at one global
+    /// time either fetches for a certificate a run already covers or skips one
+    /// it does not.
+    ///
+    /// The same certificate can appear more than once, with a different time
+    /// each time, when it sits on more than one validated path. Every entry is
+    /// a time at which the run needs an answer about it.
+    ///
+    /// A path whose validation time cannot be read back, a timestamp with no
+    /// `genTime` or an unparsable one, contributes nothing: a certificate may
+    /// only be fetched for at a time this run can name.
+    pub fn validated_path_certificates_at(&self) -> Vec<(Vec<u8>, UnixTime)> {
+        let mut certificates: Vec<(Vec<u8>, UnixTime)> = Vec::new();
+        let mut take = |chain: &[crate::certs::ChainEntry], validated: bool, time: Option<i64>| {
+            let Some(time) = time.filter(|_| validated) else {
+                return;
+            };
             for entry in chain {
-                if !entry.der.is_empty() && !certificates.contains(&entry.der) {
-                    certificates.push(entry.der.clone());
+                let candidate = (entry.der.clone(), time);
+                if !entry.der.is_empty() && !certificates.contains(&candidate) {
+                    certificates.push(candidate);
                 }
             }
         };
@@ -329,11 +364,13 @@ impl VerifyReport {
             take(
                 &signature.chain,
                 passed(&signature.checks, CheckCode::CertPathOk),
+                parse_rfc3339(&signature.validation_time),
             );
             for timestamp in &signature.timestamps {
                 take(
                     &timestamp.chain,
                     passed(&timestamp.checks, CheckCode::TimestampTsaPathOk),
+                    timestamp.gen_time.as_deref().and_then(parse_rfc3339),
                 );
             }
         }
@@ -341,6 +378,7 @@ impl VerifyReport {
             take(
                 &timestamp.chain,
                 passed(&timestamp.checks, CheckCode::TimestampTsaPathOk),
+                timestamp.gen_time.as_deref().and_then(parse_rfc3339),
             );
         }
         certificates
