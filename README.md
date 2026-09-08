@@ -150,9 +150,9 @@ the URLs the certificates themselves publish.
 | `skill` | Write the embedded agent skill (`SKILL.md`) to stdout and nothing else. Takes no `FILE` and no `--json`. | 0, 2, 3 |
 
 Every command except `skill` takes `-` in place of the path and reads the
-dossier from standard input. Every flag, the JSON envelope, the stable error, warning and
-check codes, the exit statuses, and the parser limits are specified in
-[docs/architecture.md](docs/architecture.md).
+dossier from standard input. Every flag, the JSON envelope, the stable
+error, warning and check codes, the exit statuses, and the parser limits
+are specified in [docs/architecture.md](docs/architecture.md).
 
 ## Verification
 
