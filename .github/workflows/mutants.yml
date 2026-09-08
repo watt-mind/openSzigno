@@ -1,0 +1,227 @@
+name: Mutation testing
+
+# Nightly, not required on pull requests: a full `cargo mutants` run over
+# either library crate takes tens of minutes even bounded (see
+# docs/testing.md#mutation-testing), far past what a pull-request build
+# should cost. This workflow tracks a caught-mutant floor the way
+# `coverage` (ci.yml) tracks a line-coverage floor, but on its own nightly
+# schedule, and a failure opens or refreshes a tracking issue instead of
+# blocking a merge, so a slow decline in test strength is never lost even
+# though nothing here gates a pull request.
+
+on:
+  schedule:
+    # 03:00 UTC nightly, after the weekly security scan's own cron (see
+    # security.yml) but comfortably clear of any push-triggered CI queue.
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+    inputs:
+      crate:
+        description: Crate to test
+        type: choice
+        options: [all, openszigno-core, openszigno-verify]
+        default: all
+      shard:
+        description: >-
+          Optional shard passed to `cargo mutants --shard`, e.g. "1/4".
+          Leave empty to test the whole crate.
+        type: string
+        required: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mutants-${{ github.event_name }}-${{ github.event.inputs.crate || 'all' }}
+  cancel-in-progress: false
+
+jobs:
+  mutants-core:
+    name: Mutation test (openszigno-core)
+    if: >-
+      github.event_name != 'workflow_dispatch' ||
+      github.event.inputs.crate == 'all' ||
+      github.event.inputs.crate == 'openszigno-core'
+    runs-on: ubuntu-latest
+    # Bounded budget: the full local run (LAB-267 seeding) took about 8
+    # minutes for 559 mutants at -j 2 on this host; a slower or more loaded
+    # runner, plus checkout and toolchain setup, still leaves ample margin
+    # under 90 minutes without risking an unbounded nightly job.
+    timeout-minutes: 90
+    outputs:
+      gate-status: ${{ steps.gate.outputs.status }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable branch @ 2026-09-03
+        with:
+          toolchain: stable
+      - uses: taiki-e/install-action@84f5ac3124727fb3d284d4d22ee9ab3654fd09a6 # v2.87.7
+        with:
+          tool: cargo-mutants@27.1.0
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Run cargo-mutants
+        id: mutants
+        env:
+          MUTANTS_SHARD: ${{ github.event.inputs.shard }}
+        run: |
+          set +e
+          args=(-p openszigno-core --timeout-multiplier 2 -j 2 --output mutants-core)
+          if [ -n "$MUTANTS_SHARD" ]; then
+            args+=(--shard "$MUTANTS_SHARD")
+          fi
+          cargo mutants "${args[@]}"
+          echo "status=$?" >> "$GITHUB_OUTPUT"
+        shell: bash
+      - name: Run the mutation-testing gate
+        id: gate
+        run: |
+          set +e
+          python3 scripts/mutants_gate.py \
+            --dir mutants-core/mutants.out \
+            --crate openszigno-core \
+            | tee mutants-core-gate-summary.md
+          status="${PIPESTATUS[0]}"
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+        shell: bash
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: mutants-openszigno-core
+          retention-days: 14
+          path: |
+            mutants-core/mutants.out
+            mutants-core-gate-summary.md
+      - name: Enforce the mutation-testing gate
+        run: |
+          if [ "${{ steps.mutants.outputs.status }}" != "0" ] && [ "${{ steps.mutants.outputs.status }}" != "2" ]; then
+            echo "::error::cargo mutants exited unexpectedly (status ${{ steps.mutants.outputs.status }}), not just with missed mutants"
+            exit 1
+          fi
+          if [ "${{ steps.gate.outputs.status }}" != "0" ]; then
+            echo "::error::scripts/mutants_gate.py reported a mutation-testing gate failure; see the job summary or artifact"
+            exit 1
+          fi
+
+  mutants-verify:
+    name: Mutation test (openszigno-verify)
+    if: >-
+      github.event_name != 'workflow_dispatch' ||
+      github.event.inputs.crate == 'all' ||
+      github.event.inputs.crate == 'openszigno-verify'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    outputs:
+      gate-status: ${{ steps.gate.outputs.status }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable branch @ 2026-09-03
+        with:
+          toolchain: stable
+      - uses: taiki-e/install-action@84f5ac3124727fb3d284d4d22ee9ab3654fd09a6 # v2.87.7
+        with:
+          tool: cargo-mutants@27.1.0
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Run cargo-mutants
+        id: mutants
+        env:
+          MUTANTS_SHARD: ${{ github.event.inputs.shard }}
+        run: |
+          set +e
+          args=(-p openszigno-verify --timeout-multiplier 2 -j 2 --output mutants-verify)
+          if [ -n "$MUTANTS_SHARD" ]; then
+            args+=(--shard "$MUTANTS_SHARD")
+          fi
+          cargo mutants "${args[@]}"
+          echo "status=$?" >> "$GITHUB_OUTPUT"
+        shell: bash
+      - name: Run the mutation-testing gate
+        id: gate
+        run: |
+          set +e
+          python3 scripts/mutants_gate.py \
+            --dir mutants-verify/mutants.out \
+            --crate openszigno-verify \
+            | tee mutants-verify-gate-summary.md
+          status="${PIPESTATUS[0]}"
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+        shell: bash
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: mutants-openszigno-verify
+          retention-days: 14
+          path: |
+            mutants-verify/mutants.out
+            mutants-verify-gate-summary.md
+      - name: Enforce the mutation-testing gate
+        run: |
+          if [ "${{ steps.mutants.outputs.status }}" != "0" ] && [ "${{ steps.mutants.outputs.status }}" != "2" ]; then
+            echo "::error::cargo mutants exited unexpectedly (status ${{ steps.mutants.outputs.status }}), not just with missed mutants"
+            exit 1
+          fi
+          if [ "${{ steps.gate.outputs.status }}" != "0" ]; then
+            echo "::error::scripts/mutants_gate.py reported a mutation-testing gate failure; see the job summary or artifact"
+            exit 1
+          fi
+
+  report:
+    name: Report survivors
+    needs: [mutants-core, mutants-verify]
+    # `always()` so this still runs when one of the two jobs above was
+    # skipped by `if.crate` on a manual dispatch; the failure check below
+    # then looks only at jobs that actually ran.
+    if: always() && contains(needs.*.result, 'failure')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # The only job in this workflow that writes anything: scoped to this
+    # job alone so the two mutation-testing jobs above stay read-only.
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: mutants-openszigno-*
+          path: artifacts
+          merge-multiple: false
+      - name: Build the tracking-issue body
+        run: |
+          set -euo pipefail
+          marker='<!-- mutants-gate -->'
+          {
+            echo "$marker"
+            echo
+            echo "Nightly mutation testing found a caught-mutant gate failure."
+            echo "Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            echo
+            for summary in artifacts/mutants-openszigno-core/mutants-core-gate-summary.md \
+                           artifacts/mutants-openszigno-verify/mutants-verify-gate-summary.md; do
+              if [ -f "$summary" ]; then
+                cat "$summary"
+                echo
+              fi
+            done
+          } > issue-body.md
+      - name: Open or update the tracking issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          marker='<!-- mutants-gate -->'
+          title='Mutation testing: survivors'
+          repo="${{ github.repository }}"
+
+          existing=$(gh api "repos/$repo/issues" -X GET -f state=open --paginate \
+            --jq "[.[] | select(.title == \"$title\") | select(.body | startswith(\"$marker\"))][0].number // empty")
+          if [ -n "$existing" ]; then
+            gh api "repos/$repo/issues/$existing" -X PATCH -f body=@issue-body.md
+          else
+            gh api "repos/$repo/issues" -X POST -f title="$title" -f body=@issue-body.md
+          fi
