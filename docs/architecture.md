@@ -93,7 +93,7 @@ crates/openszigno-cli/src/
   response.rs         # the JSON envelope, CliError, and its exit statuses
   render/             # writing the envelope (json.rs) and the summary (human.rs)
   commands/           # one module per command: inspect, list, validate,
-                      #   extract, verify
+                      #   extract, verify, skill
   extract/            # select.rs (--document), plan.rs (decode, names, nesting),
                       #   names.rs (filename safety), write.rs (writing and
                       #   rollback), output_dir.rs (race-resistant output)
@@ -398,11 +398,14 @@ under `data.limits`. They are not yet configurable on the command line; see
 | `extract FILE --decrypt-key KEY` | The same, additionally decrypting documents whose transform chain contains `encrypt`. See [Decryption](#decryption). | No |
 | `validate-structure FILE` | Apply the project's strict structural rules without validating signatures. | No |
 | `verify FILE` | Verify every `ds:Signature`: canonicalization, reference digests, the signature value, the e-dossier reference-scope rules, the XAdES signed `SigningCertificate` binding, RFC 3161 signature timestamps, the certificate path, and revocation. Reports a per-signature verdict of `valid`, `invalid`, or `indeterminate`. | No |
+| `skill` | Write the agent skill the binary embeds (`crates/openszigno-cli/skills/openszigno/SKILL.md`) to stdout, byte for byte and with nothing added. Reads no dossier and emits no envelope. | No |
 
-In every command `FILE` is either a path to a regular file or `-`, which
-reads the dossier from standard input; see [Reading from stdin](#reading-from-stdin).
+In every command except `skill` `FILE` is either a path to a regular file or
+`-`, which reads the dossier from standard input; see
+[Reading from stdin](#reading-from-stdin). `skill` takes no `FILE` and no
+flags of its own; see [The skill command](#the-skill-command).
 
-These flags apply to every command:
+These flags apply to every command that reads a dossier:
 
 | Flag | Meaning |
 | --- | --- |
@@ -505,6 +508,22 @@ go to stderr. No file and no directory is created.
   unsupported, is `document_not_extractable` (exit 5).
 - A closed or failing stdout is exit 3, as everywhere else.
 
+### The skill command
+
+```sh
+openszigno skill > .claude/skills/openszigno/SKILL.md
+```
+
+`skill` writes the Agent Skills document
+`crates/openszigno-cli/skills/openszigno/SKILL.md`, embedded at build time
+with `include_str!`, to stdout byte for byte and with nothing added: no
+envelope, no diagnostics, no trailing newline of its own. The single
+distributed binary therefore carries the skill, and installing it needs no
+checkout. The command reads no dossier, takes no `FILE`, and takes no
+`--json`; passing `--json` is a usage error (exit 2), as it is for
+`extract --stdout`. A closed or failing stdout is exit 3, as everywhere
+else.
+
 ## JSON envelope
 
 The envelope fields are always present:
@@ -513,7 +532,7 @@ The envelope fields are always present:
 | --- | --- | --- |
 | `schema_version` | number | Currently `1`. |
 | `ok` | boolean | `false` on any failure. |
-| `command` | string | `inspect`, `list`, `extract`, `validate-structure`, `verify`, or `usage`. |
+| `command` | string | `inspect`, `list`, `extract`, `validate-structure`, `verify`, or `usage`. `skill` never appears: it emits no envelope. |
 | `input` | object | `format` is `"microsec-es3"` or `null`; `bytes` is the input size or `null`. |
 | `data` | object or null | Command-specific; `null` on failure. |
 | `warnings` | array | Objects with stable `code` and human `message`. |
@@ -706,6 +725,9 @@ Exit statuses are stable at the category level:
 | `5` | Payload decoding or safe-extraction failure. |
 | `6` | `verify` completed and at least one signature verdict is `invalid`. |
 | `7` | `verify` completed, no signature is `invalid`, and the overall verdict is `indeterminate`. |
+
+`skill` uses only `0`, `2` and `3`: it writes the embedded document, a
+usage error, or nothing at all when stdout cannot be written.
 
 Statuses 6 and 7 describe a run that *completed*: the dossier parsed, the
 signatures were examined, and the tool is reporting what it found. A structural

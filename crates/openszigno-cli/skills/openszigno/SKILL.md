@@ -62,6 +62,23 @@ curl --proto '=https' --tlsv1.2 -LsSf \
   https://github.com/watt-mind/openSzigno/releases/latest/download/openszigno-cli-installer.sh | sh
 ```
 
+## Installing this skill
+
+The binary carries this document. The canonical way to install it is to
+ask the binary for it:
+
+```sh
+mkdir -p .claude/skills/openszigno
+openszigno skill > .claude/skills/openszigno/SKILL.md
+```
+
+Use `.codex/skills/openszigno/` for Codex, or
+`~/.claude/skills/openszigno/` to install it for every project instead of
+one. `openszigno skill` writes the document to stdout and nothing else, so
+the copy it produces is exactly what the running binary knows. The file in
+the repository, `crates/openszigno-cli/skills/openszigno/SKILL.md`, is the
+same bytes the binary carries.
+
 ## Exit statuses
 
 | Status | Meaning | What to do |

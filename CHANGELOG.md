@@ -12,12 +12,17 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
 
 ### Added
 
-- `skills/openszigno/SKILL.md`, an Agent Skills document that tells an AI
-  agent how to drive the CLI on a dossier: the always-`--json` rule, exit
-  statuses, the inspect, list, extract, decrypt and verify workflow, the
-  trust-material recipe, the check codes behind most `indeterminate`
-  verdicts, and how to report a result without overstating it. Linked from
-  the README and the documentation index.
+- `crates/openszigno-cli/skills/openszigno/SKILL.md`, an Agent Skills
+  document that tells an AI agent how to drive the CLI on a dossier: the
+  always-`--json` rule, exit statuses, the inspect, list, extract, decrypt
+  and verify workflow, the trust-material recipe, the check codes behind
+  most `indeterminate` verdicts, and how to report a result without
+  overstating it. Linked from the README and the documentation index.
+- `openszigno skill`, which writes that document to stdout byte for byte
+  and nothing else, so the single distributed binary carries the skill:
+  `openszigno skill > .claude/skills/openszigno/SKILL.md` installs it with
+  no checkout. It takes no `FILE` and no `--json`, and emits no JSON
+  envelope.
 
 ## [0.5.1] - 2026-09-08
 
