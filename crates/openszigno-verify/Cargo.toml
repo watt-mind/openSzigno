@@ -20,7 +20,7 @@ base64.workspace = true
 cms = "0.2"
 const-oid.workspace = true
 der.workspace = true
-openszigno-core = { version = "0.5.0", path = "../openszigno-core" }
+openszigno-core = { version = "0.5.1", path = "../openszigno-core" }
 p256.workspace = true
 p384.workspace = true
 pem-rfc7468.workspace = true
