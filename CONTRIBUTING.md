@@ -63,6 +63,18 @@ feat(verify): bind the signing certificate through xades:SigningCertificate
 docs: document the stable error codes and their exit statuses
 ```
 
+CI's `hygiene` job enforces this shape on every commit subject in a pull
+request's range (`scripts/commit-msg.sh`, the same check the local
+commit-msg hook runs), skipping merge commits and commits authored by
+`dependabot[bot]` or `github-actions[bot]`. It also requires the pull
+request body to contain a line starting `Fixes LAB-<n>`, `Closes LAB-<n>`,
+or `Refs LAB-<n>` (case-insensitive), so every change traces to a Linear
+ticket; a bot-authored pull request is exempt, and a human-authored one
+with no ticket can opt out by adding the `no-ticket` label. The job only
+runs on `pull_request`, since only a pull request has a range and a body to
+check; existing commits on `develop` (older merge commits, `Merge pull
+request ...` subjects predating this rule) are unaffected.
+
 ## Required checks
 
 Run these locally before opening a pull request. CI runs the same checks on
@@ -95,6 +107,7 @@ CI additionally runs, on every pull request:
 | Crate manifests | `cargo package -p <crate> --no-verify --locked` for all three crates |
 | Release container | `docker build .`, then the CLI subcommands inside the image |
 | Workflow lint | `actionlint` with `SHELLCHECK_OPTS=--severity=warning` |
+| Commit and PR hygiene (pull requests only) | `git log --format=%s origin/<base>..HEAD` through `scripts/commit-msg.sh -`, plus a `Fixes\|Closes\|Refs LAB-<n>` line in the pull request body |
 | Source file length | `python3 scripts/check-file-length.py` |
 | Golden output contract | `python3 scripts/golden.py check --bin target/release/openszigno` |
 | Semver checks (`openszigno-core`, `openszigno-verify` against crates.io) | `cargo semver-checks -p <crate>` |

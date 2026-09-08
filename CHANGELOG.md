@@ -187,6 +187,14 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
   `SignatureCoverage` and `ChainEntry`, a new `RevocationPolicy` variant, and
   a renamed `SignatureCoverage` field) that need a version-bump decision at
   the next release, not a code change here.
+- The CI `hygiene` job, on pull requests only, runs `scripts/commit-msg.sh`
+  (now reusable with a file path or `-` for stdin, in addition to its
+  original hook mode) over every commit subject in the pull request's
+  range, skipping merge commits and `dependabot[bot]`/`github-actions[bot]`
+  commits, and requires the pull request body to contain a
+  `Fixes`/`Closes`/`Refs LAB-<n>` line unless the pull request is
+  bot-authored or labelled `no-ticket`. See
+  [CONTRIBUTING.md](CONTRIBUTING.md#commit-messages).
 - Golden output contract tests under `tests/golden/`: the stdout and exit
   status of `inspect`, `list`, `validate-structure`, `verify` and `extract`
   over every fixture in `tests/fixtures/`, in `--json` and human mode, plus
