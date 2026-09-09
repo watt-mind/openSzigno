@@ -852,7 +852,10 @@ fn a_listed_intermediate_qualifies_the_chain() {
     let anchor = chain.last().expect("the chain ends at an anchor");
     assert!(anchor.is_trust_anchor);
     assert_eq!(anchor.der, pki.intermediate_der);
-    assert_eq!(anchor.trust_anchor_origin, Some(TrustAnchorOrigin::TrustList));
+    assert_eq!(
+        anchor.trust_anchor_origin,
+        Some(TrustAnchorOrigin::TrustList)
+    );
 }
 
 /// A service identity that is not in the chain but *issued* a certificate in
