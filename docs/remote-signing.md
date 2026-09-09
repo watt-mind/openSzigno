@@ -2,10 +2,10 @@
 
 Research date: 2026-09-09. Ticket: LAB-287.
 
-Sections 1 to 6 survey the remote signature ecosystem openSzigno would have to
-join once the planned `create` and `sign` commands exist. They are research,
-not a specification, and nothing in them asserts that any signature,
-certificate, or dossier produced by a listed service is valid.
+Sections 1 to 6 survey the remote signature ecosystem openSzigno joins now
+that `create` and `sign` exist. They are research, not a specification, and
+nothing in them asserts that any signature, certificate, or dossier produced
+by a listed service is valid.
 
 [Section 7](#7-using-openszigno-with-a-csc-service) is different: it documents
 `sign --csc`, which implements the recommendation in section 6.1 and now
