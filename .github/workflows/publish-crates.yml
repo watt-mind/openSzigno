@@ -182,7 +182,7 @@ jobs:
             return 1
           }
 
-          for crate in openszigno-core openszigno-author openszigno-verify openszigno-cli; do
+          for crate in openszigno-core openszigno-verify openszigno-author openszigno-cli; do
             if in_index "$crate" "$VERSION"; then
               echo "::notice::$crate $VERSION is already on crates.io; skipping"
               continue

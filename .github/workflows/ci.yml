@@ -377,17 +377,22 @@ jobs:
               | jq -e --arg v "$version" 'select(.vers == $v)' >/dev/null
           }
           if published openszigno-core; then
-            cargo package -p openszigno-author --no-verify --locked
             cargo package -p openszigno-verify --no-verify --locked
           else
             echo "::notice::openszigno-core $version is not on crates.io yet; skipping the dependent crates until the release publishes it"
           fi
-          # The CLI depends on author and verify as well, so it can only be
-          # packaged once those are published at this version too.
-          if published openszigno-author && published openszigno-verify; then
+          # author depends on core and verify; the CLI on all three. Each
+          # can only be packaged once what it depends on is published at
+          # this version, which the release workflow does in that order.
+          if published openszigno-verify; then
+            cargo package -p openszigno-author --no-verify --locked
+          else
+            echo "::notice::openszigno-verify $version is not on crates.io yet; skipping openszigno-author until the release publishes it"
+          fi
+          if published openszigno-author; then
             cargo package -p openszigno-cli --no-verify --locked
           else
-            echo "::notice::openszigno-author or openszigno-verify $version is not on crates.io yet; skipping openszigno-cli until the release publishes them"
+            echo "::notice::openszigno-author $version is not on crates.io yet; skipping openszigno-cli until the release publishes it"
           fi
       - name: List the packaged files
         run: |

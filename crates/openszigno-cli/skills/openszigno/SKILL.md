@@ -8,7 +8,7 @@ description: >-
   signed or encrypted e-Szigno dossier, XAdES signature or timestamp
   verification of one, or getting the documents out of one.
 license: MIT
-compatibility: Requires the openszigno CLI, 0.6.0 or later, on PATH.
+compatibility: Requires the openszigno CLI, 0.7.0 or later, on PATH.
 metadata:
   author: watt-mind
   version: "1.0"
