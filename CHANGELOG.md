@@ -10,6 +10,8 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-09-09
+
 ### Added
 
 - The certificate that signed a trusted list is now checked against what the
@@ -2172,7 +2174,8 @@ This release performs no cryptographic verification of any kind.
 
 [0.1.0]: https://github.com/watt-mind/openSzigno/releases/tag/v0.1.0
 [0.2.0]: https://github.com/watt-mind/openSzigno/compare/v0.1.0...v0.2.0
-[Unreleased]: https://github.com/watt-mind/openSzigno/compare/v0.8.0...develop
+[Unreleased]: https://github.com/watt-mind/openSzigno/compare/v0.9.0...develop
+[0.9.0]: https://github.com/watt-mind/openSzigno/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/watt-mind/openSzigno/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/watt-mind/openSzigno/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/watt-mind/openSzigno/compare/v0.5.1...v0.6.0
