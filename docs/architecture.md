@@ -2213,6 +2213,15 @@ its own `trust_list_unverified` check still blocks when it could not be
 verified, so pointers taken from an unverified LOTL cannot quietly support a
 `valid` verdict.
 
+Once a certificate has verified a list, the list's own signed
+`xades:SigningCertificateV2` must designate that same certificate, or
+`trust_list_signer_mismatch` (`unknown`) blocks: caller and list then disagree
+about who signed. The ETSI TS 119 612 clause 5.7.1 restrictions on a scheme
+operator's certificate are reported as `trust_list_signer_unqualified`
+(`info`), one check per rule, and never block; see
+[The scheme operator's own certificate](trust.md#the-scheme-operators-own-certificate)
+for what each rule is and why.
+
 A `--trust-list` file that is not a trusted list, or a `--trust-list-signer`
 file that is not exactly one certificate, is `trust_list_invalid` (exit 3).
 
@@ -3124,6 +3133,8 @@ verify), and `revocation_not_checked` (the caller switched revocation off).
 | `trust_list_unverified` | `unknown` | A trusted list was used without `--trust-list-signer`, so its own signature was not checked. Blocking. |
 | `trust_list_signature_ok` | `passed` | The list's enveloped XMLDSig signature verified against the supplied signer certificate and covers the whole document. |
 | `trust_list_signature_invalid` | `failed` | It did not verify, does not cover the whole list, uses an algorithm or transform outside the allowlist, or is absent while a signer was demanded. |
+| `trust_list_signer_mismatch` | `unknown` | The list carries a signed `xades:SigningCertificateV2` (or `SigningCertificate`) naming a certificate other than the one supplied to verify it, so the caller and the list disagree about who signed. Blocking: the list is treated as unverified rather than believed. See [The scheme operator's own certificate](trust.md#the-scheme-operators-own-certificate). |
+| `trust_list_signer_unqualified` | `info` | The certificate that signed the list departs from one of the ETSI TS 119 612 clause 5.7.1 restrictions on a scheme operator's certificate, and the message names which: `id-tsl-kp-tslSigning`, `keyUsage`, `basicConstraints`, or the self-signed-or-listed issuer. One check per rule. Reports rather than decides, because the clause makes the extended key usage a "should" and the EU LOTL's own signing certificate does not carry it. |
 | `trust_list_service_not_granted` | `unknown` | A path was built and validated but ends at a trusted-list anchor the list does not record as granted at the validation time for the use the path was built for. Replaces `cert_path_ok` (and, for a timestamp, `timestamp_tsa_path_ok`); the other candidate paths are tried first. `unknown`, never `failed`: missing trust is not evidence against the signature, so it caps the verdict at `indeterminate` rather than making it `invalid`. See [A path may only end at a service that was granted then](#a-path-may-only-end-at-a-service-that-was-granted-then). |
 | `certificate_qualified` | `info` | The chain ends at a trusted-list CA/QC service granted at the validation time, and any post-eIDAS certificate asserts `QcCompliance`. |
 | `certificate_not_qualified` | `info` | The trusted list does not record the anchor's service as granted then, or a post-eIDAS certificate carries no `QcCompliance`. |

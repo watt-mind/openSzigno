@@ -189,13 +189,15 @@ worth knowing they were not proven against every member state's file:
 - **Whether every TLv6 list is version-tagged the way the two checked ones
   are.** The specification requires the field; a list that omits it is refused
   here rather than assumed to be TLv6.
-- **XAdES-B-B's signed properties are not required, only tolerated.** The
-  extra `ds:Reference` over `xades:SignedProperties` must still verify, and
-  does, but this build does not check `xades:SigningCertificateV2` against the
-  signer, nor the TLSO certificate restrictions of clause 5.7.1 (self-signed
-  or listed issuer, `id-tsl-kp-tslSigning`, `BasicConstraints` CA=false). The
-  caller supplies the signer certificate out of band and that is what is
-  believed.
+- **XAdES-B-B's signed properties are required only where they exist.** The
+  extra `ds:Reference` over `xades:SignedProperties` must verify, and does. A
+  list that carries a signed `xades:SigningCertificateV2` is now also held to
+  it, and the clause 5.7.1 restrictions on the scheme operator's certificate
+  are reported: see [The scheme operator's own
+  certificate](#the-scheme-operators-own-certificate) below. A list that
+  carries no such property, as a TLv5 XAdES-BES list need not, says nothing
+  about who signed it, and the caller's out-of-band certificate stays the only
+  answer.
 - **`Qualifications` and other scheme extensions are still not processed**, in
   either version, and are reported as unprocessed rather than used to widen a
   determination.
@@ -245,6 +247,54 @@ know which of them signed the copy in hand.
   (`failed`); the run is `invalid`.
 - No signer certificate at all: `trust_list_unverified` (`unknown`). The list's
   anchors are still used, but the run can never reach `valid`.
+
+### The scheme operator's own certificate
+
+Verifying the signature answers "did this key sign this list". Two further
+questions follow, and openSzigno answers them at two different strengths,
+because they are not the same kind of question.
+
+**Does the list itself say this is its signer?** A TLv6 list is signed as
+XAdES-B-B, and annex B.1.1 of ETSI TS 119 612 V2.4.1 makes
+`xades:SigningCertificateV2` "an effective way of securing the scheme operator
+identifier": the property is covered by the signature, so it is the scheme
+operator's own signed statement of which certificate signed. When a list
+carries it, or the older `xades:SigningCertificate`, the certificate the caller
+supplied must be the one it designates, digest and all. If it is not, the
+caller and the list disagree about who signed, and this build does not pick a
+winner: `trust_list_signer_mismatch` (`unknown`) blocks, and the list cannot
+support a `valid` verdict. The property is read only where the list's own
+signature actually covers it; an unsigned `ds:Object` decides nothing.
+
+**Does the certificate look like a scheme operator's?** ETSI TS 119 612
+clause 5.7.1 says the certificate used to validate the signature on a trusted
+list:
+
+| Clause 5.7.1 requirement | Checked here |
+| --- | --- |
+| The issuer "shall be the TLSO itself (i.e. a self-signed certificate) or a TSP trust service listed in the TL or in one of the TL that is part of the same community" | Self-signed, or issued by a certificate this list names. The other-list half of the rule cannot be answered from one file. |
+| "Country code" and "Organization" in the subject shall match the scheme territory and a scheme operator name | Not checked. It is a comparison of transliterated names, which this build does not do. |
+| KeyUsage "shall be set to digitalSignature and/or to nonRepudiation (contentCommitment) to the exclusion of any other KeyUsage value" | The extension, when present, must include one of the two. The exclusivity half is not enforced. |
+| ExtendedKeyUsage "should be present containing id-tsl-kp-tslSigning" (`0.4.0.2231.3.0`) | Reported when absent or when the extension names other purposes instead. |
+| SubjectKeyIdentifier shall be present | Not checked; it identifies, it does not authorise. |
+| BasicConstraints "shall indicate CA=false" | The extension, when present, must not say `CA=true`. |
+
+Each failed rule is one `trust_list_signer_unqualified` check, at `info`, whose
+message names the requirement. **None of them blocks.** Two reasons, and the
+second is the decisive one:
+
+- The clause makes the extended key usage a "should", not a "shall".
+- The European Commission's own LOTL signing certificate does not carry
+  `id-tsl-kp-tslSigning` at all: its `extendedKeyUsage` names TLS client
+  authentication and e-mail protection, and it is not self-signed. A build that
+  blocked on those rules would refuse the one list every national list is
+  bootstrapped from. The Hungarian list's signer, by contrast, satisfies every
+  rule above, `id-tsl-kp-tslSigning` included.
+
+What makes a list trustworthy here is the caller's out-of-band certificate and
+the cryptography, not the scheme operator's certificate hygiene. The hygiene is
+still worth reporting, because a scheme operator certificate that drifts from
+the clause is worth someone looking at.
 
 ### What is read, and what is not
 
