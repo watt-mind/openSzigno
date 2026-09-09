@@ -24,6 +24,8 @@ use std::path::Path;
 use openszigno_verify::revocation::{RevocationItemKind, classify};
 use openszigno_verify::{MAX_REVOCATION_ITEM_BYTES, MemoryRevocationStore};
 
+use crate::input::{BoundedReadError, read_bounded_file};
+
 /// The largest revocation-store file this loader will read.
 ///
 /// It is the verifier's own limit, deliberately: a store that accepted a file
@@ -81,23 +83,47 @@ fn read_directory(
     }
 
     for path in names {
+        // The entry kind is checked twice on purpose. This one only decides
+        // what to skip; the read below opens the file once and refuses a
+        // symlink, a directory and an over-cap file through that one open
+        // descriptor, so nothing here is a security decision a race could
+        // undo.
         let metadata = fs::symlink_metadata(&path)
             .map_err(|_| "a revocation store file could not be inspected".to_owned())?;
         if !metadata.is_file() {
             continue;
         }
-        if metadata.len() > MAX_FILE_BYTES {
-            return Err(format!(
-                "a revocation store file is too large: {} bytes, over the {MAX_FILE_BYTES}-byte limit on one CRL or OCSP response",
-                metadata.len()
-            ));
-        }
-        let bytes =
-            fs::read(&path).map_err(|_| "a revocation store file could not be read".to_owned())?;
+        let bytes = match read_bounded_file(&path, MAX_FILE_BYTES) {
+            Ok(bytes) => bytes,
+            Err(BoundedReadError::NotRegular) => continue,
+            Err(BoundedReadError::TooLarge { declared }) => return Err(too_large(declared)),
+            Err(BoundedReadError::Inspect) => {
+                return Err("a revocation store file could not be inspected".to_owned());
+            }
+            Err(BoundedReadError::Read) => {
+                return Err("a revocation store file could not be read".to_owned());
+            }
+        };
         match classify(&bytes)? {
             (RevocationItemKind::Crl, der) => crls.push(der),
             (RevocationItemKind::Ocsp, der) => ocsp.push(der),
         }
     }
     Ok(())
+}
+
+/// The refusal for an over-cap file. The size is named when the open
+/// descriptor reported one, because "too large" without a number is not
+/// something an operator can act on; a file that grew past the cap while it
+/// was being read has no size this process ever learned, and the message says
+/// only what the limit was.
+fn too_large(declared: Option<u64>) -> String {
+    match declared {
+        Some(size) => format!(
+            "a revocation store file is too large: {size} bytes, over the {MAX_FILE_BYTES}-byte limit on one CRL or OCSP response"
+        ),
+        None => format!(
+            "a revocation store file is too large: it grew past the {MAX_FILE_BYTES}-byte limit on one CRL or OCSP response while it was being read"
+        ),
+    }
 }

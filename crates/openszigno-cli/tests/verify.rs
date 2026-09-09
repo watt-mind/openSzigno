@@ -557,3 +557,163 @@ fn at_with_an_impossible_date_is_a_usage_error() {
     );
     assert!(output.stdout.is_empty(), "a usage error emits no JSON");
 }
+
+// ---------------------------------------------------------------------------
+// Bounded reads of the trust and revocation material
+// ---------------------------------------------------------------------------
+
+/// A trust-store entry over the 4 MiB cap fails the whole store, and it fails
+/// on the bytes rather than on metadata: the file is opened once and read
+/// through a cap, so growing or replacing it after a check buys nothing.
+#[test]
+fn an_over_cap_trust_store_file_fails_the_store() {
+    let directory = scratch();
+    let store = trust_store(directory.path());
+    std::fs::write(
+        store.join("anchors/huge.pem"),
+        vec![b'x'; 4 * 1024 * 1024 + 1],
+    )
+    .expect("the oversized entry is written");
+
+    let output = run(&[
+        "verify",
+        fixture("plain-base64.es3").to_str().unwrap(),
+        "--trust-store",
+        store.to_str().unwrap(),
+        "--json",
+    ]);
+    assert_eq!(status(&output), 3);
+    let response = parse_json(&output);
+    assert_eq!(response["errors"][0]["code"], "trust_store_invalid");
+    let message = response["errors"][0]["message"]
+        .as_str()
+        .expect("a message");
+    assert!(message.contains("too large"), "{message}");
+    assert!(!message.contains("huge.pem"), "the message names no file");
+}
+
+/// A trust-store entry that is a symlink is skipped rather than followed, so
+/// a store holding nothing else holds no certificates at all.
+#[cfg(unix)]
+#[test]
+fn a_symlinked_trust_store_entry_is_never_followed() {
+    let directory = scratch();
+    let outside = directory.path().join("outside.pem");
+    std::fs::write(&outside, SYNTHETIC_ROOT_PEM).expect("the outside anchor is written");
+    let store = directory.path().join("store");
+    std::fs::create_dir_all(store.join("anchors")).expect("the anchors directory is created");
+    std::os::unix::fs::symlink(&outside, store.join("anchors/link.pem"))
+        .expect("the symlink is created");
+
+    let output = run(&[
+        "verify",
+        fixture("plain-base64.es3").to_str().unwrap(),
+        "--trust-store",
+        store.to_str().unwrap(),
+        "--json",
+    ]);
+    assert_eq!(status(&output), 3);
+    let response = parse_json(&output);
+    assert_eq!(response["errors"][0]["code"], "trust_store_invalid");
+    assert!(
+        response["errors"][0]["message"]
+            .as_str()
+            .expect("a message")
+            .contains("no certificates"),
+        "the linked anchor must not have been loaded"
+    );
+}
+
+/// A trust-store entry of exactly the cap is read: the limit is inclusive, and
+/// what fails such a file is what it holds, not its size.
+#[test]
+fn a_trust_store_file_exactly_at_the_cap_is_read() {
+    let directory = scratch();
+    let store = directory.path().join("store");
+    std::fs::create_dir_all(store.join("anchors")).expect("the anchors directory is created");
+    // Exactly 4 MiB of a PEM anchor followed by padding the loader will refuse
+    // to parse: reaching the parse error proves the bytes were read.
+    let mut content = SYNTHETIC_ROOT_PEM.as_bytes().to_vec();
+    content.resize(4 * 1024 * 1024, b'\n');
+    std::fs::write(store.join("anchors/at-the-cap.pem"), &content).expect("the entry is written");
+
+    let output = run(&[
+        "verify",
+        fixture("plain-base64.es3").to_str().unwrap(),
+        "--trust-store",
+        store.to_str().unwrap(),
+        "--json",
+    ]);
+    let response = parse_json(&output);
+    if status(&output) == 3 {
+        let message = response["errors"][0]["message"]
+            .as_str()
+            .expect("a message");
+        assert!(
+            !message.contains("too large"),
+            "a file at the cap is not over it: {message}"
+        );
+    } else {
+        assert_eq!(response["data"]["policy"]["trust_store"], "configured");
+    }
+}
+
+/// The revocation store reads the same way: over the cap is refused, and the
+/// refusal names the limit.
+#[test]
+fn an_over_cap_revocation_store_file_fails_the_store() {
+    let directory = scratch();
+    let store = trust_store(directory.path());
+    let revocation = directory.path().join("revocation");
+    std::fs::create_dir_all(revocation.join("crls")).expect("the crls directory is created");
+    std::fs::write(
+        revocation.join("crls/huge.crl"),
+        vec![b'x'; 16 * 1024 * 1024 + 1],
+    )
+    .expect("the oversized entry is written");
+
+    let output = run(&[
+        "verify",
+        fixture("plain-base64.es3").to_str().unwrap(),
+        "--trust-store",
+        store.to_str().unwrap(),
+        "--revocation-store",
+        revocation.to_str().unwrap(),
+        "--json",
+    ]);
+    assert_eq!(status(&output), 3);
+    let response = parse_json(&output);
+    assert_eq!(response["errors"][0]["code"], "revocation_store_invalid");
+    let message = response["errors"][0]["message"]
+        .as_str()
+        .expect("a message");
+    assert!(message.contains("too large"), "{message}");
+    assert!(!message.contains("huge.crl"), "the message names no file");
+}
+
+/// A symlinked revocation-store entry is skipped rather than followed.
+#[cfg(unix)]
+#[test]
+fn a_symlinked_revocation_store_entry_is_never_followed() {
+    let directory = scratch();
+    let store = trust_store(directory.path());
+    let outside = directory.path().join("outside.crl");
+    std::fs::write(&outside, b"not a CRL either").expect("the outside file is written");
+    let revocation = directory.path().join("revocation");
+    std::fs::create_dir_all(revocation.join("crls")).expect("the crls directory is created");
+    std::os::unix::fs::symlink(&outside, revocation.join("crls/link.crl"))
+        .expect("the symlink is created");
+
+    let output = run(&[
+        "verify",
+        fixture("plain-base64.es3").to_str().unwrap(),
+        "--trust-store",
+        store.to_str().unwrap(),
+        "--revocation-store",
+        revocation.to_str().unwrap(),
+        "--json",
+    ]);
+    // The linked file is not classified at all, so the store loads empty and
+    // the run reaches its ordinary verdict rather than a store failure.
+    assert_ne!(status(&output), 3, "the link must not have been read");
+}

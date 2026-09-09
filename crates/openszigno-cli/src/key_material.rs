@@ -10,11 +10,11 @@
 //! warning, or the JSON envelope. The paths may appear, because the caller
 //! typed them and they are how a failure is acted on. The contents never do.
 
-use std::fs;
 use std::path::Path;
 
 use zeroize::Zeroizing;
 
+use crate::input::{BoundedReadError, read_bounded_file};
 use crate::response::CliError;
 
 /// The one environment variable this tool takes a passphrase from.
@@ -34,20 +34,25 @@ pub(crate) const MAX_KEY_FILE_BYTES: u64 = 1024 * 1024;
 /// `what` names the kind of file in the error, never the path's contents. The
 /// buffer zeroes itself when it is dropped, so key and passphrase bytes do not
 /// linger in freed memory.
+///
+/// The file is opened once and judged through that one descriptor, so neither
+/// the symlink refusal nor the cap can be walked past by replacing or growing
+/// the file after a check and before the read.
 pub(crate) fn read_file(path: &Path, what: &str) -> Result<Zeroizing<Vec<u8>>, CliError> {
-    let metadata = fs::symlink_metadata(path)
-        .map_err(|_| CliError::io(format!("the {what} file could not be inspected")))?;
-    if !metadata.is_file() {
-        return Err(CliError::io(format!(
-            "the {what} path is not a regular file"
-        )));
-    }
-    if metadata.len() > MAX_KEY_FILE_BYTES {
-        return Err(CliError::io(format!("the {what} file is too large")));
-    }
-    fs::read(path)
+    read_bounded_file(path, MAX_KEY_FILE_BYTES)
         .map(Zeroizing::new)
-        .map_err(|_| CliError::io(format!("the {what} file could not be read")))
+        .map_err(|error| match error {
+            BoundedReadError::Inspect => {
+                CliError::io(format!("the {what} file could not be inspected"))
+            }
+            BoundedReadError::NotRegular => {
+                CliError::io(format!("the {what} path is not a regular file"))
+            }
+            BoundedReadError::TooLarge { .. } => {
+                CliError::io(format!("the {what} file is too large"))
+            }
+            BoundedReadError::Read => CliError::io(format!("the {what} file could not be read")),
+        })
 }
 
 /// The passphrase for an encrypted key: the file if one was named, otherwise
@@ -87,6 +92,8 @@ pub(crate) fn passphrase(
 mod tests {
     use super::*;
 
+    use std::fs;
+
     #[test]
     fn a_missing_file_is_an_io_error_that_names_only_the_kind() {
         let error = read_file(Path::new("/nonexistent/openszigno/key.pem"), "signing key")
@@ -115,5 +122,42 @@ mod tests {
             .expect("there is a passphrase");
         // The trailing space is part of the secret; only the line ending is not.
         assert_eq!(&value[..], b"secret ");
+    }
+
+    /// The cap is inclusive: a key file of exactly the documented maximum is
+    /// read, and one byte more is refused.
+    #[test]
+    fn the_key_file_cap_is_inclusive_and_holds_one_byte_past_it() {
+        let temporary = tempfile::tempdir().expect("a temporary directory");
+        let at_the_cap = temporary.path().join("at-the-cap");
+        fs::write(&at_the_cap, vec![b'x'; MAX_KEY_FILE_BYTES as usize])
+            .expect("the file is written");
+        let bytes = read_file(&at_the_cap, "signing key").expect("a file at the cap is read");
+        assert_eq!(bytes.len(), MAX_KEY_FILE_BYTES as usize);
+
+        let over_the_cap = temporary.path().join("over-the-cap");
+        fs::write(&over_the_cap, vec![b'x'; MAX_KEY_FILE_BYTES as usize + 1])
+            .expect("the file is written");
+        let error = read_file(&over_the_cap, "signing key").expect_err("one byte too many");
+        assert_eq!(error.code, "io_error");
+        assert_eq!(error.exit, 3);
+        assert_eq!(error.message, "the signing key file is too large");
+    }
+
+    /// A symlink standing where a key file would be is refused rather than
+    /// followed, and it is refused by the open itself, so replacing the file
+    /// with a link after a check would not help an attacker either.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_is_never_read_as_key_material() {
+        let temporary = tempfile::tempdir().expect("a temporary directory");
+        let target = temporary.path().join("real-key.pem");
+        fs::write(&target, b"not really a key").expect("the file is written");
+        let link = temporary.path().join("link.pem");
+        std::os::unix::fs::symlink(&target, &link).expect("the symlink is created");
+
+        let error = read_file(&link, "signing key").expect_err("a symlink is not a key file");
+        assert_eq!(error.code, "io_error");
+        assert_eq!(error.message, "the signing key path is not a regular file");
     }
 }
