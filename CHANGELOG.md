@@ -47,8 +47,8 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
   ahead of the run's material, so a response padded up to that bound pushed the
   responder's issuing CA out of the pool and a central responder the caller
   genuinely trusts came back as one nothing vouched for
-  (`revocation_data_invalid`). The run's own candidates — `ds:KeyInfo`,
-  `xades:CertificateValues`, the trust store — now come first and the
+  (`revocation_data_invalid`). The run's own candidates (`ds:KeyInfo`,
+  `xades:CertificateValues`, the trust store) now come first and the
   response's certificates fill the remainder. The bound and the
   per-public-key deduplication are unchanged, so the work one response can ask
   for is bounded exactly as before.

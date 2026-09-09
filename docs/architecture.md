@@ -2250,8 +2250,8 @@ service identities has trust material even though it has no trust-store
 anchors at all. The responder's path is built with the same rules the signer's
 was, so a central responder running under a listed issuing CA reaches that CA
 and is authorised there. The model is skipped only when *nothing whatsoever*
-was configured — no store anchor and no listed service that supplies a
-certificate — because then a path search can reach nothing and is pure work.
+was configured (no store anchor and no listed service that supplies a
+certificate), because then a path search can reach nothing and is pure work.
 
 Both models that involve a responder certificate ask about it at
 **`producedAt`**, the instant the responder asserts it spoke: the trusted model
@@ -2279,8 +2279,8 @@ one full path search per certificate.
 
 The bound cuts the response's certificates, never the run's own. Path building
 for the trusted model considers at most `max_certificates` candidates, so the
-pool it is handed puts the certificates the run already held — the signature's
-`ds:KeyInfo` and `xades:CertificateValues`, and the trust store — ahead of the
+pool it is handed puts the certificates the run already held (the signature's
+`ds:KeyInfo` and `xades:CertificateValues`, and the trust store) ahead of the
 certificates the response carried. The other order let a response padded up to
 the bound push the responder's own issuing CA out of path building, so a
 central responder the caller genuinely trusts came back unauthorised because
