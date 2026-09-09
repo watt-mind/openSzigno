@@ -1508,6 +1508,20 @@ below 2048 bits stay refused whatever it is set to. It does not loosen
 certificate-path validation either — a SHA-1-signed certificate is still
 `cert_algorithm_rejected`.
 
+The same rule holds **inside an RFC 3161 timestamp token**, in both places a
+token can name SHA-1: the `messageImprint` digest algorithm, and the
+`SignerInfo` digest — which is what the signed `messageDigest` attribute is
+computed with and, under a bare `rsaEncryption` signature algorithm, what the
+signature itself is computed with. Without the flag both are refused, as
+`timestamp_imprint_mismatch` and `timestamp_signature_invalid` respectively.
+With it the imprint is recomputed and the signature is checked, and what is
+emitted is `algorithm_legacy_allowed` (`unknown`) instead of
+`timestamp_imprint_ok`/`timestamp_signature_ok` (`passed`). The token therefore
+stays `verified: false`, does not become the validation time, and the verdict
+stays capped at `indeterminate`: recomputing a SHA-1 imprint is diagnosis, not
+proof, because a second preimage would let the same token be claimed over other
+data.
+
 Canonicalization is implemented in-tree, over the same `roxmltree` tree the
 structural parser built, rather than delegated. The candidate library named in
 the design (`bergshamra-c14n`) canonicalizes its own parser's tree and selects
@@ -2829,7 +2843,7 @@ verify), and `revocation_not_checked` (the caller switched revocation off).
 | `signature_algorithm_allowed` | `passed` | `ds:SignatureMethod` is inside the allowlist. |
 | `digest_algorithm_allowed` | `passed` | Every `ds:DigestMethod` is inside the allowlist. |
 | `algorithm_rejected` | `failed` | A signature method, a digest method, or a signing key is outside the pinned policy. May appear more than once. |
-| `algorithm_legacy_allowed` | `unknown` | SHA-1 was admitted because `--allow-legacy-algorithms` was given. Blocking: caps the verdict at `indeterminate`. May appear twice, once for the signature method and once for the digests. |
+| `algorithm_legacy_allowed` | `unknown` | SHA-1 was admitted because `--allow-legacy-algorithms` was given. Blocking: caps the verdict at `indeterminate`. May appear more than once: for the signature method, for the reference digests, and inside a timestamp token for its message imprint and its `SignerInfo` digest. |
 | `transforms_allowed` | `passed` | Every transform is inside the allowlist. |
 | `transform_not_allowed` | `failed` | A transform is outside it; XSLT and XPath always are. |
 | `references_same_document` | `passed` | Every `ds:Reference/@URI` is `""` or `#id`. |

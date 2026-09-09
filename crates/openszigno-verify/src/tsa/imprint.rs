@@ -41,15 +41,25 @@ pub(super) fn check_imprint(
         )),
         Some(algorithm) => {
             let computed = digest(algorithm, &input.imprint_input);
-            if computed == tst_info.message_imprint.hashed_message.as_bytes() {
-                checks.push(Check::passed(
-                    CheckCode::TimestampImprintOk,
-                    "the message imprint matches the data the timestamp covers",
-                ));
-            } else {
+            if computed != tst_info.message_imprint.hashed_message.as_bytes() {
                 checks.push(Check::failed(
                     CheckCode::TimestampImprintMismatch,
                     "the message imprint does not match the data the timestamp covers",
+                ));
+            } else if algorithm.is_legacy() {
+                // Recomputing a SHA-1 imprint is diagnosis, not proof: a
+                // second preimage would let the same token be claimed over
+                // other data. `--allow-legacy-algorithms` asked to be shown
+                // the answer, not to be told the token is verified, so this is
+                // `unknown` and the token stays unverified.
+                checks.push(Check::unknown(
+                    CheckCode::AlgorithmLegacyAllowed,
+                    "the message imprint names SHA-1 and matches the data the timestamp covers, admitted only because legacy algorithms were allowed; its strength is not vouched for",
+                ));
+            } else {
+                checks.push(Check::passed(
+                    CheckCode::TimestampImprintOk,
+                    "the message imprint matches the data the timestamp covers",
                 ));
             }
         }

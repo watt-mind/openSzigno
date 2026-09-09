@@ -262,6 +262,14 @@ pub struct TimestampSpec {
     pub duplicate_token: bool,
     /// Emit a token that is not decodable Base64.
     pub undecodable_token: bool,
+    /// Name SHA-1 as the message imprint's digest algorithm, and compute the
+    /// imprint with it. A legacy algorithm this build admits only under
+    /// `--allow-legacy-algorithms`, and then only for diagnosis.
+    pub sha1_imprint: bool,
+    /// Name SHA-1 as the `SignerInfo` digest algorithm, which is also the
+    /// digest the `messageDigest` attribute and the bare `rsaEncryption`
+    /// signature are computed with.
+    pub sha1_signer_digest: bool,
 }
 
 impl TimestampSpec {
@@ -280,6 +288,8 @@ impl TimestampSpec {
             wrap_in_response: None,
             duplicate_token: false,
             undecodable_token: false,
+            sha1_imprint: false,
+            sha1_signer_digest: false,
         }
     }
 }

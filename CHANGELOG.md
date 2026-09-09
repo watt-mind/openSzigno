@@ -49,6 +49,15 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
 
 ### Fixed
 
+- `--allow-legacy-algorithms` no longer lets an RFC 3161 timestamp token
+  report itself as verified on SHA-1. A SHA-1 `messageImprint` emitted
+  `timestamp_imprint_ok` (`passed`) and a SHA-1 `SignerInfo` digest emitted
+  `timestamp_signature_ok` (`passed`), so the token reached `verified: true`
+  and its `genTime` became the validation time — under a flag that exists for
+  diagnosis and everywhere else caps the verdict. Both now emit
+  `algorithm_legacy_allowed` (`unknown`) instead, so the token stays
+  unverified and the verdict stays `indeterminate`. Without the flag both are
+  refused exactly as before. `schema_version` stays `1`.
 - Document coverage finds the payload `ds:Object` whatever the dossier spells
   its identifier attribute. The parser, the reference resolver and the XAdES
   reader accept `Id`, `ID` and `id`; coverage read only `Id`, so a document
