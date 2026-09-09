@@ -946,3 +946,108 @@ fn a_signature_that_would_break_an_existing_reference_is_refused() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// 10. Co-signing
+// ---------------------------------------------------------------------------
+
+/// A document this tool has already signed can be signed again, by another
+/// key, and both signatures verify.
+///
+/// Every identifier used to be derived from the document index alone, so the
+/// second run collided with its own first signature and reported
+/// `sign_failed`. The identifiers are disambiguated instead, and the first
+/// signature is left exactly as it was.
+#[test]
+fn a_document_already_signed_by_this_tool_can_be_co_signed() {
+    let root_key = rsa_key(keys::ROOT_RSA2048);
+    let root = self_signed(
+        &CertSpec::ca("openSzigno Test Root", BasicConstraints::Unconstrained),
+        &root_key,
+    );
+    let first = issued_by(
+        &CertSpec::signer("openSzigno Test Signer"),
+        &rsa_key(keys::SIGNER_RSA2048),
+        &root,
+        &root_key,
+    );
+    let second = issued_by(
+        &CertSpec::signer("openSzigno Second Signer"),
+        &rsa_key(keys::SECOND_RSA2048),
+        &root,
+        &root_key,
+    );
+    let pki = Pki {
+        root_der: root.der,
+        signer_der: first.der,
+        signer_key_der: pkcs8(keys::SIGNER_RSA2048),
+        tsa_der: Vec::new(),
+        tsa_key: rsa_key(keys::THIRD_RSA2048),
+    };
+    let fixture = fixture(&pki, 1);
+    std::fs::write(fixture.path("second.key"), pkcs8(keys::SECOND_RSA2048))
+        .expect("the second key is written");
+    std::fs::write(fixture.path("second.crt"), &second.der)
+        .expect("the second certificate is written");
+
+    let signed = sign(&fixture, &[]);
+    assert_eq!(signed["data"]["signatures"][0]["id"], "sig-doc0");
+    let once = std::fs::read(fixture.path("signed.es3")).expect("the first output is read");
+    std::fs::rename(fixture.path("signed.es3"), fixture.path("input.es3"))
+        .expect("the signed dossier becomes the next run's input");
+
+    let output = sign_with(&fixture, "second.key", "second.crt", &[]);
+    let report = json(&output);
+    assert!(
+        output.status.success(),
+        "the second run must succeed: {report}"
+    );
+    assert_eq!(report["data"]["signatures"][0]["id"], "sig-doc0-2");
+
+    // The first signature is untouched: its bytes are still in the file.
+    let twice = String::from_utf8(
+        std::fs::read(fixture.path("signed.es3")).expect("the second output is read"),
+    )
+    .expect("it is UTF-8");
+    let once = String::from_utf8(once).expect("it is UTF-8");
+    let first_element = once
+        .split_once("<ds:Signature ")
+        .expect("the first signature is there")
+        .1;
+    let first_element = first_element
+        .split_once("</ds:Signature>")
+        .expect("it ends")
+        .0;
+    assert!(
+        twice.contains(first_element),
+        "the first signature must be left exactly as it was"
+    );
+    assert!(twice.contains("Id=\"signed-props-sig-doc0-2\""));
+
+    let verified = json(&verify(&fixture, &[]));
+    assert_eq!(
+        verified["data"]["signatures"]
+            .as_array()
+            .expect("an array")
+            .len(),
+        2
+    );
+    assert_eq!(
+        checks(&verified)
+            .iter()
+            .filter(|(code, status)| code == "signature_value_ok" && status == "passed")
+            .count(),
+        2,
+        "both signatures verify: {:?}",
+        checks(&verified)
+    );
+    let covered = verified["data"]["documents"][0]["covered_by"]
+        .as_array()
+        .expect("an array");
+    let mut indices: Vec<i64> = covered
+        .iter()
+        .map(|entry| entry["signature_index"].as_i64().expect("an index"))
+        .collect();
+    indices.sort_unstable();
+    assert_eq!(indices, vec![0, 1], "both signatures cover the document");
+}
