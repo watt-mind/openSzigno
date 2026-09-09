@@ -16,10 +16,6 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
   `encoding` pseudo-attribute and reports the label together with the byte
   range holding it, so a writer restating the declaration agrees with the
   decoder byte for byte. Additive; `schema_version` stays `1`.
-- `openszigno_core::declared_encoding`, which reads the XML declaration's
-  `encoding` pseudo-attribute and reports the label together with the byte
-  range holding it, so a writer restating the declaration agrees with the
-  decoder byte for byte. Additive; `schema_version` stays `1`.
 - Two fuzz targets for code that had none. `extract_plan` drives the CLI's
   extraction planner with arbitrary document titles and declared extensions
   and asserts that no planned name is a path, that no two names in one
