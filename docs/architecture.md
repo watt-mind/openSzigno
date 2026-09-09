@@ -1939,6 +1939,17 @@ says they should is `cert_malformed` (failed). Treating a decoding failure as
 absence would make a corrupt `keyUsage` or `nameConstraints` silently vanish,
 which is the wrong direction for every one of them.
 
+**The two algorithm identifiers must agree.** RFC 5280 section 4.1.1.2
+requires a certificate's outer `signatureAlgorithm` to repeat
+`tbsCertificate.signature`, and one on which they differ is `cert_malformed`
+(failed). Only the inner field is covered by the CA's signature, so a reader
+that verifies under the outer one would be verifying under an algorithm the CA
+never attested to. The comparison is on the OID, with an absent `parameters`
+field and an explicit `NULL` treated as the same statement: RFC 4055 requires
+`NULL` for the RSA family and RFC 5758 requires absence for the ECDSA one, and
+real CAs have emitted both spellings, so anything else must match byte for
+byte.
+
 Not implemented: authority/subject key identifier matching as a path
 hint, certificate policies and `policyConstraints`, `inhibitAnyPolicy`,
 qualified-status determination, and cross-certificate handling beyond what
@@ -2871,7 +2882,7 @@ verify), and `revocation_not_checked` (the caller switched revocation off).
 | `signing_certificate_available` | `passed` | A usable certificate was found in `ds:KeyInfo`. |
 | `signing_certificate_missing` | `failed` | None was. |
 | `signing_time_present` | `info` | Reports whether a claimed `xades:SigningTime` was read. Informational: the claim is unauthenticated whether it is there or not, so its presence decides nothing. |
-| `cert_malformed` | `failed` | A certificate in the path could not be re-encoded or its signature is not a whole number of bytes. |
+| `cert_malformed` | `failed` | A certificate in the path could not be re-encoded, its signature is not a whole number of bytes, an extension's bytes do not decode as its OID says they should, or its outer `signatureAlgorithm` differs from `tbsCertificate.signature` (RFC 5280 4.1.1.2). |
 | `cert_path_ok` | `passed` | A path to a configured anchor was built and every rule above holds. |
 | `cert_path_unknown` | `unknown` | No trust anchors were configured. |
 | `cert_path_untrusted` | `failed` | No path to a configured anchor exists. The message says how many candidates were considered and names the issuer CN of the highest certificate reached, which is the public CA name a caller needs to add to the store. |

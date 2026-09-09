@@ -49,6 +49,14 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
 
 ### Fixed
 
+- A certificate whose outer `signatureAlgorithm` differs from
+  `tbsCertificate.signature` is refused with `cert_malformed`. RFC 5280
+  section 4.1.1.2 requires the two to be the same algorithm identifier, and
+  only the inner one is covered by the CA's signature, so a reader that
+  consults the outer field was verifying under an algorithm the CA never
+  attested to. An absent `parameters` field and an explicit `NULL` still count
+  as agreeing, which is the difference real CAs actually emit.
+  `schema_version` stays `1`.
 - `--allow-legacy-algorithms` no longer lets an RFC 3161 timestamp token
   report itself as verified on SHA-1. A SHA-1 `messageImprint` emitted
   `timestamp_imprint_ok` (`passed`) and a SHA-1 `SignerInfo` digest emitted
