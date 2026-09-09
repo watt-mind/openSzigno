@@ -493,3 +493,44 @@ fn an_incomplete_frame_scope_covers_nothing() {
     );
     assert_eq!(states(&report), vec![CoverageState::Uncovered]);
 }
+
+/// XMLDSig's schema spells the attribute `Id`, but real dossiers also carry
+/// `ID` and `id`, and the parser, the reference resolver and the XAdES reader
+/// all accept the three spellings. Coverage read only `Id`, so a document
+/// whose payload object spelled it `id` was reported as uncovered by the very
+/// signature that digests it.
+#[test]
+fn a_lowercase_payload_id_reports_the_same_coverage() {
+    let pki = pki();
+    let coverage_of = |attribute: &'static str| {
+        let spec = DossierSpec {
+            payload_id_attribute: attribute,
+            document_signature: Some(complete(
+                &pki,
+                document_signature(vec![pki.signer_der.clone()]),
+            )),
+            ..Default::default()
+        };
+        let report = run_trusted(&build(&spec, &[("doc", &pki.signer_key)]), &pki);
+        assert_eq!(
+            report.signatures[0].verdict,
+            Verdict::Valid,
+            "the signature itself is unaffected by how the attribute is spelled"
+        );
+        (
+            states(&report),
+            report.documents[0].covered_by[0].via,
+            report.verdict,
+        )
+    };
+
+    assert_eq!(coverage_of("id"), coverage_of("Id"));
+    assert_eq!(
+        coverage_of("id"),
+        (
+            vec![CoverageState::Covered],
+            CoverageVia::Direct,
+            Verdict::Valid
+        )
+    );
+}

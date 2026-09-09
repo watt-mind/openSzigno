@@ -9,7 +9,7 @@ use openszigno_core::XMLDSIG_NAMESPACE;
 use openszigno_core::roxmltree::Node;
 
 use crate::codes::{Check, CheckCode, CheckStatus, Verdict};
-use crate::dsig::{Context, direct_child, direct_children};
+use crate::dsig::{Context, direct_child, direct_children, id_of};
 use crate::references::{ReferenceScope, effective_node_set, parse_reference, resolve_reference};
 use crate::report::{
     CoverageState, CoverageVia, CoveringSignature, DocumentCoverage, SignatureReport,
@@ -208,8 +208,13 @@ pub(crate) fn document_coverage<'a, 'input>(
             continue;
         };
         modelled += 1;
+        // The `OBJREF` is matched against the payload object's identifier under
+        // the same three spellings the parser and the reference resolver
+        // accept. Reading only `Id` here made a dossier whose payload object
+        // spells it `id` — which the parser modelled and a `URI="#..."`
+        // reference resolved to — report its own document as uncovered.
         let payload = direct_children(node, openszigno_core::XMLDSIG_NAMESPACE, "Object")
-            .find(|object| object.attribute("Id") == Some(document.object_ref.as_str()));
+            .find(|object| id_of(*object) == Some(document.object_ref.as_str()));
 
         let mut covered_by = Vec::new();
         for source in &sources {

@@ -49,6 +49,12 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
 
 ### Fixed
 
+- Document coverage finds the payload `ds:Object` whatever the dossier spells
+  its identifier attribute. The parser, the reference resolver and the XAdES
+  reader accept `Id`, `ID` and `id`; coverage read only `Id`, so a document
+  whose payload object used one of the other two spellings was reported
+  `uncovered` by the very signature that digests it, and the dossier's verdict
+  was capped at `indeterminate`. `schema_version` stays `1`.
 - An OCSP response can no longer make `verify` do unbounded work. The `certs`
   field of a `BasicOCSPResponse` is attacker-supplied and was read in full, and
   every certificate in it naming the responder drove a signature verification

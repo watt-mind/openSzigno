@@ -375,6 +375,10 @@ impl ExtraDocumentSpec {
 pub struct DossierSpec {
     pub namespace: String,
     pub payload: String,
+    /// How the signed document's payload `ds:Object` spells its identifier.
+    /// XMLDSig's schema is `Id`, but real dossiers also carry `ID` and `id`,
+    /// and the parser accepts all three.
+    pub payload_id_attribute: &'static str,
     pub document_signature: Option<SigSpec>,
     pub dossier_signature: Option<SigSpec>,
     /// An extra copy of the payload object, placed outside the signed document,
@@ -394,6 +398,7 @@ impl Default for DossierSpec {
         Self {
             namespace: ESZIGNO_NS.to_owned(),
             payload: BASE64.encode("hello"),
+            payload_id_attribute: "Id",
             document_signature: None,
             dossier_signature: None,
             decoy_object: None,
@@ -402,6 +407,14 @@ impl Default for DossierSpec {
             container_timestamps: Vec::new(),
         }
     }
+}
+
+/// The identifier of one element, under the three spellings the parser, the
+/// reference resolver and the coverage reader all accept.
+pub fn id_of<'a>(node: openszigno_core::roxmltree::Node<'a, '_>) -> Option<&'a str> {
+    node.attribute("Id")
+        .or_else(|| node.attribute("ID"))
+        .or_else(|| node.attribute("id"))
 }
 
 pub(super) fn render(spec: &DossierSpec) -> String {
@@ -428,8 +441,8 @@ pub(super) fn render(spec: &DossierSpec) -> String {
 </es:DocumentProfile>",
     );
     out.push_str(&format!(
-        "<ds:Object Id=\"obj0\">{}</ds:Object>",
-        spec.payload
+        "<ds:Object {}=\"obj0\">{}</ds:Object>",
+        spec.payload_id_attribute, spec.payload
     ));
     if let Some(signature) = &spec.document_signature {
         out.push_str(&render_signature(signature, namespace));
@@ -546,10 +559,7 @@ pub fn canonical_includes(xml: &str, spec: &ContainerTimestampSpec) -> Vec<u8> {
     let mut octets = Vec::new();
     for uri in &spec.includes {
         let id = uri.trim_start_matches('#');
-        let Some(node) = tree
-            .descendants()
-            .find(|node| node.attribute("Id") == Some(id))
-        else {
+        let Some(node) = tree.descendants().find(|node| id_of(*node) == Some(id)) else {
             continue;
         };
         octets.extend_from_slice(

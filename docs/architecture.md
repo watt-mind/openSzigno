@@ -1327,6 +1327,12 @@ set](#the-effective-node-set) of one of the signature's references, which is
 exactly the rule — and the same code — the scope check applies. A
 document-level signature covers only the document it is placed in.
 
+The payload `ds:Object` an `OBJREF` names is found under the three spellings
+of the identifier attribute the rest of the tool accepts, `Id`, `ID` and `id`,
+the same three the parser resolves an `OBJREF` with and a `URI="#..."`
+reference is resolved by. A dossier that spells it `id` therefore reports the
+same coverage as one that spells it `Id`.
+
 The states, per document:
 
 | State | Meaning |
