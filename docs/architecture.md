@@ -38,14 +38,13 @@ checked.
 
 Authoring is no longer a non-goal: `create` writes a new, unsigned dossier
 and encrypts its documents for a recipient, `sign` writes a signed copy of
-one, `sign --csc` signs through a remote service that holds the key, and
-`timestamp` writes a container `es:TimeStamp` without signing anything.
-What is still planned in [roadmap.md](roadmap.md) is the interactive
-`openszigno csc login` an `oauth2`-mode credential needs, which does not
-exist yet. Nothing below is softened by any of it: `sign` produces
-a signature and checks none of it, and even `--csc`, which keeps the key out
-of this process entirely, asserts nothing about what it wrote (see
-[remote-signing.md](remote-signing.md)).
+one, `sign --csc` signs through a remote service that holds the key,
+`timestamp` writes a container `es:TimeStamp` without signing anything, and
+`csc login` runs the OAuth 2.0 rounds a CSC service needs. What is still
+planned is listed in [roadmap.md](roadmap.md). Nothing below is softened by
+any of it: `sign` produces a signature and checks none of it, and even
+`--csc`, which keeps the key out of this process entirely, asserts nothing
+about what it wrote (see [remote-signing.md](remote-signing.md)).
 
 Permanent non-goals for this tool:
 
@@ -114,13 +113,17 @@ crates/openszigno-cli/src/
   response.rs         # the JSON envelope, CliError, and its exit statuses
   render/             # writing the envelope (json.rs) and the summary (human.rs)
   commands/           # one module per command: inspect, list, validate,
-                      #   extract, verify, create, sign, timestamp, skill
+                      #   extract, verify, create, sign, timestamp, csc,
+                      #   skill
   key_material.rs     # where a key, a certificate and a passphrase may come
                       #   from, shared by `extract --decrypt-key` and `sign`
-  csc/                # `sign --csc`: the remote signing backend
-    mod.rs            #   the flow and the Signer implementation
+  csc/                # the remote signing backend and its login
+    mod.rs            #   the flow, the Signer implementation, the OAuth 2.0
+                      #     endpoints and one authorization-code round
     config.rs         #   the --csc file: what it may say, and its secrets
     client.rs         #   one bounded POST per CSC operation
+    oauth.rs          #   PKCE, the authorization URL, the loopback listener
+    tokens.rs         #   the token endpoint, and the files a login writes
   extract/            # select.rs (--document), plan.rs (decode, names, nesting),
                       #   names.rs (filename safety), write.rs (writing and
                       #   rollback), output_dir.rs (race-resistant output)
@@ -470,13 +473,15 @@ configurable on the command line; see [roadmap.md](roadmap.md).
 | `create --output FILE --title TITLE` | Build one new, unsigned dossier from files on disk, without overwriting anything. The only command that writes a dossier. See [The create command](#the-create-command). | No: it reads its inputs only |
 | `sign FILE --output FILE --key KEY` | Write a signed copy of a dossier: one enveloped XMLDSig/XAdES signature per selected document, or one over the dossier. It verifies nothing. See [The sign command](#the-sign-command). | No: it reads its input only |
 | `timestamp FILE --output FILE --tsa URL` | Write a copy of a dossier carrying a container `es:TimeStamp`: an RFC 3161 token over the elements the format says a timestamp at that placement protects, and no signature. It verifies nothing. See [The timestamp command](#the-timestamp-command). | No: it reads its input only |
+| `csc login CONFIG.toml` | Run the OAuth 2.0 authorization-code round a CSC service needs and store the tokens `sign --csc` reads. The one command that waits for a person. See [The csc login command](#the-csc-login-command). | No: it reads no dossier |
 | `skill` | Write the agent skill the binary embeds (`crates/openszigno-cli/skills/openszigno/SKILL.md`) to stdout, byte for byte and with nothing added. Reads no dossier and emits no envelope. | No |
 
-In every command except `create` and `skill` `FILE` is either a path to a
-regular file or
+In every command except `create`, `csc login` and `skill` `FILE` is either
+a path to a regular file or
 `-`, which reads the dossier from standard input; see
 [Reading from stdin](#reading-from-stdin). `create` reads no dossier and
-takes no `FILE`. `skill` takes no `FILE` and no
+takes no `FILE`. `csc login` takes a configuration path rather than a
+dossier. `skill` takes no `FILE` and no
 flags of its own; see [The skill command](#the-skill-command).
 
 These flags apply to every command that reads a dossier:
@@ -537,6 +542,7 @@ These flags apply to every command that reads a dossier:
 | `--signing-time <TIME>` | The `xades:SigningTime` to write, RFC 3339, normalised to UTC seconds. Without it the current time is used. |
 | `--algorithm <NAME>` | `rsa-sha256` (default for an RSA key), `rsa-pss-sha256`, or `ecdsa-p256-sha256` (default for a P-256 key). Not accepted with `--csc`, where the credential's own `key/algo` list decides. |
 | `--online-allow-private` | Permit `--tsa` and `--csc` to contact loopback, private, link-local and unique-local addresses, and permit a plain `http` CSC service. Requires `--tsa` or `--csc`. |
+| `--no-interactive` | Never wait for a browser. A `--csc` credential whose authorisation mode is `oauth2` is then refused with `csc_authorization_required` during discovery, instead of the run printing an authorization URL and waiting on a loopback listener. Requires `--csc`. |
 | `--online-proxy <URL>` | Route the `--tsa` and `--csc` requests through this proxy. Requires `--tsa` or `--csc`. |
 
 `timestamp` takes a `FILE` and accepts:
@@ -550,6 +556,17 @@ These flags apply to every command that reads a dossier:
 | `--tsa-cert <FILE>` | A certificate for the timestamp's own `xades:CertificateValues`, so the authority's issuing CAs travel with the dossier. Repeatable; a PEM bundle may hold several. |
 | `--online-allow-private` | Permit `--tsa` to contact loopback, private, link-local and unique-local addresses. |
 | `--online-proxy <URL>` | Route the `--tsa` request through this proxy. |
+
+`csc login` takes a configuration path rather than a dossier, and accepts:
+
+| Flag | Meaning |
+| --- | --- |
+| `CONFIG.toml` | The same file `sign --csc` takes. Its `access_token_file` is where the token is written, so it is required here. |
+| `--credential <ID>` | Report this credential's authorisation mode after logging in, so the run says whether signing with it will need a second, interactive round. Overrides `credential_id` in the configuration. |
+| `--open` | Also hand the authorization URL to the platform's browser opener. Off by default: the URL is always printed, and opening a browser is an action on the caller's machine. |
+| `--json` | Emit exactly one JSON object on stdout. |
+| `--online-allow-private` | Permit the exchange to contact loopback, private, link-local and unique-local addresses, and a plain `http` service. |
+| `--online-proxy <URL>` | Route the requests through this proxy. |
 
 In JSON mode, stdout contains exactly one JSON object and diagnostics go to
 stderr. Document ordering is the source XML order. No command writes XML
@@ -1006,7 +1023,10 @@ I/O and extraction policy.
 | `csc_rejected` | CLI, author | 5 | The service answered and what it answered cannot be used. The message carries the operation, the HTTP status and the service's own `error` string, bounded and stripped of control characters. `error_description` is never quoted, and neither is the bearer token. |
 | `csc_credential_ambiguous` | author | 4 | The account holds several signing credentials and none was named. The message lists the identifiers; pass one as `--csc-credential`. |
 | `csc_credential_unusable` | author | 4 | The named credential cannot produce a signature this build writes: its key or certificate is not enabled or valid, it published no certificate or no algorithm, its certificate is unreadable, or its `key/algo` list offers nothing this build writes, including RSASSA-PSS with no `signAlgoParams`, which would mean guessing the salt length. |
-| `csc_authorization_required` | author | 4 | The credential's authorisation mode is `oauth2`, which needs a second OAuth 2.0 round with `scope=credential` and therefore a browser. This build is non-interactive; see [Signing through a CSC service](#signing-through-a-csc-service). |
+| `csc_authorization_required` | author | 4 | The credential's authorisation mode is `oauth2`, which needs a second OAuth 2.0 round with `scope=credential` and therefore a browser, and `--no-interactive` refused it. Without that flag `sign` runs the round itself; see [Signing through a CSC service](#signing-through-a-csc-service). |
+| `csc_login_failed` | CLI, author | 5 | An OAuth 2.0 round did not complete: the authorization server refused it (the message carries its own `error` identifier), the token endpoint answered a refusal or something that is not a token response, the loopback listener could not be bound, or nothing arrived at it before it gave up. |
+| `csc_state_mismatch` | CLI, author | 5 | The redirect that arrived at the loopback listener carried a `state` this run did not issue. The authorization code is discarded unused and never redeemed. |
+| `csc_token_unusable` | CLI, author | 4 | The stored token cannot be used: the record beside it is unreadable, the token expired and no refresh token was issued with it, the token endpoint answered without an access token, or the token file could not be written. The remedy is another `openszigno csc login`. |
 | `csc_signature_invalid` | author | 5 | The signature the service returned does not verify against the certificate it published. Nothing is written. A hash-only service signs a digest it never sees the document behind, so this is the one check that tells a right signature from a well-formed wrong one. |
 | `sign_failed` | author | 5 | Signing or timestamping could not be completed: an identifier the element needs is already used in the dossier, an element could not be canonicalized, or the key refused to sign. |
 | `invalid_output_path` | CLI | 4 | The `create --output`, `sign --output` or `timestamp --output` path does not name a file. |
@@ -1050,6 +1070,9 @@ Warning codes. Warnings never change the exit status by themselves:
 | `timestamped_dossier_unverified` | `timestamp` | A timestamp token was obtained and embedded, and nothing was checked. Every successful `timestamp` reports it. |
 | `csc_config_permissive` | `sign --csc` | The `--csc` configuration file is readable by other users on this machine and may hold a bearer token. The mode is never enforced, only reported. Unix only. |
 | `csc_key_unused` | `sign --csc` | The configuration names `redirect_uri`, `client_secret` or `client_secret_file`, which belong to the interactive `csc login` flow and are not used by this run. |
+| `csc_config_permissive` | `sign --csc`, `csc login` | The `--csc` configuration file is readable by other users on this machine and may hold a bearer token. The mode is never enforced, only reported. Unix only. |
+| `csc_token_refreshed` | `sign --csc` | The stored access token had expired and was renewed with its refresh token before anything else was contacted. The renewed token replaced the stored one. |
+| `csc_no_refresh_token` | `csc login` | The service issued no refresh token, so the login has to be repeated when the access token expires. |
 | `nested_dossier_invalid` | `extract` | An embedded dossier could not be parsed; the raw payload was kept and the run continued. |
 
 ## The `verify` command
@@ -3710,7 +3733,7 @@ digests it, so there is nothing to sign until it is in hand.
 | 1 | `POST info` | `specs`, `methods`, `supportsRar`, `supportedHashTypes` and `signAlgorithms`. A `1.x` service, or one that will not sign a data-to-be-signed representation, stops the run here. |
 | 2 | `POST credentials/list` | Only when no credential was named. Exactly one is taken; several is `csc_credential_ambiguous` with the identifiers. |
 | 3 | `POST credentials/info` | With `certificates: "chain"` and `certInfo: true`: the signing certificate, the rest of the chain, the key's algorithms and the authorisation mode. |
-| 4 | `POST credentials/authorize` | Once per signature, with `numSignatures: 1`, the real digest, `hashAlgorithmOID` `2.16.840.1.101.3.4.2.1`, and `PIN`/`OTP` from the files the configuration names. Answers with Signature Activation Data. |
+| 4 | `POST credentials/authorize`, or one `scope=credential` authorization round | Once per signature. Under `explicit` mode: `numSignatures: 1`, the real digest, `hashAlgorithmOID` `2.16.840.1.101.3.4.2.1`, and `PIN`/`OTP` from the files the configuration names, answered with Signature Activation Data. Under `oauth2` mode: a browser round bound to the same values, whose access token is the Signature Activation Data. |
 | 5 | `POST signatures/signHash` | The credential, the SAD, the same hash, and `signAlgo` with `signAlgoParams` where the scheme needs them. |
 
 The real hashes go into step 4, never placeholders, and `numSignatures` is the
@@ -3801,22 +3824,38 @@ pin_file = "pin"              # explicit-mode authorisation
 | `access_token`, `access_token_file` | Exactly one is required: the `scope=service` bearer token, obtained out of band. |
 | `credential_id` | Optional. `--csc-credential` overrides it. |
 | `pin_file`, `otp_file` | Optional. Read only for an `explicit`-mode credential. |
-| `client_secret`, `client_secret_file`, `redirect_uri` | Accepted and reserved for the interactive `csc login` flow; each earns a `csc_key_unused` warning. A `redirect_uri` that is not a loopback URI is refused. |
+| `client_secret`, `client_secret_file` | Optional. The confidential client's secret, sent only in a token request body, or as HTTP Basic credentials when the service's `info` lists `basic` among its `authType` values. |
+| `redirect_uri` | Optional. Must be a loopback URI (RFC 8252); anything else is refused. Its path, and its port when it names one other than `0`, are what the loopback listener binds and what the authorization request sends. |
+| `authorization_url`, `token_url` | Optional. The OAuth 2.0 endpoints. Without them, the ones under the `oauth2` base the service's own `info` publishes are used. |
 
 A relative secret path is resolved against the configuration file's own
 directory, and one trailing line ending is stripped. Permissions are not
 enforced, because a mode this tool refused would be a mode somebody worked
 around, but a world-readable file earns `csc_config_permissive`.
 
-#### What is not implemented
+#### The `oauth2` credential round
 
-A credential whose authorisation mode is `oauth2` needs a second OAuth 2.0
-authorization-code round with `scope=credential`, which needs a browser and a
-loopback redirect listener. This round is deliberately non-interactive, so such
-a credential is `csc_authorization_required` and the message names the flow to
-complete. RFC 9396 `authorization_details`, which `supportsRar` advertises,
-belongs to that same interactive flow: it is read from `info` and reported, and
-building it is part of the follow-up `openszigno csc login` work.
+A credential whose authorisation mode is `oauth2` is not authorised by a PIN.
+It needs a second OAuth 2.0 authorization-code round with `scope=credential`,
+bound to the hashes being signed, and the access token it yields is what goes
+into `signatures/signHash` as the `SAD`. Only `sign` knows those hashes, so
+`sign` runs the round itself, between steps 3 and 5: it prints the
+authorization URL on stderr, waits on a loopback listener, and redeems the
+code at the token endpoint. `csc login` cannot do it in advance, and does not
+try; what it can do is say, with `--credential`, that the next signing run will
+need one.
+
+The parameters go in as `credentialID`, `numSignatures`, `hashes` and
+`hashAlgorithmOID` query parameters, or as one RFC 9396 `authorization_details`
+object of type `credential` when the service's `info` reported
+`supportsRar: true`. Neither form is assumed: PrimeSign answers `true` and
+Cleverbase answers `false`
+([remote-signing.md](remote-signing.md#35-sandboxes-reached-directly)).
+
+`--no-interactive` refuses the round rather than running it, and refuses it
+during discovery rather than after the dossier has been read: the run stops
+with `csc_authorization_required`, which is what every `oauth2` credential did
+before this flow existed.
 
 CSC v1 is not supported. `info` reports `specs`, so a v1 service is detected
 and refused with a clear message rather than half-supported.
@@ -4048,6 +4087,88 @@ trust material the caller supplies, and it reports the answer as
 `dossier_timestamp_verified` or `document_timestamp_verified`. See
 [Container timestamps](#container-timestamps) and
 [Verification boundary](#verification-boundary).
+
+## The csc login command
+
+`openszigno csc login CONFIG.toml` obtains the `scope=service` bearer token
+every CSC operation carries, and stores it where `sign --csc` reads it. It is
+the one command in this tool that waits for a person; it reads no dossier,
+verifies nothing, and writes no XML.
+
+### What one run does
+
+| Step | What happens |
+| --- | --- |
+| 1 | `POST info`, without a token: `specs`, `supportsRar`, and the `oauth2` authorization server the service delegates to. It is the one CSC operation a service answers unauthenticated, which is what makes it the right first call for a run that has no token yet. |
+| 2 | A loopback listener is bound on `127.0.0.1`, on an ephemeral port unless `redirect_uri` pins one, and a PKCE verifier and a `state` are drawn from the operating system's random source. |
+| 3 | The authorization URL is printed on stderr, and handed to the platform opener as well only under `--open`. |
+| 4 | The redirect arrives at the listener. Its `state` is compared before its code is read; a mismatch is `csc_state_mismatch` and the code is discarded unused. |
+| 5 | `POST` to the token endpoint with the code, the PKCE verifier and the `redirect_uri`, and the client secret in the body or as HTTP Basic credentials. |
+| 6 | The access token is written to the file `access_token_file` names, and the expiry, the refresh token and the token endpoint into `<access_token_file>.record.json`. Both are created `0600` on Unix. |
+| 7 | With `--credential` or a configured `credential_id`, `POST credentials/info` under the fresh token, so the run says whether signing with it will need an interactive round. |
+
+### PKCE, the state, and the listener
+
+The exchange is RFC 7636 with `S256` and nothing else: a 32-byte verifier,
+base64url without padding, and its SHA-256 as the challenge. `plain` is never
+offered, because a downgrade to it is the one thing PKCE exists to prevent. The
+verifier lives in a buffer that zeroes itself and reaches only the token
+request body.
+
+The listener is the RFC 8252 section 7.3 shape, and it is deliberately narrow:
+it answers one path, gives everything else a `404` without reading further, and
+stops on the first answered redirect or on a five-minute deadline. The host is
+always `127.0.0.1`, whatever the configuration wrote, so a name that resolves
+elsewhere cannot move it off the machine.
+
+### Where the tokens are kept
+
+```text
+<access_token_file>              # the bearer token, one line, nothing else
+<access_token_file>.record.json  # {"expires_at":…, "refresh_token":…, "token_url":…}
+```
+
+`sign --csc` reads both. When the record says the access token has expired, or
+expires within a minute, the run renews it with the refresh token before
+anything is contacted and warns `csc_token_refreshed`; when there is no refresh
+token to renew it with, the run stops with `csc_token_unusable` naming
+`csc login` as the remedy, rather than letting an expired token surface as the
+service's own `csc_rejected`.
+
+The record carries its own token endpoint because a refresh has to happen
+before discovery: an expired token fails `info` too, so the endpoint cannot be
+something a later `info` call supplies.
+
+### The JSON shape
+
+```json
+{
+  "schema_version": 1,
+  "ok": true,
+  "command": "csc-login",
+  "data": {
+    "base_url": "https://qtsp.example/csc/v2",
+    "specs": "2.2.0.0",
+    "supports_rar": true,
+    "token_file": "/home/user/.config/openszigno/token",
+    "expires_at": "2026-09-09T13:00:00Z",
+    "refresh_token_stored": true,
+    "credential": {
+      "credential_id": "cred-1a2b3c",
+      "auth_mode": "oauth2",
+      "interactive_signature_required": true
+    }
+  },
+  "warnings": [],
+  "errors": []
+}
+```
+
+`credential` is `null` when no credential was named, and `expires_at` is `null`
+when the service stated no lifetime. **No token, refresh token, authorization
+code, PKCE verifier or client secret appears anywhere in the output**, on
+either stream, in either mode, and none of them is ever taken from or put into
+`argv`.
 
 ## Extraction policy
 

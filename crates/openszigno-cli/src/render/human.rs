@@ -432,6 +432,42 @@ pub(crate) fn write_human_success(command: &str, response: &Response) -> io::Res
                 "Timestamping verified nothing. Run `openszigno verify` with your own trust material to judge this timestamp."
             )?;
         }
+        "csc-login" => {
+            let data = &response.data;
+            writeln!(
+                out,
+                "Logged in to {}.",
+                display_json_string(&data["base_url"])
+            )?;
+            writeln!(
+                out,
+                "Token written to {} (mode 0600 on Unix; it is never printed).",
+                display_json_string(&data["token_file"])
+            )?;
+            let expiry = data["expires_at"]
+                .as_str()
+                .map_or_else(|| "not stated by the service".to_owned(), str::to_owned);
+            writeln!(
+                out,
+                "Expires: {expiry} | refresh token stored: {}",
+                data["refresh_token_stored"]
+            )?;
+            writeln!(
+                out,
+                "Service: specs={} | supportsRar={}",
+                display_json_string(&data["specs"]),
+                data["supports_rar"]
+            )?;
+            if let Some(credential) = data["credential"].as_object() {
+                writeln!(
+                    out,
+                    "Credential {} | auth mode={} | interactive signature round required: {}",
+                    display_json_string(&credential["credential_id"]),
+                    display_json_string(&credential["auth_mode"]),
+                    credential["interactive_signature_required"]
+                )?;
+            }
+        }
         "validate-structure" => {
             writeln!(
                 out,

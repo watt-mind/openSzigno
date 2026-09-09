@@ -3,7 +3,7 @@
 
 Runs a fixed command matrix over every fixture in `tests/fixtures/**/*.es3`,
 plus one `create` case that builds a dossier from `tests/fixtures/create/`,
-two `sign` refusals and one `timestamp` refusal,
+two `sign` refusals, one `timestamp` refusal and one `csc login` refusal,
 normalises the two time values that cannot be stable, and compares the result
 against the committed files under `tests/golden/`.
 
@@ -223,6 +223,24 @@ def timestamp_cases(temp):
         yield name, argv, cwd
 
 
+# The `csc login` matrix. The command binds a loopback listener and waits for
+# a browser, so no successful run can be a golden. What is pinned is the
+# refusal a mistyped configuration gets, which happens before a socket is
+# opened and is byte-identical on every machine.
+def csc_cases(temp):
+    """The `csc login` matrix: `(name, argv, cwd)` triples, all failures."""
+    for name in ("csc.login-config-invalid", "csc.login-config-invalid.human"):
+        cwd = temp / "csc" / name
+        cwd.mkdir(parents=True, exist_ok=True)
+        (cwd / "csc.toml").write_text(
+            'base_url = "https://qtsp.example/csc/v2"\n', encoding="utf-8"
+        )
+        argv = ["csc", "login", "csc.toml"]
+        if not name.endswith(".human"):
+            argv.append("--json")
+        yield name, argv, cwd
+
+
 def mask_json(node):
     """Mask the two time values in a parsed envelope, in place.
 
@@ -360,6 +378,7 @@ def matrix(binary, temp):
         ("create", create_cases),
         ("sign", sign_cases),
         ("timestamp", timestamp_cases),
+        ("csc", csc_cases),
     ):
         for name, argv, cwd in generator(temp):
             stdout, stderr, status = run(binary, argv, temp, cwd=cwd)

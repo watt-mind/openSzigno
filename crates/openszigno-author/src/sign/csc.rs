@@ -135,11 +135,17 @@ pub struct ServiceInfo {
     /// `oauth2code`, `basic`, `digest` or `external`.
     #[serde(default, rename = "authType")]
     pub auth_type: Vec<String>,
-    /// RFC 9396 rich authorization requests, for the interactive flow this
-    /// round does not implement. Recorded so the report can say what the
-    /// service offered.
+    /// RFC 9396 rich authorization requests. A service that answers `true`
+    /// takes the credential round's parameters as one `authorization_details`
+    /// object; one that answers `false` takes them as query parameters.
     #[serde(default, rename = "supportsRar")]
     pub supports_rar: bool,
+    /// The OAuth 2.0 authorization server this service delegates to, when it
+    /// publishes one. `csc login` uses it as the base for the authorization
+    /// and token endpoints whenever the configuration names neither, so a
+    /// service that publishes it needs no endpoint written down by hand.
+    #[serde(default)]
+    pub oauth2: Option<String>,
     /// Either the keyword `dtbsr` or a digest OID, depending on the vendor.
     #[serde(default, rename = "supportedHashTypes")]
     pub supported_hash_types: Vec<String>,

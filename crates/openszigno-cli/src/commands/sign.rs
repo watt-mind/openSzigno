@@ -180,6 +180,7 @@ fn load_backend(args: &SignArgs) -> Result<(Backend, Vec<Notice>), CliError> {
         credential: args.csc_credential.as_deref(),
         proxy: args.online_proxy.as_deref(),
         allow_private: args.online_allow_private,
+        interactive: !args.no_interactive,
     })?;
     Ok((Backend::Csc(Box::new(signer)), notices))
 }

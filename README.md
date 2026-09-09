@@ -150,6 +150,7 @@ the URLs the certificates themselves publish.
 | `create --output FILE --title TITLE` | Build one new, unsigned dossier from files on disk, with `--document`, `--zip`, `--embed`, `--encrypt-for`, and `--created`. Never overwrites the output. | 0, 2, 3, 4, 5 |
 | `sign FILE --output FILE --key KEY` | Write a signed copy of a dossier: one enveloped XMLDSig/XAdES signature per document, or one over the dossier with `--scope dossier`, optionally timestamped with `--tsa`, and with `--csc` instead of `--key` signed by a remote qualified certificate. Never overwrites the output. | 0, 2, 3, 4, 5 |
 | `timestamp FILE --output FILE --tsa URL` | Write a copy of a dossier carrying a container `es:TimeStamp`: an RFC 3161 token over the dossier, or over each selected document with `--scope document`, and no signature. Never overwrites the output. | 0, 2, 3, 4, 5 |
+| `csc login CONFIG.toml` | Run the OAuth 2.0 authorization-code round a Cloud Signature Consortium service needs and store the tokens `sign --csc` reads. Prints one URL, waits for the browser on a loopback listener, and prints no token. | 0, 2, 3, 4, 5 |
 | `skill` | Write the embedded agent skill (`SKILL.md`) to stdout and nothing else. Takes no `FILE` and no `--json`. | 0, 2, 3 |
 
 `create` is the writing side: it builds a new dossier from files on disk,
@@ -167,10 +168,10 @@ signing it: one RFC 3161 token, no key of any kind, refused rather than
 written where it would break something already in the file. See
 [The timestamp command](docs/architecture.md#the-timestamp-command).
 
-Every command except `create` and `skill` takes `-` in place of the path and
-reads the dossier from standard input. Every flag, the JSON envelope, the stable
-error, warning and check codes, the exit statuses, and the parser limits
-are specified in [docs/architecture.md](docs/architecture.md).
+Every command except `create`, `csc login` and `skill` takes `-` in place of
+the path and reads the dossier from standard input. Every flag, the JSON
+envelope, the stable error, warning and check codes, the exit statuses, and
+the parser limits are specified in [docs/architecture.md](docs/architecture.md).
 
 ## Verification
 
@@ -206,6 +207,10 @@ instead of a local key, so a qualified certificate held by a remote signature
 creation device signs the same structure and only the digest ever leaves the
 machine; see
 [Signing through a CSC service](docs/architecture.md#signing-through-a-csc-service).
+Run `openszigno csc login CONFIG.toml` first: it completes the OAuth 2.0
+authorization-code round with PKCE on a loopback redirect, stores the token
+`chmod 600` where the configuration says, and refreshes it later rather than
+letting it expire mid-run.
 
 **Writing is not verification.** `sign` produces a signature and checks
 nothing: not the key, not the certificate, not the chain, and it says so on

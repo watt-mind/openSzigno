@@ -42,6 +42,16 @@ pub enum SignErrorCode {
     /// The returned signature does not verify against the returned
     /// certificate. Nothing is written.
     CscSignatureInvalid,
+    /// An OAuth 2.0 round did not complete: the authorization server refused
+    /// it, the token endpoint answered something unusable, or nothing arrived
+    /// at the loopback listener before it gave up.
+    CscLoginFailed,
+    /// The redirect that arrived carried a `state` that is not the one this
+    /// run sent. The authorization code is discarded unused.
+    CscStateMismatch,
+    /// The stored token cannot be used: it is missing, it is malformed, or it
+    /// has expired and no refresh token was ever issued.
+    CscTokenUnusable,
 }
 
 impl SignErrorCode {
@@ -64,6 +74,9 @@ impl SignErrorCode {
             Self::CscCredentialUnusable => "csc_credential_unusable",
             Self::CscAuthorizationRequired => "csc_authorization_required",
             Self::CscSignatureInvalid => "csc_signature_invalid",
+            Self::CscLoginFailed => "csc_login_failed",
+            Self::CscStateMismatch => "csc_state_mismatch",
+            Self::CscTokenUnusable => "csc_token_unusable",
         }
     }
 
@@ -78,7 +91,9 @@ impl SignErrorCode {
             | Self::SignFailed
             | Self::CscUnreachable
             | Self::CscRejected
-            | Self::CscSignatureInvalid => 5,
+            | Self::CscSignatureInvalid
+            | Self::CscLoginFailed
+            | Self::CscStateMismatch => 5,
             _ => 4,
         }
     }
@@ -163,6 +178,9 @@ mod tests {
             SignErrorCode::CscCredentialUnusable,
             SignErrorCode::CscAuthorizationRequired,
             SignErrorCode::CscSignatureInvalid,
+            SignErrorCode::CscLoginFailed,
+            SignErrorCode::CscStateMismatch,
+            SignErrorCode::CscTokenUnusable,
         ] {
             let text = code.as_str();
             assert!(!text.is_empty());
@@ -179,6 +197,9 @@ mod tests {
         assert_eq!(SignErrorCode::CscConfigInvalid.exit(), 4);
         assert_eq!(SignErrorCode::CscAuthorizationRequired.exit(), 4);
         assert_eq!(SignErrorCode::CscSignatureInvalid.exit(), 5);
+        assert_eq!(SignErrorCode::CscLoginFailed.exit(), 5);
+        assert_eq!(SignErrorCode::CscStateMismatch.exit(), 5);
+        assert_eq!(SignErrorCode::CscTokenUnusable.exit(), 4);
     }
 
     #[test]
