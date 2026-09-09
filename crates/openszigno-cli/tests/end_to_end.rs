@@ -431,6 +431,9 @@ fn a_trusted_list_supplies_a_qualified_anchor() {
     assert_eq!(snapshot["territory"], "HU");
     assert_eq!(snapshot["sequence_number"], 7);
     assert_eq!(snapshot["signature_verified"], true);
+    // Which ETSI TS 119 612 format the file was, so a result records whether
+    // it rested on a TLv5 snapshot or a post-2026-04-29 TLv6 one.
+    assert_eq!(snapshot["version"], 6);
 }
 
 /// A 2014 signature under an issuing CA the list records, with the root listed

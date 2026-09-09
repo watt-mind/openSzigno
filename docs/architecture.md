@@ -2012,6 +2012,19 @@ combined anchor set is the union of the `--trust-store` anchors and the
 trusted-list ones, and each anchor is reported with its origin in the chain
 entry's `trust_anchor_origin` (`trust_store` or `trust_list`).
 
+Both published versions of the format are read. `SchemeInformation`'s
+`TSLVersionIdentifier` says which: `5` is TLv5, the format every EU member
+state published until 2026-04-28, and `6` is TLv6, mandatory from 2026-04-29
+with no transition period and required by ETSI TS 119 612 V2.3.1 and V2.4.1
+clause 5.3.1. The two share the schema namespace
+(`http://uri.etsi.org/02231/v2#`), the element vocabulary this build reads and
+the registered service-type and service-status URIs, so one parser serves
+both; the version is named in the `trust_list_loaded` message. A list stating
+any other version, or none, is `trust_list_invalid` (exit 3) with a message
+naming what it stated, because clause 5.3.1 makes the field the one thing that
+says which parsing rules apply. See
+[Trusted lists](trust.md#tlv5-and-tlv6).
+
 A trusted list gives what a directory of certificates cannot: **when** each CA
 was entitled to issue qualified certificates. For every `TSPService` of type
 `.../Svctype/CA/QC` or `.../Svctype/TSA/QTST`, each `X509Certificate` in the
@@ -2086,7 +2099,10 @@ TSA/QTST service type, and the code is reported in place of
 signed with, obtained out of band (for the EU list of trusted lists, from the
 Official Journal). The list's enveloped XMLDSig signature is then verified with
 the same core, the same canonicalization backend, and the same pinned
-allowlists a dossier gets, and it must cover the whole document. Without it,
+allowlists a dossier gets, and it must cover the whole document, either
+through the empty `URI`, which both live EU lists write, or through a
+same-document `#Id` naming the `TrustServiceStatusList` element, which
+TS 119 612 annex B.1.0 rule 2 allows equally. Without it,
 and without `--lotl`, the list is still read but `trust_list_unverified`
 (`unknown`) is emitted, so the run can never reach `valid`. Nothing is fetched;
 `docs/trust.md` describes the manual download workflow.
@@ -2617,6 +2633,7 @@ verify anything.
       "trust_store": "configured",
       "trust_lists": [
         {
+          "version": 6,
           "territory": "HU",
           "sequence_number": 99,
           "issue_date": "2026-07-15T08:42:53Z",

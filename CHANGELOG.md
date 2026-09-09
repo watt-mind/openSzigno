@@ -10,6 +10,35 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
 
 ## [Unreleased]
 
+### Added
+
+- Trusted lists are read in **both** published versions of ETSI TS 119 612.
+  The EU cut over from TLv5 to TLv6 on 2026-04-29 with no transition period,
+  so a verifier needs both: TLv6 for anything published from that date, TLv5
+  for every archived snapshot taken before it. `SchemeInformation`'s
+  `TSLVersionIdentifier` decides, `5` or `6` load, anything else and a list
+  that states no version at all are refused as `trust_list_invalid` (exit 3)
+  with a message naming what the file stated. Clause 5.3.1 says the field is
+  incremented exactly when the parsing rules change, so guessing at an
+  unknown one would be guessing about trust anchors. The version read is
+  reported as `policy.trust_lists[].version`, a new field alongside the
+  `territory`/`sequence_number`/`issue_date` a report already cited, and named
+  in the `trust_list_loaded` check message. Nothing else about TLv6
+  needed branching: V2.3.1 and V2.4.1 keep the `http://uri.etsi.org/02231/v2#`
+  namespace, the `ServiceDigitalIdentity` forms, `PointersToOtherTSL`, and
+  the registered service-status URIs unchanged, and both the live EU LOTL
+  (`rsa-sha512`) and the Hungarian list (`ecdsa-sha256`) sign with algorithms
+  already inside the pinned allowlist. `docs/trust.md` gains a "TLv5 and
+  TLv6" section with what changed, what did not, and a "TLv6 caveats" note.
+  Additive; `schema_version` stays `1`.
+- A trusted list whose `ds:Reference` names the `TrustServiceStatusList`
+  element by a same-document `#Id`, rather than with the empty `URI`, now
+  counts as covering the whole list. TS 119 612 annex B.1.0 rule 2 allows
+  either; both live EU lists write the empty URI, but a list using the `Id`
+  form was refused as partially covered. The "the signature must cover
+  everything" rule itself is unchanged, and the enveloped-signature transform
+  is still required in both forms.
+
 ### Changed
 
 - Tracked Markdown no longer uses em-dashes in prose, per CONTRIBUTING.md's

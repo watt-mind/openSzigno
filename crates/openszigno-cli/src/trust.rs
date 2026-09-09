@@ -199,6 +199,7 @@ pub(crate) fn load_trust_list(
 /// snapshot it relied on.
 pub(crate) fn snapshot_of(list: &openszigno_verify::TrustList) -> TrustListSnapshot {
     TrustListSnapshot {
+        version: list.version,
         territory: list.territory.clone(),
         sequence_number: list.sequence_number,
         issue_date: list.issue_date.clone(),

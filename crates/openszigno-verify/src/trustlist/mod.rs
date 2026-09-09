@@ -153,7 +153,7 @@ pub(super) fn verify_list_signature(
     let mut covers_document = false;
     for reference in references {
         match check_reference(source, root, *signature, reference, backend) {
-            Ok(whole_document) => covers_document |= whole_document,
+            Ok(covers_list) => covers_document |= covers_list,
             Err(message) => return invalid(&message),
         }
     }
@@ -194,7 +194,14 @@ pub(super) fn verify_list_signature(
 
 /// Verify one reference of the trusted list's signature.
 ///
-/// Returns whether this reference covers the whole document.
+/// Returns whether this reference covers the whole list.
+///
+/// TS 119 612 annex B.1.0 rule 2 asks for "a `ds:Reference` element with the
+/// URI attribute set to a value referencing the `TrustServiceStatusList`
+/// element enveloping the digital signature itself", which both the empty URI
+/// and a same-document `#Id` naming the list element satisfy. Both live EU
+/// lists write the empty URI, but a list that names the element by its `Id` is
+/// covering exactly as much, so it counts too.
 fn check_reference(
     source: &XmlSource,
     root: Node<'_, '_>,
@@ -203,8 +210,8 @@ fn check_reference(
     backend: &dyn C14nBackend,
 ) -> Result<bool, String> {
     let uri = reference.attribute("URI").unwrap_or("");
-    let whole_document = uri.is_empty();
-    let apex = if whole_document {
+    let empty_uri = uri.is_empty();
+    let apex = if empty_uri {
         root.parent().unwrap_or(root)
     } else {
         let id = uri
@@ -223,8 +230,9 @@ fn check_reference(
         }
         found
     };
+    let covers_list = empty_uri || apex == root;
 
-    let mut set = if whole_document {
+    let mut set = if empty_uri {
         NodeSet::document(apex)
     } else {
         NodeSet::subtree(apex)
@@ -256,7 +264,7 @@ fn check_reference(
             }
         }
     }
-    if whole_document && !enveloped {
+    if covers_list && !enveloped {
         return Err(
             "the trusted list's signature covers the whole document without the enveloped-signature transform, which cannot verify"
                 .to_owned(),
@@ -286,5 +294,5 @@ fn check_reference(
     if computed != expected {
         return Err("a reference digest in the trusted list does not match".to_owned());
     }
-    Ok(whole_document)
+    Ok(covers_list)
 }
