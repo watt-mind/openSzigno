@@ -24,6 +24,12 @@ use sha2::{Digest as _, Sha256, Sha384, Sha512};
 use x509_cert::ext::pkix::name::GeneralName;
 use x509_cert::serial_number::SerialNumber;
 
+mod claims;
+mod validation_data;
+
+pub use claims::SignaturePolicyDigest;
+pub use validation_data::{revocation_values, validation_data_containers};
+
 use crate::certs::ParsedCertificate;
 use crate::codes::{Check, CheckCode};
 use crate::dsig::{XADES_NAMESPACES, direct_child, direct_children, text_of};
@@ -66,21 +72,6 @@ pub enum SigningCertificateForm {
     V2,
 }
 
-/// The `xades:SigPolicyHash` of an explicit signature policy: the digest the
-/// signature claims the policy document has.
-///
-/// Reported and never used. No policy document is fetched, so there is
-/// nothing to compare the digest against; it is recorded because a reader
-/// checking a Hungarian AVDH signature against the policy by hand needs both
-/// the identifier and the hash the signer committed to.
-#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
-pub struct SignaturePolicyDigest {
-    /// `ds:DigestMethod/@Algorithm`, verbatim and sanitised.
-    pub algorithm: Option<String>,
-    /// `ds:DigestValue`, still Base64, sanitised.
-    pub value: Option<String>,
-}
-
 /// A signature policy identifier, reported and never processed.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -120,11 +111,6 @@ pub struct XadesProperties<'a, 'input> {
     pub extra_qualifying_properties: bool,
 }
 
-/// The bounded number of claimed roles and commitment types reported. Both
-/// come from attacker-controlled XML and neither decides anything, so a
-/// handful is all a reader ever needs.
-const MAX_REPORTED_CLAIMS: usize = 8;
-
 /// The bounded number of `xades:Cert` entries considered, since the property is
 /// attacker-controlled and every entry costs one digest per candidate.
 const MAX_CERT_REFERENCES: usize = 16;
@@ -146,11 +132,6 @@ const PROCESSED_PROPERTIES: &[&str] = &[
     // property.
     "CounterSignature",
 ];
-
-/// The largest number of encapsulated CRLs or OCSP responses read from one
-/// signature's `xades:RevocationValues`. The property is attacker-controlled,
-/// and each entry costs a signature verification per certificate in the path.
-const MAX_REVOCATION_VALUES: usize = 64;
 
 /// Read the qualifying properties of one `ds:Signature`, with no information
 /// about what its references cover.
@@ -246,51 +227,17 @@ fn parse_properties<'a, 'input>(
                     .and_then(|id| xades_child(id, "Identifier"))
                     .map(|node| sanitize(&text_of(node)));
                 properties.signature_policy_digest =
-                    xades_child(policy, "SigPolicyHash").map(policy_digest);
+                    xades_child(policy, "SigPolicyHash").map(claims::policy_digest);
             }
         }
 
-        // The claimed roles. XAdES 1.3.2 spells the property `SignerRole` and
-        // EN 319 132-1 `SignerRoleV2`; both hold the same `ClaimedRoles`.
-        // Hungarian AVDH signatures state the authenticated citizen here, so
-        // the values are reported rather than dropped. Nothing is validated:
-        // a claimed role is a claim, exactly like `SigningTime`.
-        for name in ["SignerRole", "SignerRoleV2"] {
-            let Some(role) = xades_child(signed, name) else {
-                continue;
-            };
-            for claimed in xades_children(role, "ClaimedRoles")
-                .flat_map(|roles| xades_children(roles, "ClaimedRole"))
-                .take(MAX_REPORTED_CLAIMS)
-            {
-                let text = sanitize(text_of(claimed).trim());
-                if !text.is_empty() && !properties.claimed_roles.contains(&text) {
-                    properties.claimed_roles.push(text);
-                }
-            }
-        }
+        properties.claimed_roles = claims::claimed_roles(signed);
     }
 
-    // What the signer says they committed to. Signed, reported, and applied to
-    // nothing: this build validates signatures, not the meaning a signer
-    // attaches to one.
-    if let Some(data_properties) =
-        signed_properties.and_then(|node| xades_child(node, "SignedDataObjectProperties"))
-    {
-        for indication in
-            xades_children(data_properties, "CommitmentTypeIndication").take(MAX_REPORTED_CLAIMS)
-        {
-            let Some(identifier) = xades_child(indication, "CommitmentTypeId")
-                .and_then(|id| xades_child(id, "Identifier"))
-            else {
-                continue;
-            };
-            let text = sanitize(text_of(identifier).trim());
-            if !text.is_empty() && !properties.commitment_type_ids.contains(&text) {
-                properties.commitment_type_ids.push(text);
-            }
-        }
-    }
+    properties.commitment_type_ids = signed_properties
+        .and_then(|node| xades_child(node, "SignedDataObjectProperties"))
+        .map(claims::commitment_type_ids)
+        .unwrap_or_default();
 
     // The unsigned properties. Only the timestamps are processed; everything
     // else is named so that a caller can see what was left unvalidated.
@@ -324,82 +271,6 @@ fn parse_properties<'a, 'input>(
     properties
 }
 
-/// Every element under a signature that may hold validation data.
-///
-/// Two placements matter, and real dossiers use both:
-///
-/// - `xades:UnsignedSignatureProperties/xades:CertificateValues` and
-///   `.../xades:RevocationValues`, the ordinary XAdES-XL shape;
-/// - `xades141:TimeStampValidationData`, which XAdES 1.4.1 adds to carry the
-///   certificates and revocation data a *timestamp token's* own chain needs.
-///   Microsec's long-term dossiers put almost all of their embedded OCSP
-///   responses there, so a verifier that only looks at the first placement
-///   finds nothing in most real material.
-///
-/// Whether a given blob was filed as signature validation data or as timestamp
-/// validation data changes nothing about how it is treated: every item is
-/// untrusted input that must be signature-checked against an authorised issuer
-/// before it is believed, so gathering both can only widen what is available,
-/// never what is accepted.
-pub fn validation_data_containers<'a, 'input>(
-    signature: Node<'a, 'input>,
-) -> Vec<Node<'a, 'input>> {
-    signature
-        .descendants()
-        .filter(|node| {
-            node.is_element()
-                && matches!(
-                    node.tag_name().name(),
-                    "CertificateValues" | "RevocationValues" | "TimeStampValidationData"
-                )
-                && node
-                    .tag_name()
-                    .namespace()
-                    .is_some_and(|namespace| XADES_NAMESPACES.contains(&namespace))
-        })
-        // A `TimeStampValidationData` contains its own `RevocationValues`, so
-        // both are collected; the harvest below deduplicates by content.
-        .collect()
-}
-
-/// The DER-encoded CRLs and OCSP responses a signature carries as validation
-/// data, from either placement.
-///
-/// These are **untrusted inputs**, exactly like the certificates in
-/// `CertificateValues`: a signer supplies them, so each one is signature-checked
-/// against the path before it is believed. Taking them at face value would let a
-/// signer prove its own certificate was never revoked.
-///
-/// Every XAdES namespace is accepted on the container, because dossiers in the
-/// wild use v1.1.1 through v1.4.1 and mix them within one signature. Inside a
-/// container the encapsulating elements are matched by **name alone**, because
-/// real material nests 1.3.2-namespaced values under a 1.4.1-namespaced
-/// `TimeStampValidationData` and a CRL is a CRL either way.
-pub fn revocation_values(signature: Node<'_, '_>) -> (Vec<Vec<u8>>, Vec<Vec<u8>>) {
-    let mut crls: Vec<Vec<u8>> = Vec::new();
-    let mut ocsp: Vec<Vec<u8>> = Vec::new();
-    for values in validation_data_containers(signature) {
-        for node in values.descendants().filter(|node| node.is_element()) {
-            let target = match node.tag_name().name() {
-                "EncapsulatedCRLValue" => &mut crls,
-                "EncapsulatedOCSPValue" => &mut ocsp,
-                _ => continue,
-            };
-            if target.len() >= MAX_REVOCATION_VALUES {
-                continue;
-            }
-            // The same response often appears under both placements; storing it
-            // twice would only cost a repeated signature check.
-            if let Some(der) = decode_base64(&text_of(node))
-                && !target.contains(&der)
-            {
-                target.push(der);
-            }
-        }
-    }
-    (crls, ocsp)
-}
-
 fn collect_unprocessed(container: Node<'_, '_>, into: &mut Vec<String>) {
     for child in container.children().filter(Node::is_element) {
         let name = child.tag_name().name();
@@ -407,17 +278,6 @@ fn collect_unprocessed(container: Node<'_, '_>, into: &mut Vec<String>) {
             continue;
         }
         into.push(sanitize(name));
-    }
-}
-
-/// The declared digest of an explicit signature policy, read and not used.
-fn policy_digest(hash: Node<'_, '_>) -> SignaturePolicyDigest {
-    SignaturePolicyDigest {
-        algorithm: direct_child(hash, XMLDSIG_NAMESPACE, "DigestMethod")
-            .and_then(|node| node.attribute("Algorithm"))
-            .map(sanitize),
-        value: direct_child(hash, XMLDSIG_NAMESPACE, "DigestValue")
-            .map(|node| sanitize(text_of(node).trim())),
     }
 }
 
