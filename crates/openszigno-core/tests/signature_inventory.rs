@@ -433,3 +433,69 @@ fn a_timestamp_the_format_does_not_place_is_reported_as_other() {
     assert_eq!(dossier.timestamps[0].placement, TimestampPlacement::Other);
     assert_eq!(dossier.timestamps[0].document_index, None);
 }
+
+/// A signature that states claimed roles. Hungarian AVDH material puts the
+/// identified citizen here, and the inventory reports the values as the claims
+/// they are, exactly as it reports a claimed signing time.
+fn signature_with_roles(property: &str, roles: &str) -> String {
+    format!(
+        concat!(
+            r#"<ds:Signature Id="role-sig">"#,
+            "{signed_info}",
+            "<ds:SignatureValue>AA==</ds:SignatureValue>",
+            r##"<ds:Object><xades:QualifyingProperties Target="#role-sig">"##,
+            r#"<xades:SignedProperties Id="role-sig-properties"><xades:SignedSignatureProperties>"#,
+            "<xades:SigningTime>2026-01-02T03:04:05Z</xades:SigningTime>",
+            "<xades:{property}><xades:ClaimedRoles>{roles}</xades:ClaimedRoles></xades:{property}>",
+            "</xades:SignedSignatureProperties></xades:SignedProperties>",
+            "</xades:QualifyingProperties></ds:Object></ds:Signature>",
+        ),
+        signed_info = signed_info(&[("#DocumentObject0", SHA256)]),
+        property = property,
+        roles = roles,
+    )
+}
+
+#[test]
+fn claimed_roles_are_reported_for_both_spellings_of_the_property() {
+    for property in ["SignerRole", "SignerRoleV2"] {
+        let xml = dossier(
+            &signature_with_roles(
+                property,
+                "<xades:ClaimedRole>Teszt Elek</xades:ClaimedRole>\
+<xades:ClaimedRole>ugyfel</xades:ClaimedRole>",
+            ),
+            "",
+        );
+        let dossier = parse(xml.as_bytes(), &Limits::default()).expect("the dossier parses");
+
+        let signature = &dossier.signatures[0];
+        assert_eq!(signature.claimed_roles, vec!["Teszt Elek", "ugyfel"]);
+        assert!(
+            signature
+                .xades_properties
+                .iter()
+                .any(|name| name == property)
+        );
+    }
+}
+
+/// The values are untrusted XML, so the characters a terminal acts on rather
+/// than shows never reach a line, and a signature claiming no role reports an
+/// empty list.
+#[test]
+fn a_claimed_role_is_sanitised_and_absence_is_an_empty_list() {
+    let xml = dossier(
+        &signature_with_roles(
+            "SignerRole",
+            "<xades:ClaimedRole>ok\u{200b}\u{200e}</xades:ClaimedRole><xades:ClaimedRole>  </xades:ClaimedRole>",
+        ),
+        "",
+    );
+    let parsed = parse(xml.as_bytes(), &Limits::default()).expect("the dossier parses");
+    assert_eq!(parsed.signatures[0].claimed_roles, vec!["ok"]);
+
+    let plain = dossier(&document_signature(), "");
+    let plain = parse(plain.as_bytes(), &Limits::default()).expect("the dossier parses");
+    assert!(plain.signatures[0].claimed_roles.is_empty());
+}

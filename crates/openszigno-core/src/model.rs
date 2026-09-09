@@ -172,6 +172,10 @@ pub const MAX_INVENTORIED_REFERENCE_URIS: usize = 16;
 pub const MAX_INVENTORIED_XADES_PROPERTIES: usize = 32;
 /// The largest number of distinct digest algorithms listed for one signature.
 pub const MAX_INVENTORIED_DIGEST_METHODS: usize = 16;
+/// The largest number of `xades:ClaimedRole` values listed for one signature.
+pub const MAX_INVENTORIED_CLAIMED_ROLES: usize = 8;
+/// The largest number of characters of one claimed role that is echoed.
+pub const MAX_INVENTORIED_CLAIMED_ROLE_CHARS: usize = 128;
 
 /// Where a `ds:Signature` sits in the dossier.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -272,6 +276,17 @@ pub struct SignatureSummary {
     /// [`MAX_INVENTORIED_XADES_PROPERTIES`]. Presence only: a property is
     /// never validated, and its content is not read.
     pub xades_properties: Vec<String>,
+    /// The `xades:ClaimedRole` values of `xades:SignerRole` or
+    /// `xades:SignerRoleV2`, as text, bounded to
+    /// [`MAX_INVENTORIED_CLAIMED_ROLES`] entries of at most
+    /// [`MAX_INVENTORIED_CLAIMED_ROLE_CHARS`] characters each.
+    ///
+    /// A claim like any other: the role is what the signature says about
+    /// itself, and Hungarian AVDH material carries the citizen's asserted
+    /// identity here. Nothing is validated, and the field is left out of the
+    /// JSON entirely when the signature claims no role.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub claimed_roles: Vec<String>,
     pub evidence: SignatureEvidence,
     /// The `xades:SigningTime` text, trimmed and otherwise unparsed. It is
     /// what the signature claims, not when anything happened.
