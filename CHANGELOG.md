@@ -10,6 +10,13 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
 
 ## [Unreleased]
 
+### Added
+
+- `openszigno_core::declared_encoding`, which reads the XML declaration's
+  `encoding` pseudo-attribute and reports the label together with the byte
+  range holding it, so a writer restating the declaration agrees with the
+  decoder byte for byte. Additive; `schema_version` stays `1`.
+
 ### Fixed
 
 - Text a dossier chose no longer reaches a terminal or the JSON envelope
@@ -59,35 +66,6 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
   dossier's own namespace. The lookup matched on the local name alone, so a
   `DocumentProfile` from a foreign namespace, placed first, decided what the
   reference pointed at.
-
-### Security
-
-- `sign` no longer lets the dossier being signed choose what the operator's
-  key signs. The `OBJREF` and `Id` attributes a reference points at, the
-  declared media type an `xades:DataObjectFormat` carries and the root
-  namespace the signature profile object declares were interpolated into the
-  signature XML unescaped, and every digest is computed after the values are
-  already in the document, so a hostile dossier could write an
-  attacker-supplied `ds:Reference` with no transforms or a forged
-  `xades:CommitmentTypeIndication` into what was signed, and `verify` would
-  then accept all of it. Both halves are fixed: an `Id` or `OBJREF` that is
-  not an XML NCName, a media type outside the characters a media type may
-  use, and a namespace URI holding a markup delimiter, a quote character or a
-  control character are all refused with `document_not_signable`; and every
-  remaining interpolation goes through the writer's attribute and text
-  escapers, so no dossier-derived string reaches signature XML unescaped.
-
-## [0.7.1] - 2026-09-09
-
-### Added
-
-- `openszigno_core::declared_encoding`, which reads the XML declaration's
-  `encoding` pseudo-attribute and reports the label together with the byte
-  range holding it, so a writer restating the declaration agrees with the
-  decoder byte for byte. Additive; `schema_version` stays `1`.
-
-### Fixed
-
 - `sign` no longer rewrites the dossier's own text when it fills a signature
   in. The digest, signature-value and timestamp placeholders were substituted
   over the whole document, so a document whose title or payload read like one
@@ -126,6 +104,20 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
 
 ### Security
 
+- `sign` no longer lets the dossier being signed choose what the operator's
+  key signs. The `OBJREF` and `Id` attributes a reference points at, the
+  declared media type an `xades:DataObjectFormat` carries and the root
+  namespace the signature profile object declares were interpolated into the
+  signature XML unescaped, and every digest is computed after the values are
+  already in the document, so a hostile dossier could write an
+  attacker-supplied `ds:Reference` with no transforms or a forged
+  `xades:CommitmentTypeIndication` into what was signed, and `verify` would
+  then accept all of it. Both halves are fixed: an `Id` or `OBJREF` that is
+  not an XML NCName, a media type outside the characters a media type may
+  use, and a namespace URI holding a markup delimiter, a quote character or a
+  control character are all refused with `document_not_signable`; and every
+  remaining interpolation goes through the writer's attribute and text
+  escapers, so no dossier-derived string reaches signature XML unescaped.
 - The release workflow no longer pipes the cargo-dist installer script into a
   shell. `.github/workflows/release.yml` runs with `contents: write`, so a
   tampered installer asset would have run with a token that can rewrite the
@@ -1734,8 +1726,7 @@ This release performs no cryptographic verification of any kind.
 
 [0.1.0]: https://github.com/watt-mind/openSzigno/releases/tag/v0.1.0
 [0.2.0]: https://github.com/watt-mind/openSzigno/compare/v0.1.0...v0.2.0
-[Unreleased]: https://github.com/watt-mind/openSzigno/compare/v0.7.1...develop
-[0.7.1]: https://github.com/watt-mind/openSzigno/compare/v0.7.0...v0.7.1
+[Unreleased]: https://github.com/watt-mind/openSzigno/compare/v0.7.0...develop
 [0.7.0]: https://github.com/watt-mind/openSzigno/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/watt-mind/openSzigno/compare/v0.5.1...v0.6.0
 [0.5.1]: https://github.com/watt-mind/openSzigno/compare/v0.5.0...v0.5.1
