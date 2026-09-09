@@ -3704,6 +3704,11 @@ is `signing_key_mismatch` and is refused before anything is signed.
   collisions, and destination existence are checked before the output
   directory is touched; a decode failure, an unsafe name, a collision, or a
   pre-existing destination file or subdirectory aborts with no files written.
+  The existence check and the creation cannot be one operation, so a name
+  taken in between is caught by the creation itself: `O_CREAT | O_EXCL` for a
+  file, `mkdir`'s own `EEXIST` for a `<file>.d` subdirectory. Both are
+  `output_exists` (exit 5) — the no-clobber rule working, not a broken
+  filesystem — and both roll the run back.
 - Derive output names from the document title only after sanitization.
   Reject empty titles, `.` / `..`, path separators, absolute paths, control,
   format, bidirectional, invisible, and private-use characters,

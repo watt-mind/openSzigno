@@ -606,7 +606,11 @@ pub fn write_cache(directory: &Path, fetched: &Fetched) -> Result<Vec<Check>, St
 
     let root = OutputDir::open(directory).map_err(|error| match error {
         OpenError::Unsafe(reason) => format!("the online cache path is not usable: {reason}"),
-        OpenError::Io(_) => "the online cache directory could not be created".to_owned(),
+        // The cache is opened, not claimed, so it has no no-clobber rule to
+        // report; an existing entry it cannot use is a creation failure here.
+        OpenError::Exists(_) | OpenError::Io(_) => {
+            "the online cache directory could not be created".to_owned()
+        }
     })?;
     let mut notes = Vec::new();
     for (subdirectory, items, names) in [
@@ -622,7 +626,7 @@ pub fn write_cache(directory: &Path, fetched: &Fetched) -> Result<Vec<Check>, St
                     OpenError::Unsafe(reason) => {
                         format!("the online cache path is not usable: {reason}")
                     }
-                    OpenError::Io(_) => {
+                    OpenError::Exists(_) | OpenError::Io(_) => {
                         "the online cache directory could not be created".to_owned()
                     }
                 })?;

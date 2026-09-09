@@ -123,6 +123,11 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
   now read before any of it is parsed or classified, so a store over the total
   is refused for its size rather than for whatever the file that crossed the
   line happened to contain.
+- `extract` reports a `<file>.d` subdirectory whose name was taken between the
+  plan's existence check and the write as `output_exists` (exit 5), the answer
+  an existing output file already got. `mkdir`'s `EEXIST` was mapped to
+  `io_error` (exit 3), which told an operator their filesystem had failed when
+  in fact the no-clobber rule had worked.
 
 ## [0.7.1] - 2026-09-09
 
