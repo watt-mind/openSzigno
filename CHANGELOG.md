@@ -49,6 +49,12 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
 
 ### Fixed
 
+- A container `es:TimeStamp` selects its data only through an `xades:Include`
+  in a recognised XAdES namespace. The element was matched on its local name
+  alone, so an element another vocabulary happens to call `Include` added its
+  target to the imprint and changed what the timestamp was taken to cover.
+  Every other XAdES element in the crate was already read this way.
+  `schema_version` stays `1`.
 - An OCSP `unknown` status is no longer reported as stale revocation data.
   RFC 6960 section 2.2 gives it its own meaning — the responder does not know
   about this certificate — and calling that staleness told an operator to

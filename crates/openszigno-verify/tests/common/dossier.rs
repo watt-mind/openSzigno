@@ -320,6 +320,9 @@ pub struct ContainerTimestampSpec {
     pub reference_info: bool,
     /// Digest something other than the included elements.
     pub wrong_imprint: bool,
+    /// Emit an `Include` in a namespace that is not XAdES, naming this URI.
+    /// It selects nothing, because only a recognised XAdES namespace does.
+    pub foreign_include: Option<String>,
 }
 
 impl ContainerTimestampSpec {
@@ -331,6 +334,7 @@ impl ContainerTimestampSpec {
             token: Some(token),
             reference_info: false,
             wrong_imprint: false,
+            foreign_include: None,
         }
     }
 
@@ -342,6 +346,7 @@ impl ContainerTimestampSpec {
             c14n: None,
             reference_info: false,
             wrong_imprint: false,
+            foreign_include: None,
         }
     }
 }
@@ -542,6 +547,11 @@ fn render_container_timestamp(spec: &ContainerTimestampSpec, index: usize) -> St
     for uri in &spec.includes {
         out.push_str(&format!(
             "<xades:Include URI=\"{uri}\" referencedData=\"true\"/>"
+        ));
+    }
+    if let Some(uri) = &spec.foreign_include {
+        out.push_str(&format!(
+            "<foreign:Include xmlns:foreign=\"urn:example:not-xades\" URI=\"{uri}\" referencedData=\"true\"/>"
         ));
     }
     match &spec.token {

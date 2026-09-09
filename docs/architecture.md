@@ -1724,7 +1724,7 @@ what M3 added.
 | Step | What is required |
 | --- | --- |
 | Placement | A direct `es:TimeStamp` child of `es:Dossier` is a **dossier timestamp**; a direct child of `es:Document` is a **document timestamp**. Anywhere else, the format does not say what the element protects and nothing is digested. |
-| Resolution | Every `xades:Include/@URI` is `#id` and must resolve, through the ID space `openszigno-core` validated, to exactly one element. Nothing is ever dereferenced off the document. |
+| Resolution | Only an `Include` in a recognised XAdES namespace selects data; an element another vocabulary happens to call `Include` is ignored, exactly as everywhere else this crate reads XAdES. Every `xades:Include/@URI` is `#id` and must resolve, through the ID space `openszigno-core` validated, to exactly one element. Nothing is ever dereferenced off the document. |
 | Scope | A dossier timestamp must cover `/es:Dossier/es:DossierProfile` **and** `/es:Dossier/es:Documents`. A document timestamp must cover its `es:DocumentProfile` **and** the document's payload `ds:Object`. An element is covered when an `Include` resolves to it or to an ancestor of it. |
 | Imprint | Each included element is canonicalized on its own with the algorithm the timestamp's `ds:CanonicalizationMethod` names — inclusive C14N 1.0 when it names none, as XAdES 7.1.4.3.1 prescribes — and the results are concatenated **in `Include` document order**. Reordering the `Include` elements changes the imprint, which is the point. |
 | Token | Verified by exactly the machinery a signature timestamp uses: the CMS parse, the imprint, the `SignerInfo` signature, the critical `id-kp-timeStamping` requirement, and a TSA path validated at `genTime`. |
