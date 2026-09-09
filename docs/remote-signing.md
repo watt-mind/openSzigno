@@ -1246,7 +1246,7 @@ natural persons will actually hold.
 | Qualified status cannot be asserted by this tool | Producing a signature through a qualified provider does not let openSzigno claim the result is a qualified signature, and this project's rules forbid claiming validity that is not proven in code | Report what the service returned and what the verifier checked, and nothing more |
 | SAD scope | A credential authorisation not bound to the real hashes authorises signing anything for its lifetime | Always send the actual hashes, and `numSignatures` equal to the number of signatures being produced |
 | Timestamping is a second dependency | Without it there is no XAdES-T, and without XAdES-T there is no company-registry filing; production Hungarian timestamping needs a client certificate or an account | Decide the TSA before the signer, not after |
-| Trusted list format change | EU trusted lists move to TLv6 on 2026-04-29 with no transition, and the Hungarian list moves to HTTPS | Track it as a verify-path item independent of signing; see section 5.1 |
+| Trusted list format change | EU trusted lists move to TLv6 on 2026-04-29 with no transition, and the Hungarian list moves to HTTPS | Done on the verify path: both TLv5 and TLv6 load, branched on `TSLVersionIdentifier`. See [docs/trust.md](trust.md#tlv5-and-tlv6) |
 | Legacy AVDH structures persist | Documents authenticated with AVDH up to 2024-12-31 keep full probative force indefinitely | Nothing on the read path may treat AVDH structures as obsolete |
 
 ## 7. Using openszigno with a CSC service

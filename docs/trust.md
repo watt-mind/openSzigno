@@ -95,6 +95,13 @@ one gives two things a directory of certificates cannot:
 | EU list of trusted lists (LOTL) | <https://ec.europa.eu/tools/lotl/eu-lotl.xml> | <https://ec.europa.eu/digital-building-blocks/sites/spaces/DIGITAL/pages/467109149/eSignature+List+of+Trusted+Lists> |
 | Hungarian trusted list | <https://nmhh.hu/tl/pub/HU_TL.xml> | <https://nmhh.hu/tl/pub/HU_TL.pdf> |
 
+Both are served over HTTPS, and both should be fetched that way: the Hungarian
+list moved off plain HTTP at the TLv6 cut-over (see below), and a trusted list
+fetched over HTTP is a trusted list whoever answers the request chose for you.
+The signature check is what actually decides, that is the whole point of
+`--trust-list-signer`, but there is no reason to hand an attacker the first
+move.
+
 The lists are refreshed daily. Fetch a snapshot, record its
 `TSLSequenceNumber` and `ListIssueDateTime`, and keep it under version control
 or in an archive alongside whatever you verified with it; the report's
@@ -106,6 +113,76 @@ mkdir -p trust-lists
 curl --proto '=https' --tlsv1.2 -sSf \
   https://nmhh.hu/tl/pub/HU_TL.xml -o trust-lists/HU_TL.xml
 ```
+
+### TLv5 and TLv6
+
+On **2026-04-29** every EU trusted list moved from TLv5 to TLv6, with **no
+transition period**: until 2026-04-28 all member-state lists were version 5,
+and from that date only version 6 is published or accepted. openSzigno reads
+both, because an archived snapshot taken before the cut-over is still a TLv5
+file and still the right list to verify a signature made back then against.
+
+`SchemeInformation/TSLVersionIdentifier` says which version a file is ,
+ETSI TS 119 612 clause 5.3.1 requires the field and says it is incremented
+exactly when the rules for parsing the list change. A list stating `5` or `6`
+loads; anything else, and a list stating nothing, is refused as
+`trust_list_invalid` (exit 3) with a message naming what it stated. That is
+deliberate: a parser that guessed at an unknown version would be guessing about
+trust anchors. The version is named in the `trust_list_loaded` check message,
+so a run says which format it read.
+
+What TLv6 actually changed, and what it did not:
+
+| Aspect | TLv5 | TLv6 | Effect here |
+| --- | --- | --- | --- |
+| Specification | ETSI TS 119 612 V2.1.1 | V2.3.1 (2024-11), now V2.4.1 (2025-08) | n/a |
+| `TSLVersionIdentifier` | `5` | `6` | The one thing branched on. |
+| Schema namespace | `http://uri.etsi.org/02231/v2#` | unchanged | Nothing to branch on. Annex B.0 of both issues names the same three namespaces and notes the `02231` is kept from ETSI TS 102 231 "for compatibility reasons". |
+| Service status URIs | the `.../Svcstatus/...` set | unchanged | The granted/pre-eIDAS/terminal rules below are untouched. |
+| Service type URIs | the `.../Svctype/...` set | extended (wallet-era types such as `.../Svctype/EAA/Q`, `.../Svctype/Ledgers/Q`) | Additive. This build reads `CA/QC` and `TSA/QTST` and ignores the rest, exactly as before. |
+| `ServiceDigitalIdentity` | `X509Certificate`, `X509SubjectName`, `X509SKI`, `ds:KeyValue` | unchanged | All three forms are read as before. |
+| `PointersToOtherTSL` | names the national lists' signers | unchanged | The LOTL bootstrap is unaffected. |
+| Signature format | XAdES-BES (TS 101 903) | XAdES-B-B (EN 319 132-1) | Both are an enveloped `ds:Signature` over the whole list; the difference is in the signed properties, which this build does not require. `xades:SigningCertificateV2` is now the mandated signed property. |
+| Signature reference | `URI=""` in practice | unchanged in practice | Annex B.1.0 rule 2 permits a same-document `#Id` naming `TrustServiceStatusList` instead, and this build now accepts both. |
+| Canonicalization | exclusive c14n | unchanged | Already the only algorithm real lists use, and inside the allowlist. |
+| Signature algorithms | XML-Signature's set, plus ECDSA and SHA-2 | unchanged wording (annex B.1.2), constrained by ETSI TS 119 312 tables 4, 6 and 7 to a key usable for at least three years | Covered: see below. |
+| `ServiceSupplyPoint` | URIs | each URI may now carry a type attribute | Not read here; supply points contribute no trust. |
+| `ElectronicAddress` | e-mail or web address | may also carry a telephone number | Not read here. |
+
+The signature algorithms the live lists actually use are inside the pinned
+allowlist: the EU LOTL signs with `rsa-sha512` (RSA PKCS#1 v1.5) and the
+Hungarian list with `ecdsa-sha256` over a P-256 key. The allowlist is RSA
+PKCS#1 v1.5 and RSA-PSS with SHA-256/384/512, and ECDSA with SHA-256 and
+SHA-384 (P-256 and P-384). SHA-1 is refused in a trusted list's own signature
+whatever `--allow-legacy-algorithms` says.
+
+#### TLv6 caveats
+
+Points established from the specification text and from the live lists, but
+worth knowing they were not proven against every member state's file:
+
+- **Only the EU LOTL and the Hungarian list were exercised end to end.** Both
+  are TLv6 today and both parse, and the Hungarian list's signature verifies
+  through the LOTL's pointer certificates. The other 26 member-state lists were
+  not fetched.
+- **Whether every TLv6 list is version-tagged the way the two checked ones
+  are.** The specification requires the field; a list that omits it is refused
+  here rather than assumed to be TLv6.
+- **ECDSA with SHA-512 (typically P-521) is not in the allowlist.**
+  TS 119 312 permits it and TS 119 612 annex B.1.2 does not exclude it, so a
+  member state could in principle sign with it; such a list would be reported
+  `trust_list_signature_invalid` for naming "a signature method outside the
+  allowlist". Neither list checked uses it.
+- **XAdES-B-B's signed properties are not required, only tolerated.** The
+  extra `ds:Reference` over `xades:SignedProperties` must still verify, and
+  does, but this build does not check `xades:SigningCertificateV2` against the
+  signer, nor the TLSO certificate restrictions of clause 5.7.1 (self-signed
+  or listed issuer, `id-tsl-kp-tslSigning`, `BasicConstraints` CA=false). The
+  caller supplies the signer certificate out of band and that is what is
+  believed.
+- **`Qualifications` and other scheme extensions are still not processed**, in
+  either version, and are reported as unprocessed rather than used to widen a
+  determination.
 
 ### Bootstrapping national lists from the LOTL
 
