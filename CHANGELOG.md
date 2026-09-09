@@ -10,6 +10,29 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
 
 ## [Unreleased]
 
+### Added
+
+- `openszigno_core::declared_encoding`, which reads the XML declaration's
+  `encoding` pseudo-attribute and reports the label together with the byte
+  range holding it, so a writer restating the declaration agrees with the
+  decoder byte for byte. Additive; `schema_version` stays `1`.
+
+### Fixed
+
+- `sign` no longer rewrites the dossier's own text when it fills a signature
+  in. The digest, signature-value and timestamp placeholders were substituted
+  over the whole document, so a document whose title or payload read like one
+  of them was rewritten after the digest over it had been taken: the run
+  reported success and `verify` then reported `reference_digest_mismatch`.
+  Each pass now substitutes inside the byte range of the `ds:Signature` it is
+  filling in and nowhere else.
+- `sign` accepts every XML declaration the reader accepts when it restates the
+  encoding. Only `encoding="..."` was recognised, so a dossier declared with
+  single quotes or with spaces around the `=` was decoded to UTF-8 and then
+  still declared ISO-8859-2. The declaration is now read with the reader's own
+  parser, `openszigno_core::declared_encoding`, and only the label's own bytes
+  are replaced.
+
 ### Security
 
 - The release workflow no longer pipes the cargo-dist installer script into a
