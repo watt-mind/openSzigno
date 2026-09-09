@@ -971,7 +971,7 @@ I/O and extraction policy.
 | `sign_failed` | author | 5 | Signing could not be completed: an identifier the signature needs is already used in the dossier, an element could not be canonicalized, or the key refused to sign. |
 | `invalid_output_path` | CLI | 4 | The `create --output` or `sign --output` path does not name a file. |
 | `unsafe_output_name` | CLI | 5 | A document title or declared extension cannot be used as a filename, or the derived `<file>.d` directory name would be too long. |
-| `output_name_collision` | CLI | 5 | Residual: two outputs still map to the same name in one directory after deduplication. |
+| `output_name_collision` | CLI | 5 | Residual: two outputs still map to the same name in one directory after all 64 deduplicated candidates were taken. |
 | `output_exists` | CLI | 5 | A destination file already exists or cannot be created safely. |
 | `document_not_found` | CLI, author | 4 | A `--document` selector matches no document, is not a decimal index after `#`, or names a document inside an embedded dossier. `sign` reports it for its own selectors. |
 | `document_ambiguous` | CLI | 4 | A `--document` `object_ref` selector matches more than one document. Unreachable through a parsed dossier, whose XML IDs are unique. |
@@ -3682,9 +3682,12 @@ is `signing_key_mismatch` and is refused before anything is signed.
   payload file, so a renamed embedded dossier lands in `court-7.dosszie.d`;
   a directory name that clashes on its own is renamed by the same rule. Each
   rename is reported as `output_name_deduplicated`, naming the document index
-  and its `dossier_path` only. Comparison stays case-insensitive, and a name
-  that still collides after renaming is the residual error
-  `output_name_collision`, which aborts the run with nothing written.
+  and its `dossier_path` only. Comparison stays case-insensitive. A renamed
+  candidate that is itself taken — which a title crafted to spell it makes
+  easy — does not end the run: the candidates keep counting,
+  `ruling-7.pdf`, then `ruling-7-2.pdf`, `ruling-7-3.pdf` and on, up to 64
+  candidates per name. Only a name still taken after all 64 is the residual
+  error `output_name_collision`, which aborts the run with nothing written.
 - All documents in the whole tree are decoded in memory and all output names,
   collisions, and destination existence are checked before the output
   directory is touched; a decode failure, an unsafe name, a collision, or a

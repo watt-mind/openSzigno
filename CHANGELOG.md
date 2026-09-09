@@ -80,6 +80,15 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
   on the descriptor once `fstat` has established it is a regular file; the
   refusal is the `io_error` (exit 3) it always should have been. Windows keeps
   the order it had.
+- `extract` no longer abandons a whole dossier over one crafted title. Output
+  name deduplication produced exactly one candidate, `stem-<document index>`,
+  so a dossier holding a repeated title plus a document titled precisely the
+  name that deduplication would reach for raised `output_name_collision` and
+  wrote nothing at all — every innocent document in the dossier included.
+  The candidates now count upwards, `stem-<index>-2`, `-3` and on, up to 64
+  per name; `output_name_collision` is kept for the case where all 64 are
+  taken. The first candidate, and so every name a dossier that does not
+  collide on purpose produces, is unchanged.
 
 ## [0.7.1] - 2026-09-09
 

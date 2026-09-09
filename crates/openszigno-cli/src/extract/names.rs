@@ -16,32 +16,50 @@ pub(crate) fn name_key(name: &str) -> String {
     name.nfc().collect::<String>().to_lowercase()
 }
 
-/// Insert `-<index>` before the extension, so a repeated title still yields a
-/// distinct, predictable filename.
-pub(crate) fn deduplicated_name(name: &str, index: usize) -> String {
+/// How many deduplicated candidates are tried before a name is given up on.
+///
+/// A title crafted to collide with the name deduplication itself produces
+/// would otherwise abort the whole run, so the counter keeps going; it is
+/// bounded because a run that has tried this many names is not going to find a
+/// free one, and an unbounded search is its own denial of service.
+pub(crate) const MAX_DEDUPLICATION_ATTEMPTS: u32 = 64;
+
+/// Insert a distinguishing suffix before the extension, so a repeated title
+/// still yields a distinct, predictable filename.
+///
+/// `attempt` counts from 1. The first candidate is `stem-<index>.<ext>`, which
+/// is what a repeated title has always produced; a title crafted to be exactly
+/// that name is why there is a second, third and further candidate,
+/// `stem-<index>-2.<ext>` onwards.
+pub(crate) fn deduplicated_name(name: &str, index: usize, attempt: u32) -> String {
+    let suffix = match attempt {
+        0 | 1 => format!("-{index}"),
+        other => format!("-{index}-{other}"),
+    };
     let path = Path::new(name);
     match (
         path.file_stem().and_then(|stem| stem.to_str()),
         path.extension().and_then(|extension| extension.to_str()),
     ) {
         (Some(stem), Some(extension)) if !stem.is_empty() => {
-            format!("{stem}-{index}.{extension}")
+            format!("{stem}{suffix}.{extension}")
         }
-        _ => format!("{name}-{index}"),
+        _ => format!("{name}{suffix}"),
     }
 }
 
-/// Reject two documents that would target the same name in one directory.
-///
-/// Kept for the pathological case that survives deduplication.
-pub(crate) fn claim_name(names: &mut HashSet<String>, name: &str) -> Result<(), CliError> {
-    if names.insert(name_key(name)) {
-        return Ok(());
-    }
-    Err(CliError::unsafe_output(
+/// Take a name in one directory, reporting whether it was free.
+pub(crate) fn try_claim_name(names: &mut HashSet<String>, name: &str) -> bool {
+    names.insert(name_key(name))
+}
+
+/// Two documents whose names still collide after every deduplicated candidate
+/// was tried.
+pub(crate) fn name_collision() -> CliError {
+    CliError::unsafe_output(
         "output_name_collision",
         "two outputs resolve to the same name in one directory",
-    ))
+    )
 }
 
 pub(crate) fn join_path(directory: &str, name: &str) -> String {
@@ -317,9 +335,28 @@ mod tests {
     #[test]
     fn a_repeated_output_name_in_one_directory_is_a_collision() {
         let mut names = HashSet::new();
-        assert!(claim_name(&mut names, "Report.txt").is_ok());
-        let error = claim_name(&mut names, "report.TXT").expect_err("names collide");
+        assert!(try_claim_name(&mut names, "Report.txt"));
+        // The comparison is case-insensitive: a case-insensitive filesystem
+        // must not be able to map two outputs onto one file.
+        assert!(!try_claim_name(&mut names, "report.TXT"));
+        let error = name_collision();
         assert_eq!(error.code, "output_name_collision");
         assert_eq!(error.exit, 5);
+    }
+
+    /// The deduplicated candidates are a sequence, not one name: the first is
+    /// the `stem-<index>` form a repeated title has always produced, and the
+    /// ones after it carry an increasing counter, which is what keeps a title
+    /// crafted to spell the first candidate from aborting the run.
+    #[test]
+    fn the_deduplicated_candidates_count_upwards() {
+        assert_eq!(deduplicated_name("report.txt", 3, 1), "report-3.txt");
+        assert_eq!(deduplicated_name("report.txt", 3, 2), "report-3-2.txt");
+        assert_eq!(deduplicated_name("report.txt", 3, 64), "report-3-64.txt");
+        // A name with no extension keeps the suffix at its end.
+        assert_eq!(deduplicated_name("report", 3, 1), "report-3");
+        assert_eq!(deduplicated_name("report", 3, 5), "report-3-5");
+        // A dotfile-looking name has no stem to split, so it is suffixed whole.
+        assert_eq!(deduplicated_name(".env", 0, 2), ".env-0-2");
     }
 }
