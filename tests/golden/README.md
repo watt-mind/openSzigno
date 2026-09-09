@@ -97,7 +97,7 @@ absolute path.
 
 Both streams are captured, each case writing a stdout golden, a
 `<case>.stderr.txt` and a `<case>.exit`. In JSON mode stdout is the whole
-envelope, warnings included, and stderr is expected to be empty — the empty
+envelope, warnings included, and stderr is expected to be empty: the empty
 `.stderr.txt` beside each `.json` is what makes "JSON mode says nothing on
 stderr" a checked contract rather than a habit. In human mode warnings and
 errors go to stderr instead, so a human golden for a fixture that only fails
@@ -109,7 +109,7 @@ was least likely to be on; that check now runs over both.
 `extract.stdout` is the one case whose stdout is not an envelope at all:
 `extract --stdout --document '#0'` writes the first document's payload bytes
 and nothing else. Where that document decodes, the golden is the payload;
-where it does not — an encrypted document, an unparseable dossier — the
+where it does not (an encrypted document, an unparseable dossier), the
 golden is the refusal in `.stderr.txt` and the status in `.exit`. It passes no
 `--output`, so no temporary path is involved.
 

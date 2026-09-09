@@ -33,7 +33,7 @@ with the code-level detail, is
 - Encrypting a dossier, and writing a container `es:TimeStamp`. `create`
   writes an unsigned dossier and `sign` signs one, optionally with a
   `xades:SignatureTimeStamp`; the container timestamp is LAB-298 under
-  [M5](#m5-authoring--done).
+  [M5](#m5-authoring-done).
 - A qualified electronic signature. `sign --key` holds a software key, which
   cannot produce one; `sign --csc` signs through a service that holds the key
   instead, but whether the result is qualified is the provider's statement and
@@ -58,7 +58,7 @@ Outside the plan altogether:
 The milestones are ordered. Each one is expected to keep the JSON envelope
 stable, or to raise `schema_version` if it cannot.
 
-### M1: custom compatible e-dossier namespaces — done
+### M1: custom compatible e-dossier namespaces (done)
 
 Shipped. openSzigno accepts e-dossier profiles in a compatible namespace other
 than the default `https://www.microsec.hu/ds/e-szigno30#`, including the four
@@ -104,7 +104,7 @@ Residuals deliberately left out of M1:
   Every level is decoded in memory before anything is written, so peak memory
   grows with the size of the whole tree, not of the largest single dossier.
 
-### M2: `verify` for XMLDSig/XAdES signatures — complete
+### M2: `verify` for XMLDSig/XAdES signatures (complete)
 
 The design is [verify-design.md](verify-design.md), which splits M2 into three
 phases. **All three have shipped.**
@@ -190,12 +190,12 @@ stays the `"detected"` placeholder until it does.
   and the qualified determination (`qualified`,
   `qualified_signature_device`) carried into the report;
 - a new `info` check status for purely informational checks, so that `unknown`
-  now blocks without exception — and `valid` became reachable, with exit
+  now blocks without exception, and `valid` became reachable, with exit
   status `0`.
 
 Deliberately deferred to M3, and shipped there: `--online` fetching from CRL
-distribution points and AIA. Everything needed for it already existed — the
-`RevocationSource` injection point, the store loader, the classifier — and only
+distribution points and AIA. Everything needed for it already existed (the
+`RevocationSource` injection point, the store loader, the classifier), and only
 the transport policy was missing, which is network code that belongs in the
 CLI.
 
@@ -245,7 +245,7 @@ CLI.
   M3 added `--online`; the manual workflow in [trust.md](trust.md) is still the
   reproducible one.
 
-### M3: container timestamps and online revocation fetching — done
+### M3: container timestamps and online revocation fetching (done)
 
 Shipped. Four things landed.
 
@@ -257,8 +257,8 @@ for timestamps is enforced (a dossier timestamp must cover `es:DossierProfile`
 and `es:Documents`; a document timestamp its `es:DocumentProfile` and the
 payload `ds:Object`), each included element is canonicalized with the declared
 method and the results concatenated in `Include` order, and the resulting
-imprint is checked against a token verified by the existing RFC 3161 machinery
-— TSA path, revocation and trust included. The outcome is reported at the
+imprint is checked against a token verified by the existing RFC 3161 machinery,
+with the TSA path, revocation and trust included. The outcome is reported at the
 dossier level as `dossier_timestamp_verified` / `dossier_timestamp_invalid` /
 `dossier_timestamp_not_checked` and the per-document `document_timestamp_*`
 set, in a new `data.timestamps` array with a `data.counts.timestamps_verified`
@@ -283,17 +283,17 @@ layout, so a later offline run reproduces the result. Sources are reported as
 identities are read and can decide qualified status over a chain some anchor
 already validated; neither becomes an anchor, and both are documented as weaker
 than a certificate identity. The pre-eIDAS statuses `undersupervision` and
-`accredited` count as granted for their historical window — a validation time
-before 2016-07-01, when eIDAS began to apply — with the honoured status named
+`accredited` count as granted for their historical window (a validation time
+before 2016-07-01, when eIDAS began to apply), with the honoured status named
 in the report. `ServiceName` prefers the `xml:lang="en"` entry.
 
-**Archive timestamps — deliberately not implemented.** `xades:ArchiveTimeStamp`
+**Archive timestamps: deliberately not implemented.** `xades:ArchiveTimeStamp`
 is still `archive_timestamp_present` (`info`) and is not verified. The XAdES
 1.4.1 clause 8.2.1 imprint is under-specified in ways only interoperability
-evidence can settle — the namespace context each unsigned property is
+evidence can settle: the namespace context each unsigned property is
 canonicalized in, how properties added after the timestamp are excluded,
 whether the qualifying-properties `ds:Object` participates, and how the 1.3.2
-and 1.4.1 forms differ in all three — and this project has no consented
+and 1.4.1 forms differ in all three. This project has no consented
 real-world B-LTA material to check an implementation against. A synthetic
 fixture generated by the same code that verifies it would only assert that the
 implementation agrees with itself. Reporting `archive_timestamp_verified` on
@@ -306,9 +306,9 @@ is written out in
 #### Residual risks carried by M3
 
 - **Countersignatures have been implemented against the specifications, not
-  against real material.** Both forms — the XAdES enveloped
+  against real material.** Both forms (the XAdES enveloped
   `xades:CounterSignature` of EN 319 132-1 clause 5.2.7.2 and the e-dossier
-  `es:SignatureProfile/es:Type` form of e-dossier clause 3.2.1.3.4.1.3 — are
+  `es:SignatureProfile/es:Type` form of e-dossier clause 3.2.1.3.4.1.3) are
   read from the prose and exercised only against synthetic dossiers this
   project signs itself. Long explicit chains of countersignatures, where each
   one references the `ds:SignatureValue` of the previous `CounterSignature`,
@@ -328,7 +328,7 @@ is written out in
 - **A container timestamp's imprint rule has no real-world evidence either.**
   The `xades:Include` concatenation of XAdES 7.1.4.3.1 is unambiguous where the
   archive-timestamp rule is not, and the scope rule follows the e-dossier
-  placement rules the signature pipeline already enforces — but no real
+  placement rules the signature pipeline already enforces, but no real
   Microsec dossier carrying an `es:TimeStamp` has been verified with it. An
   imprint mismatch on real material would surface as a dossier-level `invalid`,
   which is the correct reading of "the container changed after it was stamped"
@@ -338,7 +338,7 @@ is written out in
 - **`--online` widens the attack surface to whatever a CA's server answers
   with.** Every artefact is still signature-checked against an authorised
   issuer before it is believed, so the worst a hostile responder can do is
-  refuse to answer — but the DER it serves is parsed, and parsing
+  refuse to answer, but the DER it serves is parsed, and parsing
   attacker-supplied DER is the risk `--online` adds that offline verification
   did not have. It is off by default for that reason.
 - **An OCSP request tells the responder who is asking about what.** The
@@ -371,7 +371,7 @@ is written out in
   always named so a reader can disagree with the reading and see exactly what
   it rested on.
 
-### M4: encrypted payload decryption — done
+### M4: encrypted payload decryption (done)
 
 Shipped. `extract --decrypt-key` reverses the `encrypt` transform. See
 [architecture.md](architecture.md#decryption) for the full contract. What
@@ -459,7 +459,7 @@ Residuals deliberately left out of M4:
   workspace is on. The `deny.toml` ignore covers only that residual and
   should be dropped with the upgrade.
 
-### M5: authoring — done
+### M5: authoring (done)
 
 Writing a dossier, not only reading one. The reading side is unchanged by
 this milestone: nothing here relaxes a limit, a name rule, or the

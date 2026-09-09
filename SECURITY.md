@@ -25,7 +25,7 @@ permanent non-goal of this tool.
 `valid` is also easy to fail to reach for benign reasons. No trust store, a
 trusted list whose own signature was not checked, no revocation data, a CRL
 that expired before the validation time, or `--no-revocation` all yield
-`indeterminate`, which means "nothing that was checked failed" — not "this is
+`indeterminate`, which means "nothing that was checked failed", not "this is
 authentic", and not "this is forged".
 
 **Extraction is not verification.** `inspect`, `list`, `extract`,
@@ -93,7 +93,7 @@ only a digest is sent to it.
   under "How a file the caller named is read" below.
 - **Failures say nothing useful to an attacker.** A failed decryption is the
   fixed message `decryption failed`, which does not distinguish a failed RSA
-  unwrap from a bad content-key length from bad padding — that distinction is
+  unwrap from a bad content-key length from bad padding: that distinction is
   what a padding oracle is built out of. The RSA half does not even raise it:
   it rejects implicitly, so a bad wrapped key fails as the content cipher, not
   as itself. A wrong passphrase and a malformed key are likewise the same
@@ -236,8 +236,8 @@ dossier titles are long prose and cutting one short would make the tool wrong
 about its input; every other value is bounded to 128. The pass runs once, over
 the finished `data` of every command that reads a dossier, which is the one
 point both output channels go through, and warnings and errors go through it
-too. `Cc` was never reachable from a dossier — the bounded XML parser refuses
-the C0 and C1 ranges outright — but `Cf`, where the bidirectional overrides
+too. `Cc` was never reachable from a dossier (the bounded XML parser refuses
+the C0 and C1 ranges outright), but `Cf`, where the bidirectional overrides
 live, was, and so was unbounded length: nothing in the e-dossier format bounds
 a `subtype`.
 
@@ -280,7 +280,7 @@ go through one transport, with one destination policy, one set of timeouts and
 one set of size caps; a second HTTP client in this binary would be a second
 place for those rules to drift.
 
-With `--online`, the CLI — never the verify crate — may connect to exactly one
+With `--online`, the CLI (never the verify crate) may connect to exactly one
 class of destination: **URLs found inside the certificates being validated**,
 namely the `cRLDistributionPoints` URIs and the `authorityInfoAccess`
 `id-ad-ocsp` access locations. Those are fields a CA wrote into a certificate
@@ -292,14 +292,14 @@ Two further rules bound that class, because a certificate inside a dossier is
 attacker-supplied until something the operator configured vouches for it:
 
 - **Trust-gated.** A URL is contacted only for a certificate on a
-  certification path openszigno **validated to a configured trust anchor** —
-  from `--trust-store`, or from a trusted list — for a signature or a timestamp
+  certification path openszigno **validated to a configured trust anchor**
+  (from `--trust-store`, or from a trusted list) for a signature or a timestamp
   it was evaluating. A certificate embedded elsewhere in the XML generates no
   traffic even when it chains to a configured anchor, because no signature
   needed it. With no anchors configured **nothing is fetched at all**, and the
   report says so (`policy.revocation` reads `online_no_anchors`). Without this
-  rule, "an issuer in the dossier signed this certificate" — a statement
-  whoever wrote the dossier wrote on both sides of — was enough to make the
+  rule, "an issuer in the dossier signed this certificate", a statement
+  whoever wrote the dossier wrote on both sides of, was enough to make the
   tool open a connection of the dossier's choosing.
 - **A destination policy**, applied to the published URL and to every redirect
   target alike. Only `http` and `https`, exactly as published. A URL carrying
@@ -311,8 +311,8 @@ attacker-supplied until something the operator configured vouches for it:
   NAT (`100.64.0.0/10`), IETF protocol assignments (`192.0.0.0/24`),
   benchmarking (`198.18.0.0/15`), the deprecated site-local prefix
   (`fec0::/10`), the tunnel prefixes that carry an IPv4 destination inside the
-  address — 6to4 (`2002::/16`), Teredo (`2001::/32`) and the well-known NAT64
-  prefix (`64:ff9b::/96`) — and the cloud
+  address (6to4 (`2002::/16`), Teredo (`2001::/32`) and the well-known NAT64
+  prefix (`64:ff9b::/96`)) and the cloud
   instance metadata addresses `169.254.169.254` and `fd00:ec2::254`, plus the
   names `localhost` and `*.localhost`. An IPv4-mapped IPv6 address
   (`::ffff:127.0.0.1`) and the IPv4-compatible form (`::127.0.0.1`) are both
@@ -362,12 +362,12 @@ The requests are `GET` for a CRL and a `POST` of an RFC 6960 `OCSPRequest` for
 OCSP. They carry no data about the dossier beyond the certificate serial number
 the OCSP request necessarily names, which is a privacy consideration worth
 knowing about: it tells the CA's responder that someone is validating that
-certificate now. Each certificate is asked about once per responder — OCSP
-requests are deduplicated by responder *and* `certID`, not by URL — so a run
-neither repeats a question nor skips one. The transport is bounded — 5 s to
+certificate now. Each certificate is asked about once per responder: OCSP
+requests are deduplicated by responder *and* `certID`, not by URL, so a run
+neither repeats a question nor skips one. The transport is bounded: 5 s to
 connect, 20 s per fetch, 16 MiB per CRL (the same limit the verifier will
 parse), 64 KiB per OCSP response, at most three redirects and never to another
-host — and no proxy is taken from the environment; `--online-proxy` is the only
+host, and no proxy is taken from the environment; `--online-proxy` is the only
 way to introduce one, and with it the proxy rather than openSzigno resolves and
 connects to the destination. Everything fetched is judged by exactly the
 offline rules before it is believed, so `--online` can widen where evidence
@@ -432,8 +432,8 @@ openSzigno aims to guarantee that a hostile input cannot:
   the read;
 - put terminal control sequences or bidirectional overrides into human output,
   an error message, or the JSON envelope, whether through a dossier or through
-  a remote signing service, or make any single value it chose — a title, a MIME
-  `subtype` — unbounded in either;
+  a remote signing service, or make any single value it chose (a title, a MIME
+  `subtype`) unbounded in either;
 - leave a partial extraction behind after a mid-run failure;
 - smuggle content into the machine-readable channel, since JSON mode emits
   exactly one object on stdout and all diagnostics go to stderr;
@@ -448,7 +448,7 @@ openSzigno aims to guarantee that a hostile input cannot:
   destination any check refused;
 - cause openSzigno to make a network connection without `--online`, or, with
   it, to any destination other than a URL published inside a certificate that
-  reaches a configured trust anchor — including through a redirect, a redirect
+  reaches a configured trust anchor, including through a redirect, a redirect
   that leaves `https` for `http` on the same host, an
   environment proxy, a scheme the certificate did not name, userinfo in a URL,
   a name that resolves to a loopback, private, link-local, unique-local,
@@ -495,7 +495,7 @@ threat-model bullet that says a crafted input must never reach a panic,
 an unbounded read, or an unhandled crash instead of a stable error code:
 dossier parsing and payload decoding, CMS decryption, C14N canonicalization,
 and CRL, OCSP, RFC 3161 timestamp, trusted-list, and certificate parsing all
-have a target. Every target asserts only "never panics" — a target that
+have a target. Every target asserts only "never panics": a target that
 returns `Err` for malformed input is working as designed.
 
 `.github/workflows/fuzz.yml` runs every target nightly and on manual
@@ -536,9 +536,9 @@ you would one found by hand.
 - The absence of `xades:ArchiveTimeStamp` imprint verification, or of CMS
   recipient and cipher forms outside the subset in
   [docs/architecture.md](docs/architecture.md#decryption). Both are documented
-  behaviour — see
+  behaviour. See
   [docs/architecture.md](docs/architecture.md#archive-timestamps) for why the
-  archive-timestamp imprint was left unimplemented rather than guessed at — and
+  archive-timestamp imprint was left unimplemented rather than guessed at; they
   are tracked as roadmap items, not vulnerabilities.
 - The weakness of DES-EDE3-CBC itself. It is refused unless
   `--allow-legacy-ciphers` is given, and the flag exists because it is what the
