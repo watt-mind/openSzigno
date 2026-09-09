@@ -555,8 +555,9 @@ document's payload and nothing else.
 
 Every file the CLI reads because a caller named it goes through one helper,
 `input::read_bounded_file`: the dossier, `--decrypt-key` and `--key` with their
-certificates and passphrase files, the `--csc` configuration and the secrets it
-names, and each entry of a `--trust-store` and a `--revocation-store`.
+certificates and passphrase files, every `--chain` and `--tsa-cert`
+certificate, the `--csc` configuration and the secrets it names, and each
+entry of a `--trust-store` and a `--revocation-store`.
 
 - The path is opened once. The type and the size come from an `fstat` on that
   descriptor, and the bytes are read through it, so replacing or growing the
