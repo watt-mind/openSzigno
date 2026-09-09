@@ -21,7 +21,7 @@ mod path;
 mod purpose;
 
 pub use extensions::{OID_QC_COMPLIANCE, OID_QC_SSCD};
-pub use path::{PathOutcome, validate_path};
+pub use path::{AnchorStatus, PathOutcome, validate_path, validate_path_at};
 pub(crate) use path::{SignerPath, verify_signer_path};
 pub use purpose::{
     OID_KP_DOCUMENT_SIGNING, OID_KP_OCSP_SIGNING, OID_KP_TIME_STAMPING, OID_MS_DOCUMENT_SIGNING,

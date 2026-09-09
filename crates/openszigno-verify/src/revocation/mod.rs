@@ -41,6 +41,13 @@
 //!   later revocation is a reason to look harder, not a clean bill of health.
 //! - **`certificateHold`.** Treated as revoked. A suspended certificate is
 //!   not a usable one.
+//! - **Agreement between sources.** Every source is asked about every
+//!   certificate, and a revocation from any of them beats `good` from any
+//!   other. The tier order decides only which source is *read* first, never
+//!   which answer wins: the signature's own `RevocationValues` are supplied by
+//!   the signer, so a first-answer-wins rule let a genuine but older embedded
+//!   OCSP `good` hide the operator's newer CRL revoking the same certificate.
+//!   A disagreement is reported as `revocation_sources_disagree` (`info`).
 //!
 //! # What is not checked
 //!
@@ -51,7 +58,7 @@
 //!
 //! The module is split by what each part validates: `crl` holds CRL
 //! validation and lookup, `ocsp` holds OCSP response validation and the
-//! responder-authorisation models, and `tiers` holds the source priority,
+//! responder-authorisation models, and `tiers` holds the source gathering,
 //! the fallback rules, and the summaries and messages a path's answers become.
 //! What stays here is the public API, the per-path driver, and the store
 //! classification the CLI loads through.
@@ -237,11 +244,12 @@ pub struct PathRevocation {
     /// The single check the path contributes to the signature's verdict.
     pub check: Check,
     /// Informational checks about *how* an answer was obtained, which report
-    /// rather than decide and so never block: currently
-    /// `ocsp_responder_trusted`, emitted when a response was accepted under
-    /// the RFC 6960 section 2.2 trusted-responder model, because that rests on
-    /// the caller's own trust store rather than on the issuing CA's word and a
-    /// reader is entitled to know which it was.
+    /// rather than decide and so never block: `ocsp_responder_trusted`,
+    /// emitted when a response was accepted under the RFC 6960 section 2.2
+    /// trusted-responder model, because that rests on the caller's own trust
+    /// store rather than on the issuing CA's word and a reader is entitled to
+    /// know which it was; and `revocation_sources_disagree`, emitted when the
+    /// usable sources for one certificate did not say the same thing.
     pub notes: Vec<Check>,
 }
 
@@ -302,8 +310,41 @@ pub fn is_covered(
     time: UnixTime,
     limits: &VerifyLimits,
 ) -> bool {
+    is_covered_at(
+        subject,
+        issuer,
+        candidates,
+        anchors,
+        crate::certs::AnchorStatus::none(),
+        data,
+        time,
+        limits,
+    )
+}
+
+/// [`is_covered`], told what the caller knows about each anchor.
+///
+/// `status` reaches only the RFC 6960 section 2.2 trusted-responder model,
+/// which validates a responder's own path to an anchor. Deciding what to fetch
+/// is planning rather than verification: whatever this answers, the same code
+/// runs again, with the same status, when the verdict is made.
+#[allow(clippy::too_many_arguments)]
+pub fn is_covered_at(
+    subject: &ParsedCertificate,
+    issuer: &ParsedCertificate,
+    candidates: &[ParsedCertificate],
+    anchors: &[ParsedCertificate],
+    status: crate::certs::AnchorStatus<'_>,
+    data: &RevocationData<'_>,
+    time: UnixTime,
+    limits: &VerifyLimits,
+) -> bool {
     matches!(
-        check_certificate(subject, issuer, candidates, anchors, data, time, limits).status,
+        check_certificate(
+            subject, issuer, candidates, anchors, status, data, time, limits
+        )
+        .entry
+        .status,
         RevocationStatus::Good | RevocationStatus::Revoked
     )
 }
@@ -315,6 +356,19 @@ pub fn is_covered(
 /// it roots can answer, and asking would invite a self-signed CRL to speak for
 /// itself.
 pub fn check_path(input: &PathRevocationInput<'_>) -> PathRevocation {
+    check_path_at(input, crate::certs::AnchorStatus::none())
+}
+
+/// [`check_path`], told what the caller knows about each anchor.
+///
+/// `status` reaches only the RFC 6960 section 2.2 trusted-responder model: a
+/// responder whose own path ends at a trusted-list service that was not
+/// granted at the response's `producedAt` authorises nothing, exactly as that
+/// anchor would not have ended any other path.
+pub fn check_path_at(
+    input: &PathRevocationInput<'_>,
+    status: crate::certs::AnchorStatus<'_>,
+) -> PathRevocation {
     let PathRevocationInput {
         path,
         candidates,
@@ -376,10 +430,15 @@ pub fn check_path(input: &PathRevocationInput<'_>) -> PathRevocation {
     }
 
     let mut per_certificate = Vec::with_capacity(path.len());
+    let mut disagreements: Vec<String> = Vec::new();
     for window in path.windows(2) {
-        per_certificate.push(check_certificate(
-            &window[0], &window[1], candidates, anchors, data, time, limits,
-        ));
+        let answer = check_certificate(
+            &window[0], &window[1], candidates, anchors, status, data, time, limits,
+        );
+        if let Some(sentence) = answer.disagreement {
+            disagreements.push(sentence);
+        }
+        per_certificate.push(answer.entry);
     }
     per_certificate.push(CertificateRevocation::trust_anchor());
 
@@ -395,6 +454,16 @@ pub fn check_path(input: &PathRevocationInput<'_>) -> PathRevocation {
             format!(
                 "in {}, {trusted} certificate(s) were answered for by an OCSP responder the issuing CA did not delegate to, accepted under RFC 6960 section 2.2 because its certificate carries id-kp-OCSPSigning and chains to a configured trust anchor",
                 input.role.as_str()
+            ),
+        ));
+    }
+    if let Some(first) = disagreements.first() {
+        notes.push(Check::info(
+            CheckCode::RevocationSourcesDisagree,
+            format!(
+                "in {}, {} certificate(s) were answered for differently by different sources; {first}",
+                input.role.as_str(),
+                disagreements.len()
             ),
         ));
     }
@@ -542,17 +611,20 @@ pub(crate) fn check_signer_chain(
             ),
         });
     } else {
-        let outcome = check_path(&PathRevocationInput {
-            anchors: &context.anchors,
-            path: &signer_path.path,
-            candidates: &signer_path.candidates,
-            data,
-            time: signature_time,
-            time_is_proven,
-            policy: context.revocation_policy,
-            role: ChainRole::Signer,
-            limits: &context.options.limits,
-        });
+        let outcome = check_path_at(
+            &PathRevocationInput {
+                anchors: &context.anchors,
+                path: &signer_path.path,
+                candidates: &signer_path.candidates,
+                data,
+                time: signature_time,
+                time_is_proven,
+                policy: context.revocation_policy,
+                role: ChainRole::Signer,
+                limits: &context.options.limits,
+            },
+            crate::certs::AnchorStatus::new(&context.anchor_provenance),
+        );
         for (entry, status) in chain.iter_mut().zip(outcome.per_certificate) {
             entry.revocation = Some(status);
         }

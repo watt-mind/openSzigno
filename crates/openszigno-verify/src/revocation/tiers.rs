@@ -1,11 +1,16 @@
-//! Source priority, coverage, fallback, and the sentences a path's answers
+//! Source gathering, coverage, fallback, and the sentences a path's answers
 //! are folded into.
 //!
-//! The tier order is deliberate: a signature's own `RevocationValues` were
-//! collected when the signature was made and are what an archived,
-//! network-free validation is meant to rely on; the store is the operator's
-//! material and comes second; online material comes last, because it can only
-//! fill a gap the caller's own material left.
+//! **Every source is consulted, and the answers are then weighed.** The tier
+//! order still decides which sources are *read* first, and it is deliberate: a
+//! signature's own `RevocationValues` were collected when the signature was
+//! made and are what an archived, network-free validation is meant to rely on;
+//! the store is the operator's material and comes second; online material
+//! comes last, because it can only fill a gap the caller's own material left.
+//! What the order must never decide is the *answer*: the embedded tier is
+//! attacker-controlled, so letting the first definite answer win let a genuine
+//! but older embedded OCSP `good` hide the operator's newer CRL revoking the
+//! same certificate. See [`choose`].
 
 use serde::Serialize;
 use x509_cert::ext::pkix::name::{DistributionPointName, GeneralName};
@@ -306,23 +311,113 @@ pub(super) enum Answer {
     NotApplicable,
 }
 
-/// Consult every source, in priority order, for one certificate.
+/// One usable, definite answer about one certificate.
+struct Definite {
+    entry: CertificateRevocation,
+    /// The instant the source speaks for: `producedAt` when it stated one,
+    /// otherwise `thisUpdate`. It is what decides between two answers that say
+    /// the same thing.
+    stated_at: UnixTime,
+    /// Whether the source recorded a revocation at all, whether or not that
+    /// revocation falls after the validation time.
+    revoked: bool,
+}
+
+/// One certificate's revocation answer, and whether the sources disagreed
+/// about it.
+pub(super) struct CertificateAnswer {
+    pub(super) entry: CertificateRevocation,
+    /// A sentence naming the disagreement, set when the usable sources gave
+    /// different definite statuses for this certificate. It is reported as an
+    /// `info` check, because a reader is entitled to know that the answer they
+    /// were given was contested.
+    pub(super) disagreement: Option<String>,
+}
+
+/// Which of two answers of the same kind speaks for the later instant.
+const fn stated_at(this_update: UnixTime, produced_at: Option<UnixTime>) -> UnixTime {
+    match produced_at {
+        Some(produced_at) if produced_at > this_update => produced_at,
+        _ => this_update,
+    }
+}
+
+/// Pick the answer the report is built from.
+///
+/// **A revocation from any source beats `good` from any other.** A source that
+/// records a revocation has seen something a source reporting `good` has not,
+/// and the order the sources happen to be consulted in must never decide
+/// between them: the embedded tier is supplied by the signer, so an older but
+/// genuine embedded `good` would otherwise hide the operator's newer CRL. The
+/// revocation-after-validation-time rule is applied afterwards, unchanged, to
+/// whichever revocation was chosen.
+///
+/// Among answers of the same kind the one whose source speaks for the later
+/// instant wins — the later `producedAt` or `thisUpdate` — because that source
+/// knew everything the earlier one did. A tie keeps the earlier entry, which
+/// is the tier order.
+fn choose(answers: &[Definite]) -> Option<usize> {
+    let revoked = answers.iter().any(|answer| answer.revoked);
+    let mut best: Option<(usize, UnixTime)> = None;
+    for (index, answer) in answers.iter().enumerate() {
+        if answer.revoked != revoked {
+            continue;
+        }
+        if best.is_none_or(|(_, stated)| answer.stated_at > stated) {
+            best = Some((index, answer.stated_at));
+        }
+    }
+    best.map(|(index, _)| index)
+}
+
+/// The sentence recording that the sources did not agree about a certificate.
+fn disagreement(answers: &[Definite]) -> Option<String> {
+    let named = |revoked: bool| {
+        let mut names: Vec<&'static str> = Vec::new();
+        for answer in answers.iter().filter(|answer| answer.revoked == revoked) {
+            if let Some(name) = answer.entry.source.map(RevocationOrigin::describe)
+                && !names.contains(&name)
+            {
+                names.push(name);
+            }
+        }
+        names.join(", ")
+    };
+    let revoked = named(true);
+    let good = named(false);
+    if revoked.is_empty() || good.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "the sources disagree: {revoked} recorded a revocation while {good} reported the certificate as not revoked, and the revocation decides"
+    ))
+}
+
+/// Consult **every** source for one certificate, then weigh the answers.
+///
+/// The tiers are read in priority order, but reading order is not deciding
+/// order: every usable answer is gathered first and [`choose`] then settles
+/// which one the report is built from. An unusable source is recorded as a
+/// refusal exactly as before, and is the fallback when nothing definite was
+/// found at all.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn check_certificate(
     subject: &ParsedCertificate,
     issuer: &ParsedCertificate,
     candidates: &[ParsedCertificate],
     anchors: &[ParsedCertificate],
+    status: crate::certs::AnchorStatus<'_>,
     data: &RevocationData<'_>,
     time: UnixTime,
     limits: &VerifyLimits,
-) -> CertificateRevocation {
-    // The order is deliberate. A signature's own `RevocationValues` were
-    // collected when the signature was made and are what an archived,
+) -> CertificateAnswer {
+    // The reading order is deliberate. A signature's own `RevocationValues`
+    // were collected when the signature was made and are what an archived,
     // network-free validation is meant to rely on; the store is the operator's
-    // material and comes second. Within each tier OCSP is asked first, because
-    // it answers about this certificate rather than about a list.
-    // Online material comes last: it can only fill a gap the caller's own
-    // material left, never displace an answer that was already to hand.
+    // material and comes second. Within each tier OCSP is read first, because
+    // it answers about this certificate rather than about a list. Online
+    // material is read last: it can only fill a gap the caller's own material
+    // left. None of that decides which answer wins; see [`choose`].
     let tiers: [(RevocationOrigin, &[Vec<u8>]); 6] = [
         (RevocationOrigin::EmbeddedOcsp, data.embedded_ocsp),
         (RevocationOrigin::EmbeddedCrl, data.embedded_crls),
@@ -339,6 +434,7 @@ pub(super) fn check_certificate(
     // same question — but it must stay visible, whether or not something later
     // rescued the certificate.
     let mut refused: Option<(RevocationOrigin, String)> = None;
+    let mut definite: Vec<Definite> = Vec::new();
     for (origin, items) in tiers {
         for item in items.iter().take(limits.max_revocation_items) {
             // Oversized evidence is refused *and named*. Skipping it silently
@@ -355,9 +451,9 @@ pub(super) fn check_certificate(
             let answer = match origin {
                 RevocationOrigin::EmbeddedOcsp
                 | RevocationOrigin::StoreOcsp
-                | RevocationOrigin::OnlineOcsp => {
-                    ocsp_answer(item, subject, issuer, candidates, anchors, time, limits)
-                }
+                | RevocationOrigin::OnlineOcsp => ocsp_answer(
+                    item, subject, issuer, candidates, anchors, status, time, limits,
+                ),
                 RevocationOrigin::EmbeddedCrl
                 | RevocationOrigin::StoreCrl
                 | RevocationOrigin::OnlineCrl => {
@@ -394,8 +490,11 @@ pub(super) fn check_certificate(
                     entry.next_update = next_update.map(format_rfc3339);
                     entry.produced_at = produced_at.map(format_rfc3339);
                     entry.responder_model = responder_model;
-                    entry.detail = superseded(refused.as_ref(), origin);
-                    return entry;
+                    definite.push(Definite {
+                        entry,
+                        stated_at: stated_at(this_update, produced_at),
+                        revoked: false,
+                    });
                 }
                 Answer::Revoked {
                     time: revoked_at,
@@ -421,18 +520,42 @@ pub(super) fn check_certificate(
                     entry.next_update = next_update.map(format_rfc3339);
                     entry.produced_at = produced_at.map(format_rfc3339);
                     entry.responder_model = responder_model;
-                    entry.detail = superseded(refused.as_ref(), origin);
-                    return entry;
+                    definite.push(Definite {
+                        entry,
+                        stated_at: stated_at(this_update, produced_at),
+                        revoked: true,
+                    });
                 }
             }
         }
     }
-    fallback.unwrap_or_else(|| {
-        CertificateRevocation::plain(
-            RevocationStatus::Unknown,
-            CheckCode::RevocationStatusUnknown,
-        )
-    })
+
+    let disagreement = disagreement(&definite);
+    let Some(index) = choose(&definite) else {
+        return CertificateAnswer {
+            entry: fallback.unwrap_or_else(|| {
+                CertificateRevocation::plain(
+                    RevocationStatus::Unknown,
+                    CheckCode::RevocationStatusUnknown,
+                )
+            }),
+            disagreement: None,
+        };
+    };
+    let mut entry = definite.swap_remove(index).entry;
+    let used = entry.source.expect("a gathered answer names its source");
+    let mut sentences: Vec<String> = Vec::new();
+    if let Some(sentence) = superseded(refused.as_ref(), used) {
+        sentences.push(sentence);
+    }
+    if let Some(sentence) = disagreement.clone() {
+        sentences.push(sentence);
+    }
+    entry.detail = (!sentences.is_empty()).then(|| sentences.join("; "));
+    CertificateAnswer {
+        entry,
+        disagreement,
+    }
 }
 
 /// Remember one refused source: the first refusal is what the report names,

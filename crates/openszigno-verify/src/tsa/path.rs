@@ -8,7 +8,8 @@
 use const_oid::ObjectIdentifier;
 
 use crate::certs::{
-    ChainEntry, OID_KP_TIME_STAMPING, ParsedCertificate, PathPurpose, dedup, validate_path,
+    AnchorStatus, ChainEntry, OID_KP_TIME_STAMPING, ParsedCertificate, PathPurpose, dedup,
+    validate_path_at,
 };
 use crate::codes::{Check, CheckCode, CheckStatus};
 use crate::trust::UnixTime;
@@ -33,6 +34,7 @@ pub(super) fn check_tsa_certificate(
     tsa: &ParsedCertificate,
     certificates: &[ParsedCertificate],
     input: &TokenInput<'_>,
+    status: AnchorStatus<'_>,
     gen_time: UnixTime,
     checks: &mut Vec<Check>,
 ) -> TsaPath {
@@ -55,10 +57,11 @@ pub(super) fn check_tsa_certificate(
     // The validation time for the TSA's own chain is `genTime`: a
     // timestamp asserts existence at that instant, so that is when the TSA
     // had to be entitled to say so.
-    let path = validate_path(
+    let path = validate_path_at(
         tsa,
         &candidates,
         input.anchors,
+        status,
         gen_time,
         input.limits,
         PathPurpose::TimeStamping,
@@ -68,6 +71,13 @@ pub(super) fn check_tsa_certificate(
         // No anchors, or a search that gave up: the tool does not know.
         CheckCode::CertPathUnknown | CheckCode::CertPathSearchExhausted => {
             (CheckCode::TimestampTsaPathUnknown, CheckStatus::Unknown)
+        }
+        // The path is sound but its anchor's TSA/QTST service was not granted
+        // at the `genTime`. The list offers no trust for it then, which is a
+        // gap rather than evidence against the token, so the code is reported
+        // as it stands and blocks without condemning.
+        CheckCode::TrustListServiceNotGranted => {
+            (CheckCode::TrustListServiceNotGranted, CheckStatus::Unknown)
         }
         _ => (CheckCode::TimestampTsaPathUntrusted, CheckStatus::Failed),
     };

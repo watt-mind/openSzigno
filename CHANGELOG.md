@@ -142,6 +142,39 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
   `xades_extra_qualifying_properties` (`info`) and otherwise ignored. Real
   XAdES signatures reference their `SignedProperties`, so the rule is a no-op
   for conformant material; `schema_version` stays `1`.
+- Revocation no longer stops at the first source that gives a definite answer.
+  The signature's own `RevocationValues` were read first, so a genuine but
+  older embedded OCSP `good` still inside its own `nextUpdate` hid the newer
+  CRL in `--revocation-store` that revoked the same certificate: the run
+  reported `revocation_ok`, a chain entry sourced `embedded_ocsp`, and a
+  `valid` verdict. Every source is now asked about every certificate and the
+  answers are weighed: a revocation from any source beats `good` from any
+  other, and among answers that say the same thing the one speaking for the
+  later `producedAt` or `thisUpdate` is the one reported. The freshness rules
+  and the revocation-after-validation-time rule are unchanged. A new
+  `revocation_sources_disagree` check (`info`, non-blocking) reports a
+  disagreement and names both sides, and the same sentence is added to that
+  certificate's `chain[].revocation.detail`. Additive; `schema_version` stays
+  `1`. See [Which answer wins](docs/architecture.md#which-answer-wins).
+- A trusted-list anchor no longer ends a certification path at a time its
+  service was not granted. The anchor set was built from every configured
+  anchor with no status filter and a path ended at any of them, so a
+  `withdrawn`, `supervisionceased` or `deprecated*` CA/QC or TSA/QTST service
+  still produced `cert_path_ok` at a validation time after the withdrawal;
+  `granted_at` reached only the informational `qualified` flag, and the
+  `trust_list_service_not_granted` code was declared but never emitted. A
+  completed path now consults the anchor's `ServiceRecord` — CA/QC for a
+  signing or OCSP-signing path, TSA/QTST for a timestamping one — and a
+  non-granted anchor yields `trust_list_service_not_granted` (`unknown`,
+  blocking) instead of `cert_path_ok`, after the other candidate paths have
+  been tried. It is `unknown` rather than `failed`, because missing trust is
+  not evidence against a signature: the verdict is capped at `indeterminate`
+  and is never `invalid` for this reason. A `--trust-store` anchor is
+  unaffected, and where a list records a certificate only under a service of
+  another kind it is treated as a trust-store anchor would be, provided some
+  service it does record was granted then. See [A path may only end at a
+  service that was granted
+  then](docs/architecture.md#a-path-may-only-end-at-a-service-that-was-granted-then).
 - `sign` no longer lets the dossier being signed choose what the operator's
   key signs. The `OBJREF` and `Id` attributes a reference points at, the
   declared media type an `xades:DataObjectFormat` carries and the root

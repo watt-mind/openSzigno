@@ -17,7 +17,7 @@ use common::{
 use openszigno_verify::certs::{CertificateSource, ParsedCertificate};
 use openszigno_verify::codes::{CheckCode, CheckStatus};
 use openszigno_verify::{
-    FixedClock, MemoryRevocationStore, MemoryTrustStore, RoxmltreeC14n, TrustAnchorOrigin,
+    FixedClock, MemoryRevocationStore, MemoryTrustStore, RoxmltreeC14n, TrustAnchorOrigin, Verdict,
     VerifyOptions, VerifyReport, parse_rfc3339, verify,
 };
 use rcgen::BasicConstraints;
@@ -206,6 +206,17 @@ fn a_file_that_is_not_a_trusted_list_is_refused() {
     );
 }
 
+fn assert_absent(report: &VerifyReport, code: CheckCode) {
+    let seen = codes(report);
+    assert!(
+        !seen
+            .iter()
+            .any(|entry| entry.starts_with(&format!("{}=", code.as_str()))),
+        "expected no {}; got {seen:?}",
+        code.as_str()
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Service status over time
 // ---------------------------------------------------------------------------
@@ -228,10 +239,29 @@ fn the_status_in_force_at_the_validation_time_decides() {
     let list = build_trust_list(&TrustListSpec::new(vec![service]));
     let xml = dossier(signature(&pki), &pki.signer_key);
 
-    // 2020: the granted history entry is the one in force.
+    // 2020: the granted history entry is the one in force, so the anchor may
+    // end the path and the chain is qualified.
     let report = run_with_list(&xml, &list, None, AT);
+    assert_check(&report, CheckCode::CertPathOk, CheckStatus::Passed);
+    assert_absent(&report, CheckCode::TrustListServiceNotGranted);
     assert_check(&report, CheckCode::CertificateQualified, CheckStatus::Info);
     assert_eq!(report.signatures[0].qualified, Some(true));
+}
+
+/// A service granted at the validation time anchors the path, which is the
+/// other half of the rule below: the status timeline decides both ways.
+#[test]
+fn a_granted_service_still_anchors_the_path() {
+    let pki = pki((2019, 1, 1), &["0.4.0.1862.1.1"]);
+    let mut service = TlService::ca_qc("openSzigno Test Qualified CA", pki.root_der.clone());
+    service.status = STATUS_GRANTED.to_owned();
+    service.status_starting_time = "2016-07-01T00:00:00Z".to_owned();
+    let list = build_trust_list(&TrustListSpec::new(vec![service]));
+    let xml = dossier(signature(&pki), &pki.signer_key);
+
+    let report = run_with_list(&xml, &list, None, AT);
+    assert_check(&report, CheckCode::CertPathOk, CheckStatus::Passed);
+    assert_absent(&report, CheckCode::TrustListServiceNotGranted);
 }
 
 /// The same list, the same anchor, a later validation time: the service has
@@ -253,6 +283,41 @@ fn a_withdrawn_service_is_not_qualified_afterwards() {
         CheckStatus::Info,
     );
     assert_eq!(report.signatures[0].qualified, Some(false));
+
+    // The withdrawal reaches the path itself, not only the qualified flag: an
+    // anchor the list has stopped vouching for cannot end a path at an instant
+    // it was not granted at. It is `unknown`, not `failed` — the trust is
+    // missing, which is not evidence against the signature — so the run is
+    // capped at `indeterminate` rather than pushed to `invalid`.
+    assert_absent(&report, CheckCode::CertPathOk);
+    assert_check(
+        &report,
+        CheckCode::TrustListServiceNotGranted,
+        CheckStatus::Unknown,
+    );
+    assert_eq!(report.verdict, Verdict::Indeterminate);
+}
+
+/// The list must still be vouching for the certificate, whichever kind of
+/// service it named it under: a root the list records only as a withdrawn
+/// timestamping authority anchors nothing, not even a signing path.
+#[test]
+fn an_anchor_whose_every_service_is_withdrawn_anchors_nothing() {
+    let pki = pki((2019, 1, 1), &["0.4.0.1862.1.1"]);
+    let mut service = TlService::ca_qc("openSzigno Test Qualified CA", pki.root_der.clone());
+    service.service_type = SVCTYPE_TSA_QTST.to_owned();
+    service.status = STATUS_WITHDRAWN.to_owned();
+    service.status_starting_time = "2018-01-01T00:00:00Z".to_owned();
+    let list = build_trust_list(&TrustListSpec::new(vec![service]));
+    let xml = dossier(signature(&pki), &pki.signer_key);
+
+    let report = run_with_list(&xml, &list, None, AT);
+    assert_absent(&report, CheckCode::CertPathOk);
+    assert_check(
+        &report,
+        CheckCode::TrustListServiceNotGranted,
+        CheckStatus::Unknown,
+    );
 }
 
 /// A pre-eIDAS status this build refuses to translate is not "granted", and

@@ -150,7 +150,25 @@ impl TokenOutcome {
 }
 
 /// Verify one RFC 3161 token against the data it claims to cover.
+///
+/// This entry point knows nothing about where the anchors came from, so every
+/// one of them may end the TSA's path at any time. A caller holding
+/// trusted-list anchors must use [`verify_token_at`] instead, so that a
+/// TSA/QTST service the list has stopped vouching for cannot anchor one.
 pub fn verify_token(input: &TokenInput<'_>) -> TokenOutcome {
+    verify_token_at(input, crate::certs::AnchorStatus::none())
+}
+
+/// [`verify_token`], told what the caller knows about each anchor.
+///
+/// `status` decides whether the anchor the TSA's own path reaches was granted
+/// as a qualified timestamping authority (TSA/QTST) at the token's `genTime` —
+/// the instant the authority claims it spoke, and so the instant it had to be
+/// entitled to speak.
+pub fn verify_token_at(
+    input: &TokenInput<'_>,
+    status: crate::certs::AnchorStatus<'_>,
+) -> TokenOutcome {
     if input.token.len() > MAX_TOKEN_BYTES {
         return TokenOutcome::failed(
             input.kind,
@@ -272,28 +290,32 @@ pub fn verify_token(input: &TokenInput<'_>) -> TokenOutcome {
             mut chain,
             path,
             candidates,
-        } = check_tsa_certificate(tsa, &certificates, input, gen_time, &mut checks);
+        } = check_tsa_certificate(tsa, &certificates, input, status, gen_time, &mut checks);
 
         // --- The TSA chain's revocation -------------------------------------
         // Checked at `genTime`, the same instant the chain itself is validated
         // at: the question is whether the authority was entitled to speak when
         // it spoke.
         if !path.is_empty() {
-            let outcome = crate::revocation::check_path(&crate::revocation::PathRevocationInput {
-                anchors: input.anchors,
-                path: &path,
-                candidates: &candidates,
-                data: &input.revocation,
-                time: gen_time,
-                // The instant a TSA's own chain is validated at is the
-                // `genTime` the token asserts, so it cannot also be the proof
-                // that dismisses a revocation dated after it. A TSA
-                // certificate revoked after its own genTime stays `unknown`.
-                time_is_proven: false,
-                policy: input.revocation_policy,
-                role: crate::revocation::ChainRole::TimestampAuthority,
-                limits: input.limits,
-            });
+            let outcome = crate::revocation::check_path_at(
+                &crate::revocation::PathRevocationInput {
+                    anchors: input.anchors,
+                    path: &path,
+                    candidates: &candidates,
+                    data: &input.revocation,
+                    time: gen_time,
+                    // The instant a TSA's own chain is validated at is the
+                    // `genTime` the token asserts, so it cannot also be the
+                    // proof that dismisses a revocation dated after it. A TSA
+                    // certificate revoked after its own genTime stays
+                    // `unknown`.
+                    time_is_proven: false,
+                    policy: input.revocation_policy,
+                    role: crate::revocation::ChainRole::TimestampAuthority,
+                    limits: input.limits,
+                },
+                status,
+            );
             for (entry, status) in chain.iter_mut().zip(outcome.per_certificate) {
                 entry.revocation = Some(status);
             }
@@ -453,19 +475,22 @@ pub(crate) fn verify_signature_timestamps(
             });
             continue;
         }
-        let token = verify_token(&TokenInput {
-            kind: source.kind,
-            document_index: None,
-            token: source.token.clone(),
-            imprint_input: source.imprint_input.clone(),
-            anchors: &context.anchors,
-            extra_certificates: &timestamp_candidates,
-            limits: &context.options.limits,
-            allow_legacy_algorithms: context.options.allow_legacy_algorithms,
-            revocation: revocation_data,
-            revocation_policy: context.revocation_policy,
-            claimed_signing_time,
-        });
+        let token = verify_token_at(
+            &TokenInput {
+                kind: source.kind,
+                document_index: None,
+                token: source.token.clone(),
+                imprint_input: source.imprint_input.clone(),
+                anchors: &context.anchors,
+                extra_certificates: &timestamp_candidates,
+                limits: &context.options.limits,
+                allow_legacy_algorithms: context.options.allow_legacy_algorithms,
+                revocation: revocation_data,
+                revocation_policy: context.revocation_policy,
+                claimed_signing_time,
+            },
+            crate::certs::AnchorStatus::new(&context.anchor_provenance),
+        );
         report.checks.push(summary_check(&token.report.checks));
         // The TSA chain's own revocation answer belongs to this signature's
         // verdict too: a timestamp signed under a revoked TSA certificate must

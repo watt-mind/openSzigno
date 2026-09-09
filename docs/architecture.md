@@ -1956,10 +1956,39 @@ timeline — the current `ServiceStatus` and `StatusStartingTime` plus every
 decides, which is what lets a signature made while a CA was supervised still
 verify after that CA was withdrawn.
 
-Only `granted` and `recognisedatnationallevel` count as granted. The pre-eIDAS
-statuses (`undersupervision`, `accredited`) and every terminal one
-(`withdrawn`, `supervisionceased`, the `deprecated*` family) do not: this build
-refuses to guess which historical status was equivalent to which.
+`granted` and `recognisedatnationallevel` count as granted at any time. The
+pre-eIDAS statuses `undersupervision` and `accredited` count only at a
+validation time before 2016-07-01, when eIDAS began to apply; every terminal
+status (`withdrawn`, `supervisionceased`, the `deprecated*` family) never does.
+See [Trusted lists](trust.md#what-is-read-and-what-is-not) for why the
+pre-eIDAS window is closed rather than open-ended.
+
+#### A path may only end at a service that was granted then
+
+When a built and validated path ends at a **trusted-list** anchor, that
+anchor's service record is consulted before the path is accepted:
+
+| The list records, for this certificate | Then |
+| --- | --- |
+| A service of the kind the path needs — CA/QC for a signing or OCSP-signing path, TSA/QTST for a timestamping one — granted at the validation time | The path ends here: `cert_path_ok`. |
+| A service of that kind that was **not** granted then | `trust_list_service_not_granted` (`unknown`). The search carries on to the other candidate paths first, because another anchor may still be entitled to end one. |
+| Only services of some *other* kind, at least one of them granted then | The list has said nothing about this use, so the anchor is treated as a trust-store one would be and the path ends here. A national list that names a root under its CA/QC services and nowhere else still vouches for that root when a timestamp authority beneath it is checked. |
+| Only services none of which was granted then | `trust_list_service_not_granted`. The list has stopped vouching for the certificate altogether. |
+
+A `--trust-store` anchor is unaffected: the operator put the file in the
+directory, and that is the whole of the statement. When the same certificate
+arrives both ways, the trust store's unconditional statement stands.
+
+`trust_list_service_not_granted` is **`unknown`, never `failed`**. Trust that
+is missing is not evidence against a signature: the same distinction
+`cert_path_unknown` draws. It blocks, so the verdict is capped at
+`indeterminate`, and it never makes a run `invalid`. The chain is still
+reported in full, and so is the qualified determination, because a reader
+needs to see *which* anchor was refused and under which service.
+
+For a timestamp the same check runs at the token's `genTime` against the
+TSA/QTST service type, and the code is reported in place of
+`timestamp_tsa_path_ok`, again as `unknown`.
 
 `--trust-list-signer CERT` supplies the certificate the list must have been
 signed with, obtained out of band — for the EU list of trusted lists, from the
@@ -2040,8 +2069,10 @@ determination.
 
 ### Revocation
 
-Offline by default and offline only. Data is consulted in this order, and the
-first source that yields a definite answer for a certificate wins:
+Offline by default and offline only. **Every source is asked about every
+certificate, and the answers are then weighed** ([Which answer
+wins](#which-answer-wins)). The order below is the order sources are *read*
+in; it never decides which answer is believed:
 
 1. the signature's own validation data — `EncapsulatedOCSPValue`, then
    `EncapsulatedCRLValue` — from **either** placement: directly under
@@ -2126,6 +2157,34 @@ afterwards said it while it still was.
 `ocsp_responder_trusted` (`info`) is emitted when the third model was used, so
 a reader can tell an answer that rests on the issuing CA from one that rests on
 their own trust store. It reports rather than decides, so it never blocks.
+
+#### Which answer wins
+
+The reading order above is a preference about where to look first, not about
+what to believe. The signature's own `RevocationValues` are supplied by the
+signer, so a rule that stopped at the first definite answer let a genuine but
+older embedded OCSP `good`, still inside its own `nextUpdate`, hide the
+operator's newer CRL revoking the same certificate. For one certificate at one
+validation time:
+
+1. every source is consulted, and every usable, definite answer is gathered;
+2. **a revocation from any source beats `good` from any other.** A source that
+   records a revocation has seen something a source reporting `good` has not,
+   and which tier it came from is irrelevant;
+3. among answers that say the same thing, the one whose source speaks for the
+   later instant is the one reported — the later `producedAt` where the source
+   stated one, otherwise the later `thisUpdate` — because that source knew
+   everything the earlier one did. A tie keeps the earlier source, which is the
+   reading order;
+4. the freshness rules and the revocation-after-validation-time rule below are
+   unchanged, and are applied to the answer that was chosen.
+
+`chain[].revocation.source` names the source the reported answer came from, so
+"which CRL said this" is always answerable. When the usable sources did not
+agree, `revocation_sources_disagree` (`info`) is emitted for the chain and the
+same sentence is added to that certificate's `chain[].revocation.detail`. It
+reports rather than decides, so it never blocks: the disagreement has already
+been resolved by the rules above.
 
 #### Tier fallback
 
@@ -2785,12 +2844,13 @@ verify), and `revocation_not_checked` (the caller switched revocation off).
 | `revocation_data_stale` | `unknown` | The data's `nextUpdate` had passed at the validation time, or it carries none and its `thisUpdate` precedes it. Also the OCSP `unknown` status. |
 | `revocation_data_invalid` | `unknown` | Every source that covered a certificate was found but could not be used: signed by someone unauthorised, a delta or indirect CRL, an unimplemented `issuingDistributionPoint` form, a critical CRL extension this build does not implement, an OCSP response whose status is not `successful`, or an item larger than `MAX_REVOCATION_ITEM_BYTES`, whose size and limit the message names. The message names the cause. Emitted only after every tier has been tried. `unknown`, not `failed`: unusable data means the tool could not answer. |
 | `online_fetch_failed` | `info` | Under `--online`, one fetch did not produce a usable artefact. The message names the URL and the failure class: `timeout`, `http status <code>`, `too large` with the limit, `redirect`, `invalid`, `transport`, `destination_refused` with the rule that refused the destination before any socket was opened (`redirect_downgrade` for a redirect that would leave `https` for `http`, `credentials_require_https` for a request carrying credentials over a scheme that is not `https`, and the address and scheme rules), or `cache_collision` when `--online-cache` already held a different file under an artefact's name and nothing was overwritten. Informational: whether the missing data mattered is answered by the chain that needed it, through `revocation_status_unknown`, which blocks. |
+| `revocation_sources_disagree` | `info` | The usable revocation sources for one certificate did not say the same thing: one recorded a revocation and another reported it as not revoked. The message names both sides and which chain it is about. Reports rather than decides — the disagreement is already settled by [Which answer wins](#which-answer-wins), where a revocation beats a `good` from any other source — so it never blocks. |
 | `ocsp_responder_trusted` | `info` | An OCSP response was accepted under the RFC 6960 section 2.2 trusted-responder model: the responder is not the issuing CA and that CA did not delegate to it, but its certificate carries `id-kp-OCSPSigning` and chains to a configured anchor. Reported because this rests on the caller's trust store rather than on the issuing CA's word. |
 | `trust_list_loaded` | `info` | A `--trust-list` file was read; the message says how many anchors it contributed. |
 | `trust_list_unverified` | `unknown` | A trusted list was used without `--trust-list-signer`, so its own signature was not checked. Blocking. |
 | `trust_list_signature_ok` | `passed` | The list's enveloped XMLDSig signature verified against the supplied signer certificate and covers the whole document. |
 | `trust_list_signature_invalid` | `failed` | It did not verify, does not cover the whole list, uses an algorithm or transform outside the allowlist, or is absent while a signer was demanded. |
-| `trust_list_service_not_granted` | never emitted | Reserved in `CheckCode` and never produced by this build: a service that is not granted at the validation time is reported through `certificate_not_qualified` instead. Listed here because the code is part of the stable enumeration a consumer may see in a later release. |
+| `trust_list_service_not_granted` | `unknown` | A path was built and validated but ends at a trusted-list anchor the list does not record as granted at the validation time for the use the path was built for. Replaces `cert_path_ok` (and, for a timestamp, `timestamp_tsa_path_ok`); the other candidate paths are tried first. `unknown`, never `failed`: missing trust is not evidence against the signature, so it caps the verdict at `indeterminate` rather than making it `invalid`. See [A path may only end at a service that was granted then](#a-path-may-only-end-at-a-service-that-was-granted-then). |
 | `certificate_qualified` | `info` | The chain ends at a trusted-list CA/QC service granted at the validation time, and any post-eIDAS certificate asserts `QcCompliance`. |
 | `certificate_not_qualified` | `info` | The trusted list does not record the anchor's service as granted then, or a post-eIDAS certificate carries no `QcCompliance`. |
 | `certificate_qualified_unknown` | `info` | No trusted list covers the anchor, so qualified status is not determined. Distinct from `certificate_not_qualified`. |
