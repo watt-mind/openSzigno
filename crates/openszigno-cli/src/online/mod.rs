@@ -353,6 +353,21 @@ impl Fetcher {
         let credentials = body.is_some_and(|post| post.carries_credentials());
         let mut current = url.to_owned();
         for _ in 0..=MAX_REDIRECTS {
+            // A request that carries credentials needs TLS on *this* hop, the
+            // first one included. A revocation fetch does not: a CRL is public
+            // and is signature-checked either way. The one exception is a
+            // loopback service under `--online-allow-private`, which is what
+            // this project's own test servers are and where the bytes never
+            // leave the machine — and even that is granted on the *vetted*
+            // addresses below, not on the host text. Without the flag the
+            // refusal comes first, so a plaintext credential URL is not even
+            // looked up.
+            let insecure_credentials = credentials && scheme_of(&current) != Some("https");
+            if insecure_credentials && !self.allow_private {
+                return Err(FailureClass::DestinationRefused(
+                    REFUSED_PLAINTEXT_CREDENTIALS,
+                ));
+            }
             // The destination policy is applied to every URL actually
             // contacted, the redirect targets included: a redirect stays on
             // the host the certificate named, but "the same name" and "the
@@ -362,16 +377,7 @@ impl Fetcher {
                     Refusal::Refused(reason) => FailureClass::DestinationRefused(reason),
                     Refusal::Unresolvable => FailureClass::Transport,
                 })?;
-            // A request that carries credentials needs TLS on *this* hop, the
-            // first one included. The revocation fetches do not: a CRL is
-            // public and is signature-checked either way. The one exception is
-            // a loopback service under `--online-allow-private`, which is what
-            // this project's own test servers are, and where the bytes never
-            // leave the machine.
-            if credentials
-                && scheme_of(&current) != Some("https")
-                && !(self.allow_private && loopback_only(&vetted))
-            {
+            if insecure_credentials && !loopback_only(&vetted) {
                 return Err(FailureClass::DestinationRefused(
                     REFUSED_PLAINTEXT_CREDENTIALS,
                 ));
@@ -460,27 +466,36 @@ impl Fetcher {
             .get("location")
             .and_then(|value| value.to_str().ok())
             .ok_or(FailureClass::Redirect)?;
-        let next = resolve(current, location).ok_or(FailureClass::Redirect)?;
-        // A redirect across hosts is refused rather than followed: the
-        // authority for this URL is the certificate, and the certificate named
-        // one host.
-        if host_of(&next).as_deref() != Some(origin) {
-            return Err(FailureClass::Redirect);
-        }
-        let next_scheme = scheme_of(&next);
-        if !matches!(next_scheme, Some("http" | "https")) {
-            return Err(FailureClass::Redirect);
-        }
-        // The downgrade. Same host, same certificate, and yet the next request
-        // would go out in the clear, carrying whatever the first one carried:
-        // a bearer token, a PIN, a one-time password. Refused for every
-        // request kind, because a plaintext hop is not something a peer gets
-        // to choose for this tool even when there is nothing secret on it.
-        if scheme_of(current) == Some("https") && next_scheme == Some("http") {
-            return Err(FailureClass::DestinationRefused(REFUSED_REDIRECT_DOWNGRADE));
-        }
-        Ok(next)
+        redirect_target(current, location, origin)
     }
+}
+
+/// The redirect rules themselves, as one decision over three strings.
+///
+/// It is a free function, and pure, because these are the rules a redirect has
+/// to satisfy *before* the loop comes round: nothing here has a socket, so
+/// there is no shape of this code in which a refused target is contacted
+/// first.
+fn redirect_target(current: &str, location: &str, origin: &str) -> Result<String, FailureClass> {
+    let next = resolve(current, location).ok_or(FailureClass::Redirect)?;
+    // A redirect across hosts is refused rather than followed: the authority
+    // for this URL is the certificate, and the certificate named one host.
+    if host_of(&next).as_deref() != Some(origin) {
+        return Err(FailureClass::Redirect);
+    }
+    let next_scheme = scheme_of(&next);
+    if !matches!(next_scheme, Some("http" | "https")) {
+        return Err(FailureClass::Redirect);
+    }
+    // The downgrade. Same host, same certificate, and yet the next request
+    // would go out in the clear, carrying whatever the first one carried: a
+    // bearer token, a PIN, a one-time password. Refused for every request
+    // kind, because a plaintext hop is not something a peer gets to choose for
+    // this tool even when there is nothing secret on this particular one.
+    if scheme_of(current) == Some("https") && next_scheme == Some("http") {
+        return Err(FailureClass::DestinationRefused(REFUSED_REDIRECT_DOWNGRADE));
+    }
+    Ok(next)
 }
 
 fn classify_transport(error: ureq::Error) -> FailureClass {
@@ -670,49 +685,5 @@ fn hex(bytes: &[u8]) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_failure_names_the_url_and_its_class() {
-        let check = failure("http://crl.example/ca.crl", FailureClass::Timeout);
-        assert_eq!(check.code, CheckCode::OnlineFetchFailed);
-        // Informational: whether the certificate ended up covered is the
-        // verifier's answer to give, on the chain that needed the data.
-        assert_eq!(check.status, openszigno_verify::CheckStatus::Info);
-        assert!(check.message.contains("http://crl.example/ca.crl"));
-        assert!(check.message.contains("timeout"));
-        let check = failure("http://crl.example/ca.crl", FailureClass::HttpStatus(404));
-        assert!(check.message.contains("http status 404"));
-    }
-
-    /// The class is a stable token a caller can match on, and the reason after
-    /// it is what tells them which rule refused the destination.
-    #[test]
-    fn a_refused_destination_names_the_class_and_the_rule() {
-        let check = failure(
-            "http://127.0.0.1/ca.crl",
-            FailureClass::DestinationRefused("the host is a loopback address"),
-        );
-        assert_eq!(check.code, CheckCode::OnlineFetchFailed);
-        assert_eq!(check.status, openszigno_verify::CheckStatus::Info);
-        assert!(check.message.contains("destination_refused"));
-        assert!(check.message.contains("loopback"));
-    }
-
-    /// The size cap the fetcher enforces is the verifier's own, so nothing
-    /// this fetches can be too large for the code that has to judge it.
-    #[test]
-    fn the_fetch_cap_is_the_verifiers_own_limit() {
-        assert_eq!(MAX_CRL_BYTES, MAX_REVOCATION_ITEM_BYTES as u64);
-        let check = failure("http://crl.example/ca.crl", FailureClass::TooLarge(16));
-        assert!(check.message.contains("too large"));
-        assert!(check.message.contains("16-byte"));
-    }
-
-    #[test]
-    fn a_control_character_never_reaches_a_message() {
-        let check = failure("http://crl.example/\u{7}a.crl", FailureClass::Invalid);
-        assert!(!check.message.contains('\u{7}'));
-    }
-}
+#[path = "mod_tests.rs"]
+mod tests;

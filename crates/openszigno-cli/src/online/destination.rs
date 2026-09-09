@@ -319,6 +319,29 @@ pub(super) fn resolve(base: &str, location: &str) -> Option<String> {
 mod tests {
     use super::*;
 
+    /// The credential rule's one exemption is granted on the addresses the
+    /// policy approved, not on the host text: a name that resolves to
+    /// `127.0.0.1` counts, and one address out of the range is enough to lose
+    /// it.
+    #[test]
+    fn loopback_only_judges_the_vetted_addresses() {
+        let vetted = |addresses: Vec<SocketAddr>| Vetted {
+            host: "service.test".to_owned(),
+            port: 443,
+            addresses,
+        };
+        assert!(loopback_only(&vetted(vec![
+            "127.0.0.1:443".parse().expect("a socket address"),
+            "[::1]:443".parse().expect("a socket address"),
+            "[::ffff:127.0.0.1]:443".parse().expect("a socket address"),
+        ])));
+        assert!(!loopback_only(&vetted(vec![
+            "127.0.0.1:443".parse().expect("a socket address"),
+            "198.51.100.7:443".parse().expect("a socket address"),
+        ])));
+        assert!(!loopback_only(&vetted(Vec::new())));
+    }
+
     #[test]
     fn a_redirect_to_another_host_is_not_resolved_as_the_same_host() {
         let base = "http://crl.example/ca.crl";
