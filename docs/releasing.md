@@ -115,7 +115,8 @@ in `dist-workspace.toml` moves both the `gh release upload` and the
 already covers every publish job. Nothing about the release is visible
 until they have all succeeded, and a failure anywhere leaves the draft
 untouched with no assets on it. This is a supported dist 0.32 option, so
-`release.yml` is still fully generated and must not be hand-edited.
+`release.yml` stays generated apart from the two "Install dist" steps
+described in [Installing dist in CI](#installing-dist-in-ci).
 
 One ordering consequence is worth knowing about. The Homebrew job runs
 before `announce`, so for the length of the `announce` job the tap
@@ -223,8 +224,10 @@ tag is read from its `announcement_tag` field. `tag` is optional on
 `workflow_call` and required on `workflow_dispatch`, and overrides the
 plan, which is what makes a manual rerun possible.
 
-Never hand-edit `.github/workflows/release.yml`. Change
-`dist-workspace.toml` and regenerate:
+Hand-edit `.github/workflows/release.yml` only for the two "Install dist"
+steps of [Installing dist in CI](#installing-dist-in-ci), which have no
+configuration equivalent. Everything else is a change to
+`dist-workspace.toml` followed by a regenerate:
 
 ```sh
 cargo install cargo-dist --locked   # installs the `dist` binary
@@ -256,6 +259,116 @@ for `release.yml`. Only the custom publish jobs take their permissions from
 configuration, through `[dist.github-custom-job-permissions]`; dist 0.32
 has no option for narrowing the permissions of its own `plan`, build,
 `host`, or `announce` jobs, so that block stays as generated.
+
+### Installing dist in CI
+
+Two jobs install the `dist` binary from the network: `plan`, and each
+matrix leg of `build-local-artifacts`. `build-global-artifacts`, `host`,
+and `announce` download the binary `plan` cached as the `cargo-dist-cache`
+artifact and install nothing.
+
+As generated, both steps pipe an installer straight from a GitHub release
+into a shell: `curl ... cargo-dist-installer.sh | sh` in `plan`, and
+`${{ matrix.install_dist.run }}` in `build-local-artifacts`, which expands
+to the same command on Linux and macOS and to
+`powershell -c "irm ... cargo-dist-installer.ps1 | iex"` on Windows.
+`release.yml` holds `contents: write`, so a tampered installer asset would
+run with a token that can rewrite the release and the binaries published
+from it.
+
+Both steps are therefore re-pointed at a local composite action:
+
+```yaml
+- name: Install dist
+  uses: ./.github/actions/install-dist
+```
+
+`.github/actions/install-dist/action.yml` picks the prebuilt cargo-dist
+archive for the runner's own target, downloads it from the same release,
+compares its SHA-256 against a checksum pinned in the action, and only
+then unpacks `dist` into `CARGO_HOME`, which is where the generated
+`Cache dist` step expects to find it. A mismatch fails the step before
+anything is unpacked or run. This is the pattern
+`.github/workflows/security.yml` already uses for the gitleaks and
+actionlint binaries, with the checksums pinned in the file rather than
+read from the release, so the pin does not come from the same place as the
+artefact it is checking.
+
+The prebuilt archive is used rather than the installer script for two
+reasons: it is the artefact that actually carries the binary, so
+verifying it covers what runs rather than only the script that fetches it,
+and the release publishes a checksum beside every archive but none beside
+`cargo-dist-installer.sh` or `cargo-dist-installer.ps1`. A single `bash`
+step covers Windows too, so no PowerShell path has to be pinned
+separately.
+
+There is no configuration alternative. dist 0.32 derives the install
+command from `cargo-dist-version` alone (`DistInstallStrategy` in
+`cargo-dist/src/backend/ci/mod.rs`); no key sets the command, the URL, a
+checksum, or a local action, and `github-build-setup` inserts steps before
+`dist build` rather than replacing the install. The edit to `release.yml`
+is the only mechanism available.
+
+#### Reapplying after `dist generate`
+
+`dist generate` rewrites `release.yml` and restores both generated steps.
+Reapply this diff afterwards, then run `actionlint`:
+
+```diff
+@@ jobs.plan.steps @@
++      # NOT AS GENERATED. dist writes a step here that pipes the release's
++      # installer script into a shell; this workflow holds `contents: write`,
++      # so a tampered asset would reach the published binaries. Re-point it at
++      # the checksum-verifying composite action after every `dist generate`.
++      # See docs/releasing.md, "Installing dist in CI".
+       - name: Install dist
+-        # we specify bash to get pipefail; it guards against the `curl` command
+-        # failing. otherwise `sh` won't catch that `curl` returned non-0
+-        shell: bash
+-        run: "curl --proto '=https' --tlsv1.2 -LsSf https://github.com/axodotdev/cargo-dist/releases/download/v0.32.0/cargo-dist-installer.sh | sh"
++        uses: ./.github/actions/install-dist
+@@ jobs.build-local-artifacts.steps @@
++      # NOT AS GENERATED. dist writes a step here that pipes the release's
++      # installer script into a shell; this workflow holds `contents: write`,
++      # so a tampered asset would reach the published binaries. Re-point it at
++      # the checksum-verifying composite action after every `dist generate`.
++      # See docs/releasing.md, "Installing dist in CI".
+       - name: Install dist
+-        run: ${{ matrix.install_dist.run }}
++        uses: ./.github/actions/install-dist
+```
+
+Both steps already sit after the `actions/checkout` step of their job,
+which a local `uses:` needs, so no reordering is involved. Grepping for
+`cargo-dist-installer` in `.github/workflows/release.yml` finds the
+regenerated steps and must find nothing once the diff is reapplied.
+
+### Bumping dist
+
+The dist version appears in four places, and they move together:
+
+| Place | What to change |
+| --- | --- |
+| `dist-workspace.toml` | `cargo-dist-version` |
+| `.github/actions/install-dist/action.yml` | the `version` input default |
+| `.github/actions/install-dist/action.yml` | the five pinned `sha_*` checksums |
+| `.github/actions/install-dist/action.yml` | the release URL in the comment above them |
+
+Take the checksums from `sha256.sum` in the new release, which lists one
+line per archive:
+
+```sh
+curl -sSfL -o sha256.sum \
+  https://github.com/axodotdev/cargo-dist/releases/download/vX.Y.Z/sha256.sum
+```
+
+Each archive also has its own `<archive>.sha256` beside it in the release,
+with the same value. Then install the new `dist` locally, run
+`dist generate`, reapply the diff above, and run `actionlint` and a
+release-candidate tag before the next real release. A version bumped
+without its checksums fails the install step rather than installing an
+unverified binary, because the pinned checksum will not match the archive
+that was downloaded.
 
 ### Permissions
 
