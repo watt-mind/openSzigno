@@ -1823,13 +1823,17 @@ result.
 | A self-signed file in the trust store | `trust_store` | **Trust anchor.** |
 | The `certificates` set of an RFC 3161 token | `timestamp_token` | Untrusted path candidates for that token's TSA certificate. The signature's own candidates and the store's intermediates are offered alongside them, because real dossiers carry the TSA's issuing CA in `xades:CertificateValues`. |
 
-The rule that matters: **only the trust store can supply an anchor.** A
-self-signed root found inside a dossier is a candidate like any other and can
-never make itself trusted; a dossier that carries its own root and no store is
-configured still reports `cert_path_unknown`. Candidates are deduplicated by
-DER, keeping the source they were first seen in, and a certificate the store
-already anchors is used only in that role, so it cannot appear twice in one
-path.
+The rule that matters: **only trust the caller configured can supply an
+anchor** — a `--trust-store` file or a `--trust-list` service digital identity.
+A self-signed root found inside a dossier is a candidate like any other and can
+never make itself trusted; a dossier that carries its own root with no trust
+material configured still reports `cert_path_unknown`. Candidates are
+deduplicated by DER, keeping the source they were first seen in, and a
+certificate the store already anchors is used only in that role, so it cannot
+appear twice in one path. A certificate a trusted list names stays an ordinary
+candidate *and* becomes a place a path may end, because the paths that climb
+past it still need it as a link — see [A path may only end at a service that
+was granted then](#a-path-may-only-end-at-a-service-that-was-granted-then).
 
 ### Certificate path validation
 
@@ -1852,7 +1856,8 @@ implemented subset is:
   must not read as a finding against the signature;
 - completion checked before the length bound, so a chain of exactly
   `max_chain_length` certificates that reaches an anchor is a path rather than
-  one the search refused to look at;
+  one the search refused to look at, and recorded before the search climbs any
+  further, so the nearest place a chain may end is the one preferred;
 - every link's signature verified with the issuer's public key under the
   algorithm allowlist above;
 - every certificate's validity window checked against the validation time;
@@ -1971,7 +1976,10 @@ would be as wrong as saying "valid".
 A directory holding certificate files directly, with no `anchors`
 subdirectory, is read the same way. The split between the two subdirectories is
 a convention, not a grant: **the verifier classifies what it is given**, and a
-certificate is a trust anchor if and only if it is self-signed. Dropping an
+certificate in a `--trust-store` directory is a trust anchor if and only if it
+is self-signed. (A trusted list is the other way round: a certificate it names
+is an anchor whether or not it is self-signed, because the list says so.)
+Dropping an
 intermediate into `anchors/` therefore makes it an extra untrusted path
 candidate, not a trusted one, and a store holding only intermediates yields no
 anchors and so `cert_path_unknown`. A self-signed anchor's own signature is
@@ -2001,11 +2009,11 @@ entry's `trust_anchor_origin` (`trust_store` or `trust_list`).
 A trusted list gives what a directory of certificates cannot: **when** each CA
 was entitled to issue qualified certificates. For every `TSPService` of type
 `.../Svctype/CA/QC` or `.../Svctype/TSA/QTST`, each `X509Certificate` in the
-service digital identity becomes an anchor carrying the service's status
-timeline — the current `ServiceStatus` and `StatusStartingTime` plus every
-`ServiceHistoryInstance`. The status in force **at the validation time**
-decides, which is what lets a signature made while a CA was supervised still
-verify after that CA was withdrawn.
+service digital identity becomes an anchor — self-signed or not — carrying the
+service's status timeline: the current `ServiceStatus` and
+`StatusStartingTime` plus every `ServiceHistoryInstance`. The status in force
+**at the validation time** decides, which is what lets a signature made while a
+CA was supervised still verify after that CA was withdrawn.
 
 `granted` and `recognisedatnationallevel` count as granted at any time. The
 pre-eIDAS statuses `undersupervision` and `accredited` count only at a
@@ -2013,6 +2021,33 @@ validation time before 2016-07-01, when eIDAS began to apply; every terminal
 status (`withdrawn`, `supervisionceased`, the `deprecated*` family) never does.
 See [Trusted lists](trust.md#what-is-read-and-what-is-not) for why the
 pre-eIDAS window is closed rather than open-ended.
+
+#### A path ends where the list speaks
+
+A trusted-list service digital identity ends a path **whether or not it is
+self-signed**, which is the ETSI TS 119 615 model and matters because of what a
+real national list looks like. The Hungarian list records NetLock's qualified
+issuing CAs as CA/QC services, with `undersupervision` from 2003 and `granted`
+from 2016-06-30, and records the root that signed them only as a QTST service
+granted from 2018. A path that had to climb to a self-signed anchor would be
+judged by an entry that says nothing about issuing certificates, and a 2014
+signature under a plainly listed issuing CA would be refused.
+
+So the **nearest** listed certificate along a chain ends the path. The
+terminating certificate is that path's trust anchor: nothing above it is
+validated or reported, it is the chain's last entry with `is_trust_anchor:
+true` and `trust_anchor_origin: "trust_list"`, its own revocation is not
+checked — no anchor's is — and `qualified` derives from its service exactly as
+it does for a self-signed listed anchor. Preferring the nearest is what stops a
+root's QTST-only entry from overriding the granted CA/QC entry of the issuing
+CA below it. When the nearest listed certificate's service was **not** granted
+at the validation time the search carries on upward, and the run is refused
+only if no listed certificate and no `--trust-store` anchor further up will end
+the path either.
+
+`--trust-store` anchors and self-signed trusted-list entries behave exactly as
+they did: this widens where a path may end, and relaxes nothing about whether
+it may end there.
 
 #### A path may only end at a service that was granted then
 

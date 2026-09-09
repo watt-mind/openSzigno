@@ -97,6 +97,24 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
   list is deduplicated by DER, and the path search runs at most once per
   distinct responder public key. No verdict changes: the same responses are
   authorised by the same models, and `schema_version` stays `1`.
+- A certification path may now end at any trusted-list service digital
+  identity, not only at a self-signed one. In a real national list the CA/QC
+  identities are the *issuing* CAs: the Hungarian list records NetLock's
+  qualified issuing CAs as CA/QC services with `undersupervision` from 2003 and
+  `granted` from 2016-06-30, and records the root that signed them only as a
+  QTST service granted from 2018. A path had to climb past the issuing CA to
+  the self-signed root and was then judged by that timestamping entry, so a
+  2014 signature under a plainly listed qualified CA was refused with
+  `trust_list_service_not_granted`. Following ETSI TS 119 615, the nearest
+  listed certificate along a chain is now the trust anchor for that path,
+  self-signed or not, when its service was granted at the validation time —
+  nothing above it is validated, it is the chain's last entry with
+  `trust_anchor_origin: "trust_list"`, and `qualified` derives from that
+  service as before. When the nearest one's service was not granted then, the
+  search still climbs upward and refuses only if no listed certificate and no
+  `--trust-store` anchor above it will end the path. `--trust-store` anchors
+  and self-signed list entries are unchanged, no field names change, and
+  `schema_version` stays `1`.
 - Text a dossier chose no longer reaches a terminal or the JSON envelope
   unfiltered. The dossier title, document titles, MIME type halves, the
   declared extension and character set, object references, transform names and
