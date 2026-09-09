@@ -129,8 +129,21 @@ fn granted_token(response: &TimeStampResp) -> Result<Vec<u8>, SignError> {
         .map_err(|_| tsa_failed("the timestamp token could not be re-encoded"))
 }
 
-/// The token stamps the digest that was asked about, and nothing else.
-fn check_imprint(token: &[u8], octets: &[u8]) -> Result<(), SignError> {
+/// The `genTime` a token claims, RFC 3339 UTC seconds.
+///
+/// It is read back out of the token this run embedded, so a report can say
+/// what the authority stamped without the caller having to decode CMS. It is
+/// what the token claims and nothing more: only `openszigno verify` decides
+/// whether the authority is anybody, and a token that will not decode simply
+/// has no time to report.
+pub fn token_gen_time(token: &[u8]) -> Option<String> {
+    let info = tst_info(token).ok()?;
+    let seconds = i64::try_from(info.gen_time.to_unix_duration().as_secs()).ok()?;
+    Some(openszigno_verify::format_rfc3339(seconds))
+}
+
+/// The `TSTInfo` a `TimeStampToken` encapsulates.
+fn tst_info(token: &[u8]) -> Result<TstInfo, SignError> {
     let content = cms::content_info::ContentInfo::from_der(token)
         .map_err(|_| tsa_failed("the timestamp token is not a CMS ContentInfo"))?;
     let signed = content
@@ -141,8 +154,13 @@ fn check_imprint(token: &[u8], octets: &[u8]) -> Result<(), SignError> {
         .encap_content_info
         .econtent
         .ok_or_else(|| tsa_failed("the timestamp token carries no TSTInfo"))?;
-    let info = TstInfo::from_der(econtent.value())
-        .map_err(|_| tsa_failed("the timestamp token's TSTInfo does not decode"))?;
+    TstInfo::from_der(econtent.value())
+        .map_err(|_| tsa_failed("the timestamp token's TSTInfo does not decode"))
+}
+
+/// The token stamps the digest that was asked about, and nothing else.
+fn check_imprint(token: &[u8], octets: &[u8]) -> Result<(), SignError> {
+    let info = tst_info(token)?;
     let expected = Sha256::digest(octets);
     if info.message_imprint.hash_algorithm.oid.to_string() != OID_SHA256
         || info.message_imprint.hashed_message.as_bytes() != &expected[..]
@@ -172,6 +190,13 @@ mod tests {
             parsed.message_imprint.hash_algorithm.oid.to_string(),
             OID_SHA256
         );
+    }
+
+    /// A token that will not decode has no time to report, and says so
+    /// rather than inventing one.
+    #[test]
+    fn a_token_that_does_not_decode_has_no_gen_time() {
+        assert_eq!(token_gen_time(b"not DER at all"), None);
     }
 
     #[test]

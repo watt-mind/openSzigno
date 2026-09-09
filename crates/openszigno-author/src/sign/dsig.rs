@@ -222,9 +222,16 @@ impl<'input> Lookup<'input> {
         &self,
         signature_id: &str,
     ) -> Result<std::ops::Range<usize>, SignError> {
-        self.by_id(signature_id)
+        self.element_range(signature_id)
+    }
+
+    /// The byte range the element carrying `id` occupies, start tag to end
+    /// tag. The container-timestamp writer bounds its own substitutions with
+    /// this, for the same reason a signature does.
+    pub(crate) fn element_range(&self, id: &str) -> Result<std::ops::Range<usize>, SignError> {
+        self.by_id(id)
             .map(|node| node.range())
-            .ok_or_else(|| SignError::failed("the signature being written is not readable"))
+            .ok_or_else(|| SignError::failed("the element being written is not readable"))
     }
 
     /// The `Id` of a direct child of the root `es:Dossier`.

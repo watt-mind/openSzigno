@@ -19,6 +19,9 @@ pub enum SignErrorCode {
     DocumentNotFound,
     DocumentNotSignable,
     DocumentAlreadySigned,
+    /// The dossier already carries an `es:TimeStamp` at the placement a
+    /// container timestamp would be written to.
+    TimestampExists,
     TsaFailed,
     SignFailed,
     /// The `--csc` configuration file cannot be used, or the service it names
@@ -51,6 +54,7 @@ impl SignErrorCode {
             Self::DocumentNotFound => "document_not_found",
             Self::DocumentNotSignable => "document_not_signable",
             Self::DocumentAlreadySigned => "document_already_signed",
+            Self::TimestampExists => "timestamp_exists",
             Self::TsaFailed => "tsa_failed",
             Self::SignFailed => "sign_failed",
             Self::CscConfigInvalid => "csc_config_invalid",
@@ -149,6 +153,7 @@ mod tests {
             SignErrorCode::DocumentNotFound,
             SignErrorCode::DocumentNotSignable,
             SignErrorCode::DocumentAlreadySigned,
+            SignErrorCode::TimestampExists,
             SignErrorCode::TsaFailed,
             SignErrorCode::SignFailed,
             SignErrorCode::CscConfigInvalid,
