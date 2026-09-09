@@ -36,8 +36,9 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
   See [The create command](docs/architecture.md#the-create-command).
 - `openszigno-author`, a new published crate holding that writer. It reads no
   file, opens no socket, and calls no clock; `openszigno-core` stays
-  read-only. `openszigno-cli` depends on it, so it is published after
-  `openszigno-core` and before `openszigno-cli`.
+  read-only. It depends on `openszigno-verify` for canonicalisation and
+  `openszigno-cli` depends on it, so it is published after
+  `openszigno-verify` and before `openszigno-cli`.
 - Stable codes for authoring: the errors `no_documents`,
   `unsafe_document_title`, `invalid_dossier_title`, `unknown_mime_type`,
   `invalid_mime_type`, `zip_failed`, and `invalid_output_path`, and the
