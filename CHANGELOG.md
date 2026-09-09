@@ -10,6 +10,22 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
 
 ## [Unreleased]
 
+### Security
+
+- The release workflow no longer pipes the cargo-dist installer script into a
+  shell. `.github/workflows/release.yml` runs with `contents: write`, so a
+  tampered installer asset would have run with a token that can rewrite the
+  GitHub release and the binaries published from it. Both jobs that install
+  dist from the network, `plan` and each leg of `build-local-artifacts`
+  (`irm | iex` on Windows), now use `.github/actions/install-dist`, a
+  composite action that downloads the prebuilt cargo-dist archive for the
+  runner's target from the same release, checks its SHA-256 against a
+  checksum pinned in the action, and only then unpacks the binary. A mismatch
+  fails the step. The other jobs already reused the binary cached by `plan`.
+  See [Installing dist in CI](docs/releasing.md#installing-dist-in-ci) and
+  [Bumping dist](docs/releasing.md#bumping-dist), which also records the exact
+  diff to reapply after `dist generate` rewrites the workflow.
+
 ## [0.7.0] - 2026-09-09
 
 ### Added
