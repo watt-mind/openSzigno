@@ -29,6 +29,7 @@ pub const RSA_SHA384_URI: &str = "http://www.w3.org/2001/04/xmldsig-more#rsa-sha
 pub const RSA_SHA512_URI: &str = "http://www.w3.org/2001/04/xmldsig-more#rsa-sha512";
 pub const RSA_PSS_SHA256_URI: &str = "http://www.w3.org/2007/05/xmldsig-more#sha256-rsa-MGF1";
 pub const ECDSA_SHA384_URI: &str = "http://www.w3.org/2001/04/xmldsig-more#ecdsa-sha384";
+pub const ECDSA_SHA512_URI: &str = "http://www.w3.org/2001/04/xmldsig-more#ecdsa-sha512";
 pub const SHA384_URI: &str = "http://www.w3.org/2001/04/xmldsig-more#sha384";
 pub const SHA512_URI: &str = "http://www.w3.org/2001/04/xmlenc#sha512";
 pub const RSA_SHA1_URI: &str = "http://www.w3.org/2000/09/xmldsig#rsa-sha1";

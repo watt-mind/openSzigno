@@ -43,6 +43,8 @@ pub(super) const OID_ECDSA_SHA256: ObjectIdentifier =
     ObjectIdentifier::new_unwrap("1.2.840.10045.4.3.2");
 pub(super) const OID_ECDSA_SHA384: ObjectIdentifier =
     ObjectIdentifier::new_unwrap("1.2.840.10045.4.3.3");
+pub(super) const OID_ECDSA_SHA512: ObjectIdentifier =
+    ObjectIdentifier::new_unwrap("1.2.840.10045.4.3.4");
 
 pub(super) const OID_SUBJECT_KEY_IDENTIFIER: ObjectIdentifier =
     ObjectIdentifier::new_unwrap("2.5.29.14");
@@ -346,6 +348,7 @@ pub(super) fn signature_scheme(oid: &ObjectIdentifier, digest: Digest) -> Option
         OID_SHA512_RSA => SignatureScheme::RsaPkcs1(Digest::Sha512),
         OID_ECDSA_SHA256 => SignatureScheme::Ecdsa(Digest::Sha256),
         OID_ECDSA_SHA384 => SignatureScheme::Ecdsa(Digest::Sha384),
+        OID_ECDSA_SHA512 => SignatureScheme::Ecdsa(Digest::Sha512),
         _ => return None,
     })
 }

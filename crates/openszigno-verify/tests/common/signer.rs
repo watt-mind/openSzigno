@@ -691,6 +691,15 @@ fn sign_signed_info(xml: &str, spec: &SigSpec, key: &TestKey) -> String {
             let signature: p384::ecdsa::Signature = private.sign(&canonical);
             signature.to_bytes().to_vec()
         }
+        SigningKey::EcdsaP521(private) => {
+            // P-521 signing here is randomized: this build of `p521` offers
+            // no RFC 6979 deterministic signer, and the test only has to
+            // produce a signature that verifies.
+            use p521::ecdsa::signature::RandomizedSigner as _;
+            let signature: p521::ecdsa::Signature =
+                private.sign_with_rng(&mut rsa::rand_core::OsRng, &canonical);
+            signature.to_bytes().to_vec()
+        }
         SigningKey::None => Vec::new(),
     };
     BASE64.encode(bytes)

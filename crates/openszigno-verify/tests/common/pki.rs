@@ -1,4 +1,5 @@
-//! A synthetic PKI: RSA, ECDSA (P-256/P-384), and Ed25519 test keys, and the
+//! A synthetic PKI: RSA, ECDSA (P-256/P-384/P-521), and Ed25519 test keys, and
+//! the
 //! certificates and certificate extensions built from them.
 //!
 //! Every byte here is generated. Nothing is derived from a real dossier.
@@ -17,6 +18,7 @@ pub enum SigningKey {
     Rsa(Box<rsa::RsaPrivateKey>),
     EcdsaP256(Box<p256::ecdsa::SigningKey>),
     EcdsaP384(Box<p384::ecdsa::SigningKey>),
+    EcdsaP521(Box<p521::ecdsa::SigningKey>),
     /// A key that can produce a certificate but never a signature, used for the
     /// weak-key cases the `ring` backend refuses to sign with.
     None,
@@ -66,6 +68,32 @@ pub fn ecdsa_p384_key(seed: u8) -> TestKey {
         rcgen,
         signing: SigningKey::EcdsaP384(Box::new(p384::ecdsa::SigningKey::from(&secret))),
         spki_der: Vec::new(),
+    }
+}
+
+/// A P-521 key derived from a fixed scalar.
+///
+/// The `ring` backend `rcgen` uses cannot sign with P-521, so this key issues
+/// no certificate of its own: it appears only as a subject public key, which
+/// `issued_by` encodes from `spki_der`, and signs `ds:SignedInfo` directly.
+pub fn ecdsa_p521_key(seed: u8) -> TestKey {
+    use p521::pkcs8::EncodePublicKey as _;
+    let mut scalar = [1u8; 66];
+    scalar[65] = seed;
+    let secret = p521::SecretKey::from_slice(&scalar).expect("the fixed scalar is in range");
+    let spki_der = secret
+        .public_key()
+        .to_public_key_der()
+        .expect("the P-521 public key encodes")
+        .as_bytes()
+        .to_vec();
+    TestKey {
+        rcgen: None,
+        signing: SigningKey::EcdsaP521(Box::new(
+            p521::ecdsa::SigningKey::from_bytes(&secret.to_bytes())
+                .expect("the fixed scalar is a signing key"),
+        )),
+        spki_der,
     }
 }
 
@@ -214,6 +242,77 @@ pub fn issued_by(
     .expect("issuing succeeds");
     Issued {
         der: certificate.der().to_vec(),
+        params,
+    }
+}
+
+/// Issue a certificate for a public key `rcgen`'s backend cannot describe.
+///
+/// `rcgen` maps a SubjectPublicKeyInfo onto one of the signature algorithms its
+/// backend knows, and the `ring` backend knows none over P-521, so a P-521
+/// subject key cannot be handed to `signed_by` at all. The certificate is
+/// therefore issued for a placeholder key, its SubjectPublicKeyInfo and
+/// subjectKeyIdentifier replaced with the real key's, and the tbsCertificate
+/// re-signed by the issuer. The issuer signs with RSA PKCS#1 v1.5 and SHA-256,
+/// exactly as `rcgen` did, so the algorithm identifiers in the certificate stay
+/// true to what signed it.
+pub fn issued_by_with_public_key(
+    spec: &CertSpec<'_>,
+    subject_spki_der: &[u8],
+    issuer: &Issued,
+    issuer_key: &TestKey,
+) -> Issued {
+    use der::{Decode as _, Encode as _};
+    use sha2::{Digest as _, Sha256};
+
+    let spki = x509_cert::spki::SubjectPublicKeyInfoOwned::from_der(subject_spki_der)
+        .expect("the subject public key parses");
+    let key_bytes = spki
+        .subject_public_key
+        .as_bytes()
+        .expect("the subject public key is a whole number of bytes");
+    let mut params = spec.params();
+    // RFC 7093 method 1, which is what `rcgen` computes by default, over the
+    // real key rather than the placeholder's.
+    params.key_identifier_method =
+        rcgen::KeyIdMethod::PreSpecified(Sha256::digest(key_bytes)[..20].to_vec());
+
+    let placeholder = ecdsa_key(199);
+    let issuer_pair = issuer_key
+        .rcgen
+        .as_ref()
+        .expect("the issuer key can sign certificates");
+    let authority = Issuer::from_params(&issuer.params, issuer_pair);
+    let placeholder_certificate = params
+        .signed_by(
+            placeholder
+                .rcgen
+                .as_ref()
+                .expect("the placeholder key can be a subject"),
+            &authority,
+        )
+        .expect("issuing succeeds");
+
+    let mut certificate = x509_cert::Certificate::from_der(placeholder_certificate.der())
+        .expect("the placeholder certificate parses");
+    certificate.tbs_certificate.subject_public_key_info = spki;
+    let tbs = certificate
+        .tbs_certificate
+        .to_der()
+        .expect("the tbsCertificate encodes");
+    let SigningKey::Rsa(private) = &issuer_key.signing else {
+        panic!("a spliced certificate is signed by an RSA issuer");
+    };
+    let signature = {
+        use rsa::signature::{SignatureEncoding as _, Signer as _};
+        rsa::pkcs1v15::SigningKey::<Sha256>::new((**private).clone())
+            .sign(&tbs)
+            .to_vec()
+    };
+    certificate.signature =
+        der::asn1::BitString::from_bytes(&signature).expect("the signature encodes");
+    Issued {
+        der: certificate.to_der().expect("the certificate encodes"),
         params,
     }
 }

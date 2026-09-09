@@ -38,6 +38,7 @@ encoding_rs = "0.8.40"
 hmac = "0.12.1"
 p256 = { version = "0.13.2", default-features = false, features = ["ecdsa", "std", "pkcs8"] }
 p384 = { version = "0.13.1", default-features = false, features = ["ecdsa", "std", "pkcs8"] }
+p521 = { version = "0.13.3", default-features = false, features = ["ecdsa", "std", "pkcs8"] }
 pem-rfc7468 = { version = "0.7.0", features = ["std"] }
 pkcs8 = { version = "0.10.2", features = ["encryption", "pem", "std"] }
 # Test-only randomness for the synthetic CMS encryptor.

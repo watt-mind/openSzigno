@@ -170,8 +170,11 @@ What TLv6 actually changed, and what it did not:
 The signature algorithms the live lists actually use are inside the pinned
 allowlist: the EU LOTL signs with `rsa-sha512` (RSA PKCS#1 v1.5) and the
 Hungarian list with `ecdsa-sha256` over a P-256 key. The allowlist is RSA
-PKCS#1 v1.5 and RSA-PSS with SHA-256/384/512, and ECDSA with SHA-256 and
-SHA-384 (P-256 and P-384). SHA-1 is refused in a trusted list's own signature
+PKCS#1 v1.5 and RSA-PSS with SHA-256/384/512, and ECDSA with SHA-256,
+SHA-384 and SHA-512 (P-256, P-384 and P-521), which covers the ETSI TS 119 312
+algorithms annex B.1.2 admits for a list's own signature. The curve is bound to
+the digest the method names, so a P-521 key under `ecdsa-sha256` is refused
+rather than verified. SHA-1 is refused in a trusted list's own signature
 whatever `--allow-legacy-algorithms` says.
 
 #### TLv6 caveats
@@ -186,11 +189,6 @@ worth knowing they were not proven against every member state's file:
 - **Whether every TLv6 list is version-tagged the way the two checked ones
   are.** The specification requires the field; a list that omits it is refused
   here rather than assumed to be TLv6.
-- **ECDSA with SHA-512 (typically P-521) is not in the allowlist.**
-  TS 119 312 permits it and TS 119 612 annex B.1.2 does not exclude it, so a
-  member state could in principle sign with it; such a list would be reported
-  `trust_list_signature_invalid` for naming "a signature method outside the
-  allowlist". Neither list checked uses it.
 - **XAdES-B-B's signed properties are not required, only tolerated.** The
   extra `ds:Reference` over `xades:SignedProperties` must still verify, and
   does, but this build does not check `xades:SigningCertificateV2` against the

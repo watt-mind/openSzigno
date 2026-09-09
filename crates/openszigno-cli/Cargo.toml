@@ -52,6 +52,7 @@ der.workspace = true
 des.workspace = true
 p256.workspace = true
 p384.workspace = true
+p521.workspace = true
 pkcs8.workspace = true
 rand_chacha.workspace = true
 rand_core.workspace = true

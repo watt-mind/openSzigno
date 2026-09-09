@@ -477,6 +477,10 @@ fn the_algorithm_maps_are_pinned() {
         signature_scheme(&OID_ECDSA_SHA384, Digest::Sha256),
         Some(SignatureScheme::Ecdsa(Digest::Sha384))
     );
+    assert_eq!(
+        signature_scheme(&OID_ECDSA_SHA512, Digest::Sha256),
+        Some(SignatureScheme::Ecdsa(Digest::Sha512))
+    );
     // RSASSA-PSS needs its parameters read, which this build does not do.
     assert_eq!(
         signature_scheme(&oid("1.2.840.113549.1.1.10"), Digest::Sha256),
