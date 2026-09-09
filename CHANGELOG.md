@@ -12,6 +12,13 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
 
 ### Changed
 
+- Tracked Markdown no longer uses em-dashes in prose, per CONTRIBUTING.md's
+  Documentation style rules; sentences are rewritten with periods, colons,
+  commas, or parentheses instead. `scripts/check-prose.py` now fails CI's
+  Documentation job on any em-dash (U+2014) outside a fenced code block.
+  The five roadmap milestone headings dropped the em-dash before their
+  status word (for example "M1: ... (done)"); the anchors linking to them
+  were updated to match.
 - `openszigno-verify`'s reported vocabulary is now open. `CheckCode`,
   `CheckStatus`, `Verdict`, `TrustAnchorOrigin`, and `RevocationPolicy` are
   `#[non_exhaustive]`, so a release that learns to check something new can add
@@ -40,8 +47,8 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
   ahead of the run's material, so a response padded up to that bound pushed the
   responder's issuing CA out of the pool and a central responder the caller
   genuinely trusts came back as one nothing vouched for
-  (`revocation_data_invalid`). The run's own candidates — `ds:KeyInfo`,
-  `xades:CertificateValues`, the trust store — now come first and the
+  (`revocation_data_invalid`). The run's own candidates (`ds:KeyInfo`,
+  `xades:CertificateValues`, the trust store) now come first and the
   response's certificates fill the remainder. The bound and the
   per-public-key deduplication are unchanged, so the work one response can ask
   for is bounded exactly as before.
@@ -95,8 +102,8 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
   response's `producedAt` rather than at the validation time, matching the
   trusted-responder model beside it and the documented rule. Asking at the
   validation time discarded every archived response whose responder
-  certificate has since expired — the certificate was in force when the
-  responder spoke, which is what RFC 6960's delegation is about — and it
+  certificate has since expired (the certificate was in force when the
+  responder spoke, which is what RFC 6960's delegation is about) and it
   admitted one that was not yet in force then. `schema_version` stays `1`.
 - A container `es:TimeStamp` selects its data only through an `xades:Include`
   in a recognised XAdES namespace. The element was matched on its local name
@@ -105,8 +112,8 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
   Every other XAdES element in the crate was already read this way.
   `schema_version` stays `1`.
 - An OCSP `unknown` status is no longer reported as stale revocation data.
-  RFC 6960 section 2.2 gives it its own meaning — the responder does not know
-  about this certificate — and calling that staleness told an operator to
+  RFC 6960 section 2.2 gives it its own meaning (the responder does not know
+  about this certificate), and calling that staleness told an operator to
   fetch something newer when the responder they asked does not serve the
   certificate at all. It now reports the new check code
   `revocation_status_unknown_by_responder` (`unknown`), which blocks exactly as
@@ -124,7 +131,7 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
   report itself as verified on SHA-1. A SHA-1 `messageImprint` emitted
   `timestamp_imprint_ok` (`passed`) and a SHA-1 `SignerInfo` digest emitted
   `timestamp_signature_ok` (`passed`), so the token reached `verified: true`
-  and its `genTime` became the validation time — under a flag that exists for
+  and its `genTime` became the validation time, under a flag that exists for
   diagnosis and everywhere else caps the verdict. Both now emit
   `algorithm_legacy_allowed` (`unknown`) instead, so the token stays
   unverified and the verdict stays `indeterminate`. Without the flag both are
@@ -153,7 +160,7 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
   2014 signature under a plainly listed qualified CA was refused with
   `trust_list_service_not_granted`. Following ETSI TS 119 615, the nearest
   listed certificate along a chain is now the trust anchor for that path,
-  self-signed or not, when its service was granted at the validation time —
+  self-signed or not, when its service was granted at the validation time:
   nothing above it is validated, it is the chain's last entry with
   `trust_anchor_origin: "trust_list"`, and `qualified` derives from that
   service as before. When the nearest one's service was not granted then, the
@@ -167,7 +174,7 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
   signature ids were printed and serialised exactly as the input wrote them, so
   a title of `OK<U+202E>txt.exe` displayed as `OKexe.txt` in a `list` and
   `inspect --json` carried the override through to whatever read it, and a
-  `subtype` — which nothing in the format bounds — printed in full at any
+  `subtype` (which nothing in the format bounds) printed in full at any
   length. The C0 and C1 controls were never reachable, because the bounded XML
   parser refuses them; the Unicode `Cf` class and length were. Every command
   that reads a dossier now runs one pass over its finished `data` value, and
@@ -179,7 +186,7 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
   issuer common names the same way. Field names and types are unchanged,
   `schema_version` stays `1`, and no golden file changed: no committed fixture
   carries such a character or exceeds a bound. An extracted file's `path` is
-  deliberately untouched — the extraction name rules already refuse a control,
+  deliberately untouched: the extraction name rules already refuse a control,
   invisible or formatting character in a title and bound the result, and the
   envelope has to keep naming the file that was written.
 - `sign` refuses, with `document_already_signed`, to write a signature into an
@@ -211,8 +218,8 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
 - A named pipe given where a regular file is expected is refused instead of
   waited on. The bounded reader opened the path and only then asked whether it
   was a regular file, and opening a FIFO for reading blocks inside `open(2)`
-  until somebody opens the writing end — which is whoever laid the pipe, not
-  this tool — so `inspect /path/to/fifo`, or a `--decrypt-key` pointing at one,
+  until somebody opens the writing end, which is whoever laid the pipe, not
+  this tool, so `inspect /path/to/fifo`, or a `--decrypt-key` pointing at one,
   parked the process indefinitely before the check that would have refused it
   could run. On Unix the open now passes `O_NONBLOCK` and the flag is cleared
   on the descriptor once `fstat` has established it is a regular file; the
@@ -222,7 +229,7 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
   name deduplication produced exactly one candidate, `stem-<document index>`,
   so a dossier holding a repeated title plus a document titled precisely the
   name that deduplication would reach for raised `output_name_collision` and
-  wrote nothing at all — every innocent document in the dossier included.
+  wrote nothing at all: every innocent document in the dossier included.
   The candidates now count upwards, `stem-<index>-2`, `-3` and on, up to 64
   per name; `output_name_collision` is kept for the case where all 64 are
   taken. The first candidate, and so every name a dossier that does not
@@ -232,7 +239,7 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
   NAT (`100.64.0.0/10`), IETF protocol assignments (`192.0.0.0/24`),
   benchmarking (`198.18.0.0/15`), the deprecated IPv6 site-local prefix
   (`fec0::/10`), and the three prefixes that carry an IPv4 destination inside
-  an IPv6 address — 6to4 (`2002::/16`), Teredo (`2001::/32`) and the
+  an IPv6 address (6to4 (`2002::/16`), Teredo (`2001::/32`) and the
   well-known NAT64 prefix (`64:ff9b::/96`), which were a way of writing a
   private IPv4 destination the IPv4 rules never saw. The IPv4-compatible form
   `::a.b.c.d` is now judged by the address it carries, as the IPv4-mapped
@@ -242,7 +249,7 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
 - `extract` compares output names with a real case fold. The key was NFC plus
   `to_lowercase`, which is not case folding: it leaves U+017F (`ſ`, long s)
   and U+00DF (`ß`, sharp s) exactly as written, so `ſ.txt` and `s.txt`, or
-  `straße.txt` and `STRASSE.txt`, compared as two distinct names — while
+  `straße.txt` and `STRASSE.txt`, compared as two distinct names, while
   NTFS, which upper-cases to compare, maps each pair onto one file, and the
   second write would have overwritten the first. The key is now NFC, the full
   uppercase mapping, then the full lowercase mapping, which folds both. No new
@@ -272,8 +279,8 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
   unmeasured crate read as a fully covered one; both are failures now. The
   `-U0` diff behind patch coverage is parsed with a state machine keyed on
   `diff --git` and `@@` rather than by line prefix, so an added source line
-  beginning with `++` is no longer read as a `+++ b/path` file header — which
-  silently repointed or dropped every line after it — and the diff is taken
+  beginning with `++` is no longer read as a `+++ b/path` file header (which
+  silently repointed or dropped every line after it), and the diff is taken
   with explicit `--src-prefix`/`--dst-prefix`, so a contributor's
   `diff.noprefix` cannot change what the parser strips.
   `--self-test` runs the parser's unit tests, and CI runs it before the
@@ -371,8 +378,8 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
   still produced `cert_path_ok` at a validation time after the withdrawal;
   `granted_at` reached only the informational `qualified` flag, and the
   `trust_list_service_not_granted` code was declared but never emitted. A
-  completed path now consults the anchor's `ServiceRecord` — CA/QC for a
-  signing or OCSP-signing path, TSA/QTST for a timestamping one — and a
+  completed path now consults the anchor's `ServiceRecord` (CA/QC for a
+  signing or OCSP-signing path, TSA/QTST for a timestamping one), and a
   non-granted anchor yields `trust_list_service_not_granted` (`unknown`,
   blocking) instead of `cert_path_ok`, after the other candidate paths have
   been tried. It is `unknown` rather than `failed`, because missing trust is
@@ -415,9 +422,9 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
   `redirect_downgrade`. A redirect could previously stay on the host the
   certificate or the configuration named and change the scheme, and the next
   hop then went out in the clear carrying whatever the first one carried.
-- A request that carries credentials — a bearer token in the `Authorization`
+- A request that carries credentials (a bearer token in the `Authorization`
   header, or a body the caller marked sensitive, which every `sign --csc`
-  request now is — requires `https` on every hop, the first included, and is
+  request now is) requires `https` on every hop, the first included, and is
   refused as `destination_refused` with the rule `credentials_require_https`
   otherwise. The one exemption is a loopback service under
   `--online-allow-private`, granted on the addresses the destination policy
@@ -739,7 +746,7 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
 - Internal module split of the CLI crate: `crates/openszigno-cli/src/main.rs`
   became `args`, `input`, `response`, `render/`, `commands/`, `extract/`, and
   `trust`, and each unit test moved next to the code it covers. No behaviour
-  change — every flag, help text, message, stable code, exit status, and byte
+  change: every flag, help text, message, stable code, exit status, and byte
   of JSON and human output is what it was. See
   [docs/architecture.md](docs/architecture.md#module-map-openszigno-cli).
 - `openszigno-verify` was split into one module per pipeline stage: internal
@@ -798,7 +805,7 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
   verify-crate method the CLI reads the set and its times from; the existing
   `validated_path_certificates` keeps its signature and its meaning.
 - `--online` deduplicated fetches by URL alone, so two certificates issued by
-  the same CA — which name the same AIA responder — produced one OCSP request
+  the same CA (which name the same AIA responder) produced one OCSP request
   and left the second certificate uncovered for a reason nothing in the report
   named. OCSP is now deduplicated by responder URL **and** `certID`, and CRLs
   by URL, which is the right key for a list. `--online-cache` names a cached
@@ -809,9 +816,9 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
   skipped anything over 8 MiB, so a CRL between the two figures loaded, was
   stored, and then answered nothing. There is now one constant,
   `openszigno_verify::MAX_REVOCATION_ITEM_BYTES` (16 MiB), used by the verifier,
-  the fetch cap and the store loader, and oversized evidence is reported —
+  the fetch cap and the store loader, and oversized evidence is reported,
   as `revocation_data_invalid` in the tier walk, as a store-loading error, and
-  as an `online_fetch_failed` — naming the size and the limit instead of being
+  as an `online_fetch_failed`, naming the size and the limit instead of being
   passed over in silence.
 - `parse_rfc3339` (the RFC 3339 parser shared by `--at`, trusted-list dates,
   and `xades:SigningTime`) bounded the day of month to 1..=31 regardless of
@@ -866,8 +873,8 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
   (`VerifyReport::validated_path_certificates`), so a certificate embedded
   elsewhere in the XML generates no traffic even when it chains to an anchor.
   With no anchors configured nothing is fetched at all. Previously the fetcher
-  only checked that an embedded issuer had signed the certificate — a statement
-  whoever wrote the dossier wrote on both sides of — so a synthetic dossier
+  only checked that an embedded issuer had signed the certificate, a statement
+  whoever wrote the dossier wrote on both sides of, so a synthetic dossier
   with no trust store configured was enough to make openszigno open a
   connection of the dossier's choosing.
 - `--online` now applies a destination policy before it opens a socket, to the
@@ -877,7 +884,7 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
   addresses `169.254.169.254` and `fd00:ec2::254`, or the names `localhost` and
   `*.localhost`, unless the new `--online-allow-private` is given. The host's
   resolved addresses are re-checked against the same list before connecting, so
-  a public name that resolves inwards — DNS rebinding — is refused too, and an
+  a public name that resolves inwards (DNS rebinding) is refused too, and an
   IPv4-mapped IPv6 address is judged as the IPv4 address it carries. Refusals
   are reported as `online_fetch_failed` (`info`) with the class
   `destination_refused` and the rule that refused them, and nothing is
@@ -890,13 +897,13 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
   `Path::exists` and `fs::write`, which follow symlinked components and final
   files, check existence separately from writing, and truncate. Nothing is now
   ever truncated or replaced: a name already holding exactly the artefact being
-  cached is left as it is — which is also what two concurrent runs look like —
+  cached is left as it is, which is also what two concurrent runs look like,
   and a name holding anything else, or a symlink, is reported as
   `online_fetch_failed` with the class `cache_collision` while the run
   continues, because caching is an optimisation and never changes a verdict.
 - A signature relying on a whole-document enveloped reference could pass the
-  reference-scope check while its `xades:SignedProperties` — including the
-  `SigningCertificate` binding — and its signature profile object were
+  reference-scope check while its `xades:SignedProperties` (including the
+  `SigningCertificate` binding) and its signature profile object were
   unsigned, feeding unauthenticated XAdES properties to the later stages. The
   check read coverage off the resolved node and its ancestors and ignored the
   transform chain, so a reference to the whole document (`URI=""`), or to any
@@ -1062,14 +1069,14 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
   changes no exit status.
 - **`extract --document <SELECTOR>`**, repeatable, extracts only the documents
   it names. A selector is either `#<index>` in source XML order or an exact
-  `object_ref` — the `ds:Object` `Id` the `DocumentProfile` `OBJREF` points at.
+  `object_ref`: the `ds:Object` `Id` the `DocumentProfile` `OBJREF` points at.
   Matching is exact; a prefix matches nothing, so a selector cannot change
   meaning as a dossier grows. An unmatched selector is `document_not_found`
   (exit 4) and one matching several documents is `document_ambiguous`
   (exit 4). Selectors never reach into an embedded dossier: a selector shaped
   like a `dossier_path` (`2/0`) is refused with a message saying to extract
   the embedded dossier and run `extract` on the resulting file. Everything
-  else is unchanged for the selected documents — the limits, naming and
+  else is unchanged for the selected documents: the limits, naming and
   deduplication, no-clobber semantics, all-or-nothing rollback, and recursion
   into a selected embedded dossier. `skipped_count` counts only documents
   skipped for capability reasons among the selection.
@@ -1116,8 +1123,8 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
   blocking ones cap the **dossier** verdict at `indeterminate`, so a dossier
   with an unsigned sibling document can no longer be `valid` however sound its
   other signatures are: a verdict of `valid` has to mean the whole dossier's
-  content is signed. They are `unknown`, never `failed` — an unsigned sibling
-  is missing information, not evidence against a signature that did verify —
+  content is signed. They are `unknown`, never `failed`: an unsigned sibling
+  is missing information, not evidence against a signature that did verify,
   and they change no signature's own checks or verdict.
 - **New JSON.** `data.documents[]` carries `index`, `object_ref` (never a
   title), `nested_dossier`, `coverage`, `covered_by[]` with each covering
@@ -1141,7 +1148,7 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
 - **The countersignature reference scope and binding.** A countersignature
   must cover the countersigned `ds:SignatureValue`, its own
   `xades:SignedProperties`, and its own signature-profile object when it
-  carries one — and nothing about documents, because a countersignature
+  carries one, and nothing about documents, because a countersignature
   attests the parent signature and not the payload. It grants no document
   coverage: coverage stays with the signature it attests. The
   `CountersignedSignature` `ds:Reference/@Type` is corroboration only;
@@ -1152,9 +1159,9 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
   check), `nested_signatures_unsupported` (`info`, on the countersigned
   signature) and `signatures_unsupported` (`unknown`, on the dossier).
 - **Unsupported nesting is `unknown`-class, never `invalid`.** A signature
-  nested in a shape this build does not support — two `ds:Signature` elements
+  nested in a shape this build does not support (two `ds:Signature` elements
   in one `xades:CounterSignature`, or a signature under something that is not
-  `xades:UnsignedSignatureProperties` — keeps its `sig_placement_invalid` with
+  `xades:UnsignedSignatureProperties`) keeps its `sig_placement_invalid` with
   a message that names the reason, but its verdict is left out of the dossier
   verdict, which is capped at `indeterminate` by `signatures_unsupported`
   instead. The signature it was dropped into is **not** affected: it records
@@ -1174,8 +1181,8 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
   socket; everything fetched reaches it through the same `RevocationSource` a
   `--revocation-store` file arrives through, and is judged by exactly the same
   offline rules. CRLs come from the certificate's own `cRLDistributionPoints`
-  and OCSP responses from its `authorityInfoAccess` responders — never from a
-  URL in the dossier's XML — with the scheme exactly as published, a 5 s
+  and OCSP responses from its `authorityInfoAccess` responders (never from a
+  URL in the dossier's XML), with the scheme exactly as published, a 5 s
   connect and 20 s total timeout, 16 MiB and 64 KiB size caps, at most three
   redirects and **none across hosts**, and no proxy from the environment unless
   `--online-proxy URL` names one. OCSP requests are RFC 6960 `OCSPRequest`
@@ -1184,8 +1191,8 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
   covers. New sources `online_crl` and `online_ocsp` in
   `chain[].revocation.source`; `policy.revocation` reads `online`. A failed
   fetch is one `revocation_status_unknown` (blocking) naming the URL and the
-  failure class — `timeout`, `http status <code>`, `too large`, `redirect`,
-  `invalid`, `transport` — never a panic and never a hang.
+  failure class: `timeout`, `http status <code>`, `too large`, `redirect`,
+  `invalid`, `transport`; never a panic and never a hang.
 - **`--online-cache DIR`** writes every fetched artefact into a
   `--revocation-store` shaped directory, named by the SHA-256 of its own bytes,
   so a later run with `--revocation-store DIR` and no `--online` reproduces the
@@ -1212,8 +1219,8 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
   every addition is additive and no existing field changed meaning.
 - **Trusted lists: the identity forms a real national list actually uses.**
   `X509SKI` and `X509SubjectName` service digital identities are now read. They
-  contribute **no trust anchor** — an identity that names a certificate without
-  supplying one cannot grant trust — but they can decide `qualified` over a
+  contribute **no trust anchor** (an identity that names a certificate without
+  supplying one cannot grant trust) but they can decide `qualified` over a
   chain some other anchor has already validated. An SKI is matched against a
   certificate's `subjectKeyIdentifier`; a subject name is matched attribute by
   attribute against the certificate's subject, exactly as written, with only
@@ -1240,7 +1247,7 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
   Alongside the issuing CA answering for itself and a responder that CA
   delegated to, a **trusted responder** (section 2.2) is accepted: one whose
   certificate carries `id-kp-OCSPSigning` and whose own path validates to a
-  configured trust anchor — trust store or trusted list — at the response's
+  configured trust anchor (trust store or trusted list) at the response's
   `producedAt`, even though the queried certificate's issuer never delegated to
   it. Central responders are how real national hierarchies are built: one
   responder answers for every CA the operator runs, issued by a sibling CA, and
@@ -1253,8 +1260,8 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
   the new `ocsp_responder_trusted` (`info`) check names the third one when it
   is used.
 - **A refused source no longer ends the search.** An OCSP response no model
-  authorises, a delta CRL, an out-of-scope CRL — any source that is found and
-  refused — is recorded and the remaining tiers are tried, so an unusable OCSP
+  authorises, a delta CRL, an out-of-scope CRL: any source that is found and
+  refused is recorded and the remaining tiers are tried, so an unusable OCSP
   answer followed by a good CRL now ends as `good` from the CRL.
   `revocation_data_invalid` and `revocation_status_unknown` are reported only
   after every tier has been exhausted. The refusal stays visible: the new
@@ -1268,8 +1275,8 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
   mattered is answered by the chain that needed it, which still reports
   `revocation_status_unknown` and still blocks. Emitting a second blocking
   check per URL added nothing there and did harm: a fetch attempted for a
-  certificate no verdict depended on — an over-fetch, or the timestamp
-  authority of a container `es:TimeStamp` — dragged dossiers whose every
+  certificate no verdict depended on (an over-fetch, or the timestamp
+  authority of a container `es:TimeStamp`) dragged dossiers whose every
   signature was `valid` down to `indeterminate` and exit `7`.
 - **Container-timestamp findings never block the dossier verdict.** Revocation,
   path and trust findings about a container `es:TimeStamp`'s timestamp
@@ -1278,10 +1285,10 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
   `dossier_timestamp_not_checked` / `document_timestamp_not_checked` (`info`)
   naming the cause. The aggregation is now stated explicitly in
   `docs/architecture.md`: `valid` when every signature is `valid`, `invalid`
-  when any signature is — or when a container timestamp's imprint or token
-  contradicts the container — and `indeterminate` otherwise.
+  when any signature is, or when a container timestamp's imprint or token
+  contradicts the container, and `indeterminate` otherwise.
 - The `--online` OCSP `POST` now sets `Content-Length` explicitly. `ureq` sent
-  a sized, unchunked body already — the request is passed as a slice — but a
+  a sized, unchunked body already (the request is passed as a slice) but a
   request whose end the peer has to infer is the shape that behaves
   differently on different platforms, and a responder that does not implement
   chunked requests answers one with a `400`. The test suite now asserts at the
@@ -1412,7 +1419,7 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
   act on, and evidence it declines to re-verify, are `info`: they did not fail
   to answer a required question. Blocking on them capped a signature at
   `indeterminate` for carrying *more* evidence than the minimum, which is
-  precisely backwards — an unsigned qualifying property cannot change what a
+  precisely backwards: an unsigned qualifying property cannot change what a
   signature says, an archive timestamp is laid on top of one, and a
   dossier-level `es:TimeStamp` is a statement about the container rather than
   about any signature in it. The three remaining `skipped` emitters are
@@ -1429,8 +1436,8 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
   `revoked_after_validation_time`. A timestamp authority's chain is always
   treated as asserted, because the instant it is validated at is the `genTime`
   the token itself claims.
-- Revocation summary messages now name **which chain** they are about — the
-  signer's or a timestamp authority's — since a signature emits one per chain
+- Revocation summary messages now name **which chain** they are about, the
+  signer's or a timestamp authority's, since a signature emits one per chain
   under the same code.
 - Embedded validation data is now harvested from
   `xades141:TimeStampValidationData` as well as from a plain
@@ -1519,8 +1526,8 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
   private-arc purpose that predates RFC 9336 and that qualified-signature CAs
   actually issue.
 - New `cert_key_usage_advisory` (`unknown`): when a signing certificate
-  asserts `nonRepudiation` — the ETSI EN 319 412-2 signal for a signing
-  certificate — but its `extendedKeyUsage` names only unrelated purposes, the
+  asserts `nonRepudiation` (the ETSI EN 319 412-2 signal for a signing
+  certificate) but its `extendedKeyUsage` names only unrelated purposes, the
   path passes with a caveat naming the OIDs found instead of failing.
   `cert_key_usage_invalid` is kept for a `keyUsage` that permits neither
   `digitalSignature` nor `nonRepudiation`, and for an unrelated
@@ -1534,16 +1541,16 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
   neither shape now names the outermost tag it saw.
 
 - **A timestamp that does not verify no longer makes a signature `invalid`.**
-  Following ETSI EN 319 102-1, a token that fails for any reason — malformed,
+  Following ETSI EN 319 102-1, a token that fails for any reason (malformed,
   wrong imprint, bad TSA signature, TSA certificate problem, untrusted or
-  unknown TSA path — supplies no proof of existence, which is missing
+  unknown TSA path) supplies no proof of existence, which is missing
   information rather than evidence against the signature. The token keeps its
   own `failed` checks and `verified: false`; the signature-level
   `timestamp_verified` is now `unknown` and never `failed`, the validation
   time falls back to `--at` or the clock, and the verdict is capped at
-  `indeterminate`. Only checks about the signature itself — digests, signature
+  `indeterminate`. Only checks about the signature itself (digests, signature
   value, algorithm policy, reference scope, the `SigningCertificate` binding,
-  and the signer's own chain — can still make it `invalid`.
+  and the signer's own chain) can still make it `invalid`.
 - The TSA certificate path is built from the union of the token's own
   `SignedData` certificates, the enclosing signature's `ds:KeyInfo` and
   `xades:CertificateValues` candidates, and the trust store's intermediates.
@@ -1561,8 +1568,8 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
   it is marked critical, as RFC 5280 section 4.2.1.12 requires, and
   `id-kp-documentSigning` (RFC 9336) is accepted alongside
   `anyExtendedKeyUsage`. A certificate whose EKU names only unrelated purposes
-  — `emailProtection`, `serverAuth`, `clientAuth`, `codeSigning`,
-  `OCSPSigning` — now fails `cert_key_usage_invalid` even when the extension
+  (`emailProtection`, `serverAuth`, `clientAuth`, `codeSigning`,
+  `OCSPSigning`) now fails `cert_key_usage_invalid` even when the extension
   is advisory. A CA's EKU is still enforced only when critical.
 - `cert_path_search_exhausted` is reported as `unknown` rather than `failed`:
   hitting the expansion budget means the tool stopped looking, not that no
@@ -1700,8 +1707,8 @@ it. Phase 3 lifted that.
   either the `ds:Object` holding an `es:SignatureProfile` (in any allowed
   dossier namespace) or to that element itself, in either object order; and
   `xades:SignedProperties` coverage is decided by what a reference *resolves
-  to* — the element in any recognised XAdES namespace (1.1.1, 1.2.2, 1.3.2,
-  1.4.1) or an ancestor of it — with the `Type` attribute as corroboration
+  to*: the element in any recognised XAdES namespace (1.1.1, 1.2.2, 1.3.2,
+  1.4.1) or an ancestor of it, with the `Type` attribute as corroboration
   only, since an attacker controls it. A reference that declares the
   `SignedProperties` `Type` without resolving to one is named in the failure
   message.
@@ -1713,7 +1720,7 @@ it. Phase 3 lifted that.
   properties, in every recognised namespace) as well as `ds:KeyInfo`, which is
   what real dossiers need: they carry only the signer in `ds:KeyInfo` and the
   intermediates and root in `CertificateValues`. **Only the trust store can
-  supply an anchor** — a self-signed root found inside a dossier is an
+  supply an anchor**: a self-signed root found inside a dossier is an
   untrusted candidate like any other. A non-self-signed file in the trust store
   is an extra untrusted intermediate; the `anchors/` and `intermediates/` split
   is a convention, and the verifier classifies what it is given.
@@ -1772,7 +1779,7 @@ it. Phase 3 lifted that.
   is deliberately not emitted by `verify`.
 - `deny.toml` ignores RUSTSEC-2023-0071 with a written reason: the Marvin-attack
   advisory covers `rsa`'s non-constant-time *private-key* operation, no fixed
-  release exists, and openSzigno never holds an RSA private key — signing is a
+  release exists, and openSzigno never holds an RSA private key: signing is a
   permanent non-goal and only the public-key verification path is shipped. No
   license allowlist change was needed; every new dependency is MIT, Apache-2.0,
   BSD-3-Clause, ISC, Unicode-3.0, or Zlib.

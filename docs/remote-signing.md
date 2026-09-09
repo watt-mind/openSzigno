@@ -1323,7 +1323,7 @@ Two further gaps belong to the same follow-up:
   (section 3.5).
 
 All three are the follow-up `openszigno csc login` work recorded in
-[roadmap.md](roadmap.md#m5-authoring--done): a loopback redirect
+[roadmap.md](roadmap.md#m5-authoring-done): a loopback redirect
 listener on `127.0.0.1` in the RFC 8252 style, PKCE with S256, both scopes, and
 `authorization_details` where the service supports it. `redirect_uri` in the
 configuration file is reserved for it, which is why a value that is not a
