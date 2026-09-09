@@ -105,8 +105,8 @@ move.
 The lists are refreshed daily. Fetch a snapshot, record its
 `TSLSequenceNumber` and `ListIssueDateTime`, and keep it under version control
 or in an archive alongside whatever you verified with it; the report's
-`policy.trust_lists` block cites exactly those fields so a result can be
-reproduced later.
+`policy.trust_lists` block cites exactly those fields — plus the `version` the
+list stated — so a result can be reproduced later.
 
 ```bash
 mkdir -p trust-lists
@@ -128,8 +128,9 @@ exactly when the rules for parsing the list change. A list stating `5` or `6`
 loads; anything else, and a list stating nothing, is refused as
 `trust_list_invalid` (exit 3) with a message naming what it stated. That is
 deliberate: a parser that guessed at an unknown version would be guessing about
-trust anchors. The version is named in the `trust_list_loaded` check message,
-so a run says which format it read.
+trust anchors. The version read is reported twice — as
+`policy.trust_lists[].version` in the machine-readable report and in the
+`trust_list_loaded` check message — so a run always says which format it read.
 
 What TLv6 actually changed, and what it did not:
 

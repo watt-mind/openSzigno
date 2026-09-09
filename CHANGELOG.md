@@ -21,7 +21,9 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
   with a message naming what the file stated. Clause 5.3.1 says the field is
   incremented exactly when the parsing rules change, so guessing at an
   unknown one would be guessing about trust anchors. The version read is
-  named in the `trust_list_loaded` check message. Nothing else about TLv6
+  reported as `policy.trust_lists[].version`, a new field alongside the
+  `territory`/`sequence_number`/`issue_date` a report already cited, and named
+  in the `trust_list_loaded` check message. Nothing else about TLv6
   needed branching: V2.3.1 and V2.4.1 keep the `http://uri.etsi.org/02231/v2#`
   namespace, the `ServiceDigitalIdentity` forms, `PointersToOtherTSL`, and
   the registered service-status URIs unchanged, and both the live EU LOTL

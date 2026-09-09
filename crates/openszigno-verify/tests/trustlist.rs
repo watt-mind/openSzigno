@@ -166,6 +166,7 @@ fn the_list_metadata_is_read() {
     assert_eq!(loaded.sequence_number, Some(7));
     assert_eq!(loaded.issue_date.as_deref(), Some("2020-01-01T00:00:00Z"));
     assert_eq!(loaded.next_update.as_deref(), Some("2021-01-01T00:00:00Z"));
+    assert_eq!(loaded.version, 6);
     assert_eq!(loaded.anchors.len(), 1);
 }
 
@@ -236,6 +237,9 @@ fn both_a_tlv5_and_a_tlv6_list_load_and_verify() {
             CheckCode::TrustListSignatureOk,
             CheckStatus::Passed,
         );
+        let loaded = openszigno_verify::trustlist::load(list.as_bytes(), &[], &RoxmltreeC14n)
+            .expect("the list loads");
+        assert_eq!(loaded.version, u64::from(version));
         let loaded = report
             .checks
             .iter()

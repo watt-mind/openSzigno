@@ -2633,6 +2633,7 @@ verify anything.
       "trust_store": "configured",
       "trust_lists": [
         {
+          "version": 6,
           "territory": "HU",
           "sequence_number": 99,
           "issue_date": "2026-07-15T08:42:53Z",

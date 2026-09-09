@@ -53,6 +53,10 @@ const MAX_POINTER_CERTIFICATES: usize = 512;
 /// One loaded trusted list.
 #[derive(Clone, Debug)]
 pub struct TrustList {
+    /// The `TSLVersionIdentifier` the list states: 5 (TLv5) or 6 (TLv6). A
+    /// list stating anything else, or nothing, does not load at all, so this
+    /// is always one of the two.
+    pub version: u64,
     pub sequence_number: Option<u64>,
     pub territory: Option<String>,
     pub issue_date: Option<String>,
@@ -181,6 +185,7 @@ pub fn load(
     ));
 
     Ok(TrustList {
+        version,
         sequence_number,
         territory,
         issue_date,
