@@ -66,6 +66,21 @@ pub enum SigningCertificateForm {
     V2,
 }
 
+/// The `xades:SigPolicyHash` of an explicit signature policy: the digest the
+/// signature claims the policy document has.
+///
+/// Reported and never used. No policy document is fetched, so there is
+/// nothing to compare the digest against; it is recorded because a reader
+/// checking a Hungarian AVDH signature against the policy by hand needs both
+/// the identifier and the hash the signer committed to.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
+pub struct SignaturePolicyDigest {
+    /// `ds:DigestMethod/@Algorithm`, verbatim and sanitised.
+    pub algorithm: Option<String>,
+    /// `ds:DigestValue`, still Base64, sanitised.
+    pub value: Option<String>,
+}
+
 /// A signature policy identifier, reported and never processed.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -85,6 +100,12 @@ pub struct XadesProperties<'a, 'input> {
     pub signature_policy: Option<SignaturePolicy>,
     /// The policy identifier, sanitised, when the policy is explicit.
     pub signature_policy_id: Option<String>,
+    /// The explicit policy's declared digest, when it carries one.
+    pub signature_policy_digest: Option<SignaturePolicyDigest>,
+    /// `xades:ClaimedRole` values of `SignerRole` or `SignerRoleV2`.
+    pub claimed_roles: Vec<String>,
+    /// `xades:CommitmentTypeIndication/CommitmentTypeId/Identifier` values.
+    pub commitment_type_ids: Vec<String>,
     /// `xades:SignatureTimeStamp` elements, in document order.
     pub signature_timestamps: Vec<Node<'a, 'input>>,
     /// `xades:ArchiveTimeStamp` elements, which stay out of scope.
@@ -98,6 +119,11 @@ pub struct XadesProperties<'a, 'input> {
     /// nothing and must change nothing.
     pub extra_qualifying_properties: bool,
 }
+
+/// The bounded number of claimed roles and commitment types reported. Both
+/// come from attacker-controlled XML and neither decides anything, so a
+/// handful is all a reader ever needs.
+const MAX_REPORTED_CLAIMS: usize = 8;
 
 /// The bounded number of `xades:Cert` entries considered, since the property is
 /// attacker-controlled and every entry costs one digest per candidate.
@@ -219,6 +245,49 @@ fn parse_properties<'a, 'input>(
                 properties.signature_policy_id = xades_child(policy, "SigPolicyId")
                     .and_then(|id| xades_child(id, "Identifier"))
                     .map(|node| sanitize(&text_of(node)));
+                properties.signature_policy_digest =
+                    xades_child(policy, "SigPolicyHash").map(policy_digest);
+            }
+        }
+
+        // The claimed roles. XAdES 1.3.2 spells the property `SignerRole` and
+        // EN 319 132-1 `SignerRoleV2`; both hold the same `ClaimedRoles`.
+        // Hungarian AVDH signatures state the authenticated citizen here, so
+        // the values are reported rather than dropped. Nothing is validated:
+        // a claimed role is a claim, exactly like `SigningTime`.
+        for name in ["SignerRole", "SignerRoleV2"] {
+            let Some(role) = xades_child(signed, name) else {
+                continue;
+            };
+            for claimed in xades_children(role, "ClaimedRoles")
+                .flat_map(|roles| xades_children(roles, "ClaimedRole"))
+                .take(MAX_REPORTED_CLAIMS)
+            {
+                let text = sanitize(text_of(claimed).trim());
+                if !text.is_empty() && !properties.claimed_roles.contains(&text) {
+                    properties.claimed_roles.push(text);
+                }
+            }
+        }
+    }
+
+    // What the signer says they committed to. Signed, reported, and applied to
+    // nothing: this build validates signatures, not the meaning a signer
+    // attaches to one.
+    if let Some(data_properties) =
+        signed_properties.and_then(|node| xades_child(node, "SignedDataObjectProperties"))
+    {
+        for indication in
+            xades_children(data_properties, "CommitmentTypeIndication").take(MAX_REPORTED_CLAIMS)
+        {
+            let Some(identifier) = xades_child(indication, "CommitmentTypeId")
+                .and_then(|id| xades_child(id, "Identifier"))
+            else {
+                continue;
+            };
+            let text = sanitize(text_of(identifier).trim());
+            if !text.is_empty() && !properties.commitment_type_ids.contains(&text) {
+                properties.commitment_type_ids.push(text);
             }
         }
     }
@@ -338,6 +407,17 @@ fn collect_unprocessed(container: Node<'_, '_>, into: &mut Vec<String>) {
             continue;
         }
         into.push(sanitize(name));
+    }
+}
+
+/// The declared digest of an explicit signature policy, read and not used.
+fn policy_digest(hash: Node<'_, '_>) -> SignaturePolicyDigest {
+    SignaturePolicyDigest {
+        algorithm: direct_child(hash, XMLDSIG_NAMESPACE, "DigestMethod")
+            .and_then(|node| node.attribute("Algorithm"))
+            .map(sanitize),
+        value: direct_child(hash, XMLDSIG_NAMESPACE, "DigestValue")
+            .map(|node| sanitize(text_of(node).trim())),
     }
 }
 
@@ -696,6 +776,9 @@ pub(crate) fn stage_c_presence(properties: &XadesProperties<'_, '_>) -> StageC {
             signing_certificate: None,
             signature_policy: properties.signature_policy,
             signature_policy_id: properties.signature_policy_id.clone(),
+            signature_policy_digest: properties.signature_policy_digest.clone(),
+            claimed_roles: properties.claimed_roles.clone(),
+            commitment_type_ids: properties.commitment_type_ids.clone(),
             signature_timestamps: properties.signature_timestamps.len(),
             archive_timestamps: properties.archive_timestamps,
             unvalidated_properties: properties.unprocessed_properties.clone(),
