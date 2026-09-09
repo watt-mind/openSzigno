@@ -10,6 +10,16 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
 
 ## [Unreleased]
 
+### Fixed
+
+- `online_options_invalid` (an unusable `--online-proxy` value) now exits
+  `3` from `sign --tsa` and `sign --csc`, the same status `verify --online`
+  already reported for it. Exit `4` is "invalid, unsafe, or unsupported
+  dossier structure, or unusable decryption material"; an unusable option is
+  about the caller's own invocation, not the dossier or the key material, so
+  `3` ("input/output error") is the documented category. `docs/architecture.md`
+  no longer lists this code as "3 or 4".
+
 ## [0.8.0] - 2026-09-09
 
 ### Added

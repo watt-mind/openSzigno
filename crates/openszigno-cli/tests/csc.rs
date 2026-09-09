@@ -588,6 +588,19 @@ fn a_service_that_is_not_there_is_unreachable() {
     assert!(!everything_printed(&output).contains(TOKEN));
 }
 
+/// An unusable `--online-proxy` value stops the run the same way it does for
+/// `verify --online`: the option itself cannot be used, independent of the
+/// dossier or the credential this run would otherwise reach.
+#[test]
+fn an_unusable_online_proxy_is_an_input_output_error() {
+    let fixture = fixture(Mock::new(Flavour::Eudi));
+    let output = sign(&fixture, &["--online-proxy", "not a proxy"]);
+    let report = json(&output);
+    assert_eq!(report["errors"][0]["code"], "online_options_invalid");
+    assert_eq!(output.status.code(), Some(3));
+    assert!(fixture.service.paths().is_empty());
+}
+
 // ---------------------------------------------------------------------------
 // The whole thing, with a timestamp
 // ---------------------------------------------------------------------------

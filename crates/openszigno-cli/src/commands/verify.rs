@@ -244,11 +244,7 @@ pub(crate) fn verify_command(args: &VerifyArgs) -> CliResult {
                     .map_err(|message| {
                         failure(
                             input.clone(),
-                            CliError {
-                                code: "online_options_invalid",
-                                message,
-                                exit: 3,
-                            },
+                            CliError::option_invalid("online_options_invalid", message),
                         )
                     })?;
             let limits = openszigno_verify::VerifyLimits::default();

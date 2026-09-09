@@ -107,7 +107,7 @@ impl CscSigner {
         config::check_scheme(&config.base_url, request.allow_private)
             .map_err(CliError::from_sign)?;
         let fetcher = Fetcher::new(request.proxy, request.allow_private)
-            .map_err(|message| CliError::invalid("online_options_invalid", message))?;
+            .map_err(|message| CliError::option_invalid("online_options_invalid", message))?;
         let client = Client::new(fetcher, &config.base_url, config.access_token.clone());
         Self::discover(client, &config, request.credential)
             .map(|signer| (signer, config.warnings))

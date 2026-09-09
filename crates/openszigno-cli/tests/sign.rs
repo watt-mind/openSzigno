@@ -578,6 +578,29 @@ fn a_refused_tsa_destination_is_a_tsa_failure_naming_the_rule() {
 }
 
 #[test]
+fn an_unusable_online_proxy_is_an_input_output_error_not_a_dossier_fault() {
+    let pki = pki();
+    let fixture = fixture(&pki, 1);
+    let (_authority, url) = timestamp_authority(&pki);
+    let output = sign_output(
+        &fixture,
+        &[
+            "--tsa",
+            &url,
+            "--online-allow-private",
+            "--online-proxy",
+            "not a proxy",
+        ],
+    );
+    let report = json(&output);
+    assert_eq!(report["errors"][0]["code"], "online_options_invalid");
+    // Exit 3 (input/output error): the `--online-proxy` value is unusable
+    // on its own terms, independent of the dossier or key material.
+    assert_eq!(output.status.code(), Some(3));
+    assert!(!fixture.path("signed.es3").exists());
+}
+
+#[test]
 fn a_tsa_that_answers_with_rubbish_is_a_tsa_failure() {
     let pki = pki();
     let fixture = fixture(&pki, 1);
