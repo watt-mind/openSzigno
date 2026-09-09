@@ -2315,7 +2315,17 @@ data stated. The path-level summary is one check: `revocation_ok` when every
 non-anchor certificate has fresh, verified, non-revoked status; `cert_revoked`
 when any was revoked at or before the validation time; and otherwise the worst
 of `cert_revoked_after_validation_time`, `revocation_data_invalid`,
-`revocation_data_stale`, and `revocation_status_unknown`.
+`revocation_data_stale`, `revocation_status_unknown_by_responder`, and
+`revocation_status_unknown`.
+
+**An OCSP `unknown` is not stale data.** RFC 6960 section 2.2 gives `unknown`
+its own meaning: the responder does not know about this certificate. That is a
+well-formed, authorised, current answer that happens to answer nothing, so it
+is reported as `revocation_status_unknown_by_responder` (`unknown`) rather than
+as `revocation_data_stale`. The distinction is what a reader has to act on:
+staleness is fixed by fetching something newer, while a responder that does not
+serve this certificate will say the same thing however often it is asked. It
+blocks like every other `unknown`.
 
 **Naming what is missing.** The summary message names *which* certificate is
 the problem — by role (`the end-entity certificate`, `the intermediate CA
@@ -2903,7 +2913,8 @@ verify), and `revocation_not_checked` (the caller switched revocation off).
 | `cert_revoked` | `failed` | A certificate in the path was revoked at or before the validation time. `certificateHold` counts. |
 | `cert_revoked_after_validation_time` | `info` / `unknown` | A certificate was revoked *after* the instant being validated, so that revocation did not apply then. `info` when the validation time was **proven** by a fully verified signature timestamp, `unknown` when it was merely asserted by `--at` or the clock. Never `passed`: the certificate really was revoked, and the message gives the time and reason. |
 | `revocation_status_unknown` | `unknown` | No usable revocation data covers a certificate in the path, or no path was built to ask about. Blocking. A failed `--online` fetch reaches a verdict through this check and not on its own; see `online_fetch_failed`. |
-| `revocation_data_stale` | `unknown` | The data's `nextUpdate` had passed at the validation time, or it carries none and its `thisUpdate` precedes it. Also the OCSP `unknown` status. |
+| `revocation_data_stale` | `unknown` | The data's `nextUpdate` had passed at the validation time, or it carries none and its `thisUpdate` precedes it. |
+| `revocation_status_unknown_by_responder` | `unknown` | An authorised OCSP responder answered with the RFC 6960 `unknown` status: it does not know about this certificate, so it neither confirms nor denies a revocation. Distinct from `revocation_data_stale`, because fetching newer data from the same responder would not help. Blocking. |
 | `revocation_data_invalid` | `unknown` | Every source that covered a certificate was found but could not be used: signed by someone unauthorised, a delta or indirect CRL, an unimplemented `issuingDistributionPoint` form, a critical CRL extension this build does not implement, an OCSP response whose status is not `successful`, or an item larger than `MAX_REVOCATION_ITEM_BYTES`, whose size and limit the message names. The message names the cause. Emitted only after every tier has been tried. `unknown`, not `failed`: unusable data means the tool could not answer. |
 | `online_fetch_failed` | `info` | Under `--online`, one fetch did not produce a usable artefact. The message names the URL and the failure class: `timeout`, `http status <code>`, `too large` with the limit, `redirect`, `invalid`, `transport`, `destination_refused` with the rule that refused the destination before any socket was opened (`redirect_downgrade` for a redirect that would leave `https` for `http`, `credentials_require_https` for a request carrying credentials over a scheme that is not `https`, and the address and scheme rules), or `cache_collision` when `--online-cache` already held a different file under an artefact's name and nothing was overwritten. Informational: whether the missing data mattered is answered by the chain that needed it, through `revocation_status_unknown`, which blocks. |
 | `revocation_sources_disagree` | `info` | The usable revocation sources for one certificate did not say the same thing: one recorded a revocation and another reported it as not revoked. The message names both sides and which chain it is about. Reports rather than decides — the disagreement is already settled by [Which answer wins](#which-answer-wins), where a revocation beats a `good` from any other source — so it never blocks. |

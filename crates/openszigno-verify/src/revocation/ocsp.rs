@@ -143,7 +143,12 @@ pub(super) fn ocsp_answer(
             produced_at: Some(produced_at),
             responder_model,
         },
-        CertStatus::Unknown(_) => Answer::Stale,
+        // RFC 6960 section 2.2: `unknown` means the responder does not know
+        // about this certificate. That is a different thing from data that has
+        // gone out of date, and reporting it as staleness told an operator to
+        // fetch something fresher when what they actually have is a responder
+        // that was asked about a certificate it does not serve.
+        CertStatus::Unknown(_) => Answer::UnknownToResponder,
         CertStatus::Revoked(info) => Answer::Revoked {
             time: generalized(&info.revocation_time.0),
             reason: info.revocation_reason.map(reason_name),

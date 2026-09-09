@@ -49,6 +49,14 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
 
 ### Fixed
 
+- An OCSP `unknown` status is no longer reported as stale revocation data.
+  RFC 6960 section 2.2 gives it its own meaning — the responder does not know
+  about this certificate — and calling that staleness told an operator to
+  fetch something newer when the responder they asked does not serve the
+  certificate at all. It now reports the new check code
+  `revocation_status_unknown_by_responder` (`unknown`), which blocks exactly as
+  `revocation_data_stale` did. Additive: a new code keeps `schema_version` at
+  `1`, and no committed fixture emits it, so no golden file changed.
 - A certificate whose outer `signatureAlgorithm` differs from
   `tbsCertificate.signature` is refused with `cert_malformed`. RFC 5280
   section 4.1.1.2 requires the two to be the same algorithm identifier, and
