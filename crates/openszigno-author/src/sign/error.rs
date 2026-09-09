@@ -107,6 +107,21 @@ impl SignError {
         Self::new(SignErrorCode::InvalidSigningCertificate, message)
     }
 
+    /// A refusal from a remote signing backend that lives outside this crate.
+    ///
+    /// The `Signer` seam is the point of the design: a Cloud Signature
+    /// Consortium client is a caller, not a member of this crate, and it has to
+    /// be able to report the `csc_*` categories under the same type everything
+    /// else reports under. Only those codes are constructed this way; the rest
+    /// are this crate's own statements about the request it was given.
+    pub fn remote(code: SignErrorCode, message: impl Into<String>) -> Self {
+        debug_assert!(
+            code.as_str().starts_with("csc_"),
+            "only the remote-backend codes are constructed from outside this crate"
+        );
+        Self::new(code, message)
+    }
+
     pub(crate) fn failed(message: impl Into<String>) -> Self {
         Self::new(SignErrorCode::SignFailed, message)
     }
@@ -159,6 +174,13 @@ mod tests {
         assert_eq!(SignErrorCode::CscConfigInvalid.exit(), 4);
         assert_eq!(SignErrorCode::CscAuthorizationRequired.exit(), 4);
         assert_eq!(SignErrorCode::CscSignatureInvalid.exit(), 5);
+    }
+
+    #[test]
+    fn a_remote_backend_reports_a_csc_code_under_the_same_type() {
+        let error = SignError::remote(SignErrorCode::CscUnreachable, "nothing answered");
+        assert_eq!(error.code(), SignErrorCode::CscUnreachable);
+        assert_eq!(error.code().exit(), 5);
     }
 
     #[test]

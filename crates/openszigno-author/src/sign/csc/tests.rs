@@ -460,7 +460,7 @@ fn an_rsa_signature_is_checked_the_same_way() {
         verify_prehash(
             &certificate,
             SignatureAlgorithm::RsaSha256,
-            &sha2::Sha256::digest(b"other").to_vec(),
+            &sha2::Sha256::digest(b"other"),
             &signature.to_vec()
         )
         .expect_err("the wrong bytes")

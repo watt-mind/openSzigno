@@ -3,7 +3,7 @@
 
 use std::path::PathBuf;
 
-use clap::{Args, Parser, Subcommand};
+use clap::{ArgGroup, Args, Parser, Subcommand};
 use openszigno_core::{KNOWN_COMPATIBLE_NAMESPACES, Limits, ParseOptions};
 use openszigno_verify::{format_rfc3339, parse_rfc3339};
 
@@ -245,7 +245,11 @@ pub(crate) enum Scope {
     Dossier,
 }
 
+/// The group `--online-allow-private` and `--online-proxy` attach to: a run
+/// only touches the network for a timestamp authority or for a CSC service, so
+/// the two transport flags are meaningless without one of them.
 #[derive(Clone, Debug, Args)]
+#[command(group(ArgGroup::new("sign_network").args(["tsa", "csc"]).multiple(true)))]
 pub(crate) struct SignArgs {
     /// Input .es3 dossier, or `-` to read it from standard input.
     pub(crate) file: PathBuf,
@@ -254,14 +258,26 @@ pub(crate) struct SignArgs {
     pub(crate) output: PathBuf,
     /// The signing key: PKCS#8, DER or PEM, plain or passphrase-protected,
     /// RSA or NIST P-256. The key is read from the file and never from the
-    /// command line.
-    #[arg(long, value_name = "FILE")]
-    pub(crate) key: PathBuf,
+    /// command line. Mutually exclusive with --csc.
+    #[arg(long, value_name = "FILE", required_unless_present = "csc")]
+    pub(crate) key: Option<PathBuf>,
     /// The certificate belonging to `--key`, PEM or DER. It may be omitted
     /// when the key file is PEM and carries the certificate too. Without one
     /// nothing binds the signature to a certificate.
-    #[arg(long, value_name = "FILE")]
+    #[arg(long, value_name = "FILE", conflicts_with = "csc")]
     pub(crate) cert: Option<PathBuf>,
+    /// Sign through a Cloud Signature Consortium API v2 service instead of a
+    /// local key: only the digest of the canonicalised ds:SignedInfo leaves
+    /// this machine, and a remote qualified certificate signs it. The file is
+    /// a small TOML table holding the service URL and a bearer token obtained
+    /// out of band; see docs/remote-signing.md. Mutually exclusive with --key
+    /// and --cert.
+    #[arg(long = "csc", value_name = "FILE", conflicts_with_all = ["key", "passphrase_file", "algorithm"])]
+    pub(crate) csc: Option<PathBuf>,
+    /// The CSC credential to sign with, overriding the configuration file.
+    /// Without one the service must offer exactly one credential.
+    #[arg(long = "csc-credential", value_name = "ID", requires = "csc")]
+    pub(crate) csc_credential: Option<String>,
     /// Read the passphrase of an encrypted `--key` from this file, one
     /// trailing newline stripped. It takes precedence over the environment
     /// variable OPENSZIGNO_DECRYPT_PASSPHRASE. A passphrase is never taken
@@ -299,17 +315,19 @@ pub(crate) struct SignArgs {
     pub(crate) signing_time: Option<SigningTime>,
     /// The signature algorithm: rsa-sha256 (the default for an RSA key, and
     /// what Hungarian e-akta verifiers universally accept), rsa-pss-sha256, or
-    /// ecdsa-p256-sha256 (the default for a P-256 key).
+    /// ecdsa-p256-sha256 (the default for a P-256 key). Not accepted with
+    /// --csc, where the credential's own key/algo list decides.
     #[arg(long, value_name = "NAME")]
     pub(crate) algorithm: Option<String>,
-    /// Permit `--tsa` to contact loopback, private (RFC 1918), link-local and
-    /// unique-local addresses, and the host name `localhost`. Refused by
-    /// default, exactly as it is for `verify --online`.
-    #[arg(long = "online-allow-private", requires = "tsa")]
+    /// Permit `--tsa` and `--csc` to contact loopback, private (RFC 1918),
+    /// link-local and unique-local addresses, and the host name `localhost`,
+    /// and permit a plain `http` CSC service. Refused by default, exactly as
+    /// it is for `verify --online`.
+    #[arg(long = "online-allow-private", requires = "sign_network")]
     pub(crate) online_allow_private: bool,
-    /// Route the `--tsa` request through this proxy. Without it no proxy is
-    /// used at all, and none is taken from the environment.
-    #[arg(long = "online-proxy", value_name = "URL", requires = "tsa")]
+    /// Route the `--tsa` and `--csc` requests through this proxy. Without it
+    /// no proxy is used at all, and none is taken from the environment.
+    #[arg(long = "online-proxy", value_name = "URL", requires = "sign_network")]
     pub(crate) online_proxy: Option<String>,
     /// Emit one stable JSON object on stdout.
     #[arg(long)]

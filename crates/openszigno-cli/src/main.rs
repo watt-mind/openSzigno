@@ -4,6 +4,7 @@
 
 mod args;
 mod commands;
+mod csc;
 mod extract;
 mod input;
 mod key_material;
