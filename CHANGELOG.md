@@ -10,7 +10,7 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
 
 ## [Unreleased]
 
-## [0.7.1] - 2026-09-09
+## [0.8.0] - 2026-09-09
 
 ### Added
 
@@ -18,9 +18,222 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
   `encoding` pseudo-attribute and reports the label together with the byte
   range holding it, so a writer restating the declaration agrees with the
   decoder byte for byte. Additive; `schema_version` stays `1`.
+- Two fuzz targets for code that had none. `extract_plan` drives the CLI's
+  extraction planner with arbitrary document titles and declared extensions
+  and asserts that no planned name is a path, that no two names in one
+  directory collide, and that planning is idempotent; `destination_url`
+  drives the `--online` destination policy and asserts that it never hands
+  the fetcher an address its own verdict refuses, that a non-HTTP scheme and
+  userinfo are refused whatever `--online-allow-private` says, and that a
+  relative redirect stays on the base URL's authority. Both include the
+  shipped module by `#[path]`, because the `openszigno` binary crate has no
+  library target to depend on, so what is fuzzed is the real source.
+  `decode_payload` now also drives the two `encrypt` chains with no
+  decryption key, through `decode_document_with`.
+- The golden output contract captures stderr. `scripts/golden.py` kept only
+  stdout, so every human-mode golden for a fixture that fails was an empty
+  file: the wording of every error and warning an operator actually reads was
+  pinned nowhere, and the "no golden may carry a machine-local path" check
+  never looked at the stream those messages go to. Each case now writes a
+  `<case>.stderr.txt` beside its stdout golden and its `.exit`, the leak check
+  runs over both streams, and an `extract --stdout` case pins the one output
+  that is not an envelope at all. This adds files and changes none: every
+  golden committed before this ran is byte-identical after it. The matrix is
+  run by both the CI `golden` job and the release smoke test, unchanged.
+- `openszigno_core::declared_encoding`, which reads the XML declaration's
+  `encoding` pseudo-attribute and reports the label together with the byte
+  range holding it, so a writer restating the declaration agrees with the
+  decoder byte for byte. Additive; `schema_version` stays `1`.
 
 ### Fixed
 
+- A delegated OCSP responder's certificate is checked for validity at the
+  response's `producedAt` rather than at the validation time, matching the
+  trusted-responder model beside it and the documented rule. Asking at the
+  validation time discarded every archived response whose responder
+  certificate has since expired — the certificate was in force when the
+  responder spoke, which is what RFC 6960's delegation is about — and it
+  admitted one that was not yet in force then. `schema_version` stays `1`.
+- A container `es:TimeStamp` selects its data only through an `xades:Include`
+  in a recognised XAdES namespace. The element was matched on its local name
+  alone, so an element another vocabulary happens to call `Include` added its
+  target to the imprint and changed what the timestamp was taken to cover.
+  Every other XAdES element in the crate was already read this way.
+  `schema_version` stays `1`.
+- An OCSP `unknown` status is no longer reported as stale revocation data.
+  RFC 6960 section 2.2 gives it its own meaning — the responder does not know
+  about this certificate — and calling that staleness told an operator to
+  fetch something newer when the responder they asked does not serve the
+  certificate at all. It now reports the new check code
+  `revocation_status_unknown_by_responder` (`unknown`), which blocks exactly as
+  `revocation_data_stale` did. Additive: a new code keeps `schema_version` at
+  `1`, and no committed fixture emits it, so no golden file changed.
+- A certificate whose outer `signatureAlgorithm` differs from
+  `tbsCertificate.signature` is refused with `cert_malformed`. RFC 5280
+  section 4.1.1.2 requires the two to be the same algorithm identifier, and
+  only the inner one is covered by the CA's signature, so a reader that
+  consults the outer field was verifying under an algorithm the CA never
+  attested to. An absent `parameters` field and an explicit `NULL` still count
+  as agreeing, which is the difference real CAs actually emit.
+  `schema_version` stays `1`.
+- `--allow-legacy-algorithms` no longer lets an RFC 3161 timestamp token
+  report itself as verified on SHA-1. A SHA-1 `messageImprint` emitted
+  `timestamp_imprint_ok` (`passed`) and a SHA-1 `SignerInfo` digest emitted
+  `timestamp_signature_ok` (`passed`), so the token reached `verified: true`
+  and its `genTime` became the validation time — under a flag that exists for
+  diagnosis and everywhere else caps the verdict. Both now emit
+  `algorithm_legacy_allowed` (`unknown`) instead, so the token stays
+  unverified and the verdict stays `indeterminate`. Without the flag both are
+  refused exactly as before. `schema_version` stays `1`.
+- Document coverage finds the payload `ds:Object` whatever the dossier spells
+  its identifier attribute. The parser, the reference resolver and the XAdES
+  reader accept `Id`, `ID` and `id`; coverage read only `Id`, so a document
+  whose payload object used one of the other two spellings was reported
+  `uncovered` by the very signature that digests it, and the dossier's verdict
+  was capped at `indeterminate`. `schema_version` stays `1`.
+- An OCSP response can no longer make `verify` do unbounded work. The `certs`
+  field of a `BasicOCSPResponse` is attacker-supplied and was read in full, and
+  every certificate in it naming the responder drove a signature verification
+  and, under the trusted-responder model, a whole certification-path search.
+  At most `max_certificates` certificates are now read from a response, the
+  list is deduplicated by DER, and the path search runs at most once per
+  distinct responder public key. No verdict changes: the same responses are
+  authorised by the same models, and `schema_version` stays `1`.
+- A certification path may now end at any trusted-list service digital
+  identity, not only at a self-signed one. In a real national list the CA/QC
+  identities are the *issuing* CAs: the Hungarian list records NetLock's
+  qualified issuing CAs as CA/QC services with `undersupervision` from 2003 and
+  `granted` from 2016-06-30, and records the root that signed them only as a
+  QTST service granted from 2018. A path had to climb past the issuing CA to
+  the self-signed root and was then judged by that timestamping entry, so a
+  2014 signature under a plainly listed qualified CA was refused with
+  `trust_list_service_not_granted`. Following ETSI TS 119 615, the nearest
+  listed certificate along a chain is now the trust anchor for that path,
+  self-signed or not, when its service was granted at the validation time —
+  nothing above it is validated, it is the chain's last entry with
+  `trust_anchor_origin: "trust_list"`, and `qualified` derives from that
+  service as before. When the nearest one's service was not granted then, the
+  search still climbs upward and refuses only if no listed certificate and no
+  `--trust-store` anchor above it will end the path. `--trust-store` anchors
+  and self-signed list entries are unchanged, no field names change, and
+  `schema_version` stays `1`.
+- Text a dossier chose no longer reaches a terminal or the JSON envelope
+  unfiltered. The dossier title, document titles, MIME type halves, the
+  declared extension and character set, object references, transform names and
+  signature ids were printed and serialised exactly as the input wrote them, so
+  a title of `OK<U+202E>txt.exe` displayed as `OKexe.txt` in a `list` and
+  `inspect --json` carried the override through to whatever read it, and a
+  `subtype` — which nothing in the format bounds — printed in full at any
+  length. The C0 and C1 controls were never reachable, because the bounded XML
+  parser refuses them; the Unicode `Cf` class and length were. Every command
+  that reads a dossier now runs one pass over its finished `data` value, and
+  the human summary is rendered from that same value, so both channels are
+  covered by the same filter: `Cc` and `Cf` characters are dropped, titles are
+  bounded to 256 characters and every other dossier-derived value to 128, each
+  cut short value ending in `...` inside its cap. Warnings and errors go
+  through the filter too, and `verify` reports a certificate's subject and
+  issuer common names the same way. Field names and types are unchanged,
+  `schema_version` stays `1`, and no golden file changed: no committed fixture
+  carries such a character or exceeds a bound. An extracted file's `path` is
+  deliberately untouched — the extraction name rules already refuse a control,
+  invisible or formatting character in a title and bound the result, and the
+  envelope has to keep naming the file that was written.
+- `sign` refuses, with `document_already_signed`, to write a signature into an
+  element an existing signature already covers. Only a `URI=""` reference and
+  dossier-level cover were detected, so an existing signature whose reference
+  resolved to an ancestor-or-self of the insertion point, such as an
+  `es:Document` carrying an `Id` of its own referenced by `URI="#doc0"`, was
+  broken by a run that reported success. Every existing `ds:Reference` is now
+  resolved in the same-document `#id` form, for both scopes, and a reference
+  this tool cannot resolve counts as covering.
+- `sign` can add a second signature to a document it has already signed. Every
+  identifier was derived from the document index, so the second run collided
+  with its own first signature and reported `sign_failed` (exit 5) while the
+  documentation said co-signing was supported. A base identifier already in
+  the dossier is now disambiguated (`sig-doc0-2`, `signed-props-sig-doc0-2`,
+  and the rest), and the first signature is left exactly as it was. See
+  [Signing a dossier that is already signed](docs/architecture.md#signing-a-dossier-that-is-already-signed).
+- `create --zip` names the ZIP member with the trimmed NFC title it writes to
+  `es:Title`, not with the raw title. A decomposed or padded spelling put one
+  string in the archive and another in the profile, and `extract` names the
+  file it writes from the archive member.
+- `sign --tsa` treats a negative RFC 3161 `PKIStatus` as a refusal. The
+  comparison was `status > 1`, so a negative status read as granted and
+  whatever the answer carried was embedded.
+- A signature's mandated `es:DocumentProfile` reference is resolved in the
+  dossier's own namespace. The lookup matched on the local name alone, so a
+  `DocumentProfile` from a foreign namespace, placed first, decided what the
+  reference pointed at.
+- A named pipe given where a regular file is expected is refused instead of
+  waited on. The bounded reader opened the path and only then asked whether it
+  was a regular file, and opening a FIFO for reading blocks inside `open(2)`
+  until somebody opens the writing end — which is whoever laid the pipe, not
+  this tool — so `inspect /path/to/fifo`, or a `--decrypt-key` pointing at one,
+  parked the process indefinitely before the check that would have refused it
+  could run. On Unix the open now passes `O_NONBLOCK` and the flag is cleared
+  on the descriptor once `fstat` has established it is a regular file; the
+  refusal is the `io_error` (exit 3) it always should have been. Windows keeps
+  the order it had.
+- `extract` no longer abandons a whole dossier over one crafted title. Output
+  name deduplication produced exactly one candidate, `stem-<document index>`,
+  so a dossier holding a repeated title plus a document titled precisely the
+  name that deduplication would reach for raised `output_name_collision` and
+  wrote nothing at all — every innocent document in the dossier included.
+  The candidates now count upwards, `stem-<index>-2`, `-3` and on, up to 64
+  per name; `output_name_collision` is kept for the case where all 64 are
+  taken. The first candidate, and so every name a dossier that does not
+  collide on purpose produces, is unchanged.
+- The `--online` destination policy refuses seven more address ranges, each of
+  which reaches somewhere no certificate legitimately publishes: carrier-grade
+  NAT (`100.64.0.0/10`), IETF protocol assignments (`192.0.0.0/24`),
+  benchmarking (`198.18.0.0/15`), the deprecated IPv6 site-local prefix
+  (`fec0::/10`), and the three prefixes that carry an IPv4 destination inside
+  an IPv6 address — 6to4 (`2002::/16`), Teredo (`2001::/32`) and the
+  well-known NAT64 prefix (`64:ff9b::/96`), which were a way of writing a
+  private IPv4 destination the IPv4 rules never saw. The IPv4-compatible form
+  `::a.b.c.d` is now judged by the address it carries, as the IPv4-mapped
+  `::ffff:a.b.c.d` form already was, so `::169.254.169.254` is refused as the
+  metadata address it is. `--online-allow-private` waives the new rules
+  exactly as it waives the old ones.
+- `extract` compares output names with a real case fold. The key was NFC plus
+  `to_lowercase`, which is not case folding: it leaves U+017F (`ſ`, long s)
+  and U+00DF (`ß`, sharp s) exactly as written, so `ſ.txt` and `s.txt`, or
+  `straße.txt` and `STRASSE.txt`, compared as two distinct names — while
+  NTFS, which upper-cases to compare, maps each pair onto one file, and the
+  second write would have overwritten the first. The key is now NFC, the full
+  uppercase mapping, then the full lowercase mapping, which folds both. No new
+  dependency: the round trip through uppercase is what expands `ſ` to `s` and
+  `ß` to `ss`. It errs towards more names comparing equal than any one
+  filesystem merges, which costs a deduplicated name and a warning rather than
+  a document.
+- A `--trust-store` and a `--revocation-store` are bounded in total, not only
+  file by file. Each file had a cap (4 MiB and 16 MiB) and each directory a
+  file count (1024 and 4096), which still let a store of a thousand
+  just-under-cap files ask the loader for gigabytes before it decided anything.
+  The aggregate caps are 64 MiB for a trust store and 256 MiB for a revocation
+  store, counted across both of a store's directories so splitting a store does
+  not double them, and refused with the store's own code
+  (`trust_store_invalid`, `revocation_store_invalid`, exit 3). Every file is
+  now read before any of it is parsed or classified, so a store over the total
+  is refused for its size rather than for whatever the file that crossed the
+  line happened to contain.
+- `extract` reports a `<file>.d` subdirectory whose name was taken between the
+  plan's existence check and the write as `output_exists` (exit 5), the answer
+  an existing output file already got. `mkdir`'s `EEXIST` was mapped to
+  `io_error` (exit 3), which told an operator their filesystem had failed when
+  in fact the no-clobber rule had worked.
+- `scripts/coverage_gate.py` no longer lets a crate or a patch line leave the
+  gate quietly. A crate under `crates/` that produced no coverage records
+  vanished from the totals altogether, and `pct(covered, 0)` scored 100, so an
+  unmeasured crate read as a fully covered one; both are failures now. The
+  `-U0` diff behind patch coverage is parsed with a state machine keyed on
+  `diff --git` and `@@` rather than by line prefix, so an added source line
+  beginning with `++` is no longer read as a `+++ b/path` file header — which
+  silently repointed or dropped every line after it — and the diff is taken
+  with explicit `--src-prefix`/`--dst-prefix`, so a contributor's
+  `diff.noprefix` cannot change what the parser strips.
+  `--self-test` runs the parser's unit tests, and CI runs it before the
+  measurement it guards.
 - `sign` no longer rewrites the dossier's own text when it fills a signature
   in. The digest, signature-value and timestamp placeholders were substituted
   over the whole document, so a document whose title or payload read like one
@@ -59,6 +272,87 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
 
 ### Security
 
+- `sign` no longer lets the dossier being signed choose what the operator's
+  key signs. The `OBJREF` and `Id` attributes a reference points at, the
+  declared media type an `xades:DataObjectFormat` carries and the root
+  namespace the signature profile object declares were interpolated into the
+  signature XML unescaped, and every digest is computed after the values are
+  already in the document, so a hostile dossier could write an
+  attacker-supplied `ds:Reference` with no transforms or a forged
+  `xades:CommitmentTypeIndication` into what was signed, and `verify` would
+  then accept all of it. Both halves are fixed: an `Id` or `OBJREF` that is
+  not an XML NCName, a media type outside the characters a media type may
+  use, and a namespace URI holding a markup delimiter, a quote character or a
+  control character are all refused with `document_not_signable`; and every
+  remaining interpolation goes through the writer's attribute and text
+  escapers, so no dossier-derived string reaches signature XML unescaped.
+- `verify` now selects the XAdES qualifying properties a signature is
+  evaluated against by what that signature's own references cover, rather than
+  by taking the first `xades:QualifyingProperties` (stage C) and the first
+  `xades:SignedProperties` (the reference-scope check) under the signature. A
+  `ds:Object` is open content the XMLDSig schema allows any number of, and no
+  reference has to cover one, so a single inserted decoy object changed the
+  verdict without touching a signed byte: an empty
+  `<ds:Object><xades:QualifyingProperties/></ds:Object>` prepended to a
+  certificate-substitution dossier turned `xades_signing_certificate_mismatch`
+  (`failed`, so `invalid`) into `xades_signing_certificate_absent` (`unknown`,
+  so `indeterminate`), and a decoy carrying an unsigned
+  `xades:SignedProperties` turned a sound signature into
+  `reference_scope_incomplete` and its document into `documents_uncovered`.
+  Every `SignedProperties` a signature owns now satisfies the scope
+  requirement, stage C reads the covered one, a signature covering none of its
+  own reports `xades_signing_certificate_absent` as before, and a second
+  `xades:QualifyingProperties` is reported once as the new
+  `xades_extra_qualifying_properties` (`info`) and otherwise ignored. Real
+  XAdES signatures reference their `SignedProperties`, so the rule is a no-op
+  for conformant material; `schema_version` stays `1`.
+- Revocation no longer stops at the first source that gives a definite answer.
+  The signature's own `RevocationValues` were read first, so a genuine but
+  older embedded OCSP `good` still inside its own `nextUpdate` hid the newer
+  CRL in `--revocation-store` that revoked the same certificate: the run
+  reported `revocation_ok`, a chain entry sourced `embedded_ocsp`, and a
+  `valid` verdict. Every source is now asked about every certificate and the
+  answers are weighed: a revocation from any source beats `good` from any
+  other, and among answers that say the same thing the one speaking for the
+  later `producedAt` or `thisUpdate` is the one reported. The freshness rules
+  and the revocation-after-validation-time rule are unchanged. A new
+  `revocation_sources_disagree` check (`info`, non-blocking) reports a
+  disagreement and names both sides, and the same sentence is added to that
+  certificate's `chain[].revocation.detail`. Additive; `schema_version` stays
+  `1`. See [Which answer wins](docs/architecture.md#which-answer-wins).
+- A trusted-list anchor no longer ends a certification path at a time its
+  service was not granted. The anchor set was built from every configured
+  anchor with no status filter and a path ended at any of them, so a
+  `withdrawn`, `supervisionceased` or `deprecated*` CA/QC or TSA/QTST service
+  still produced `cert_path_ok` at a validation time after the withdrawal;
+  `granted_at` reached only the informational `qualified` flag, and the
+  `trust_list_service_not_granted` code was declared but never emitted. A
+  completed path now consults the anchor's `ServiceRecord` — CA/QC for a
+  signing or OCSP-signing path, TSA/QTST for a timestamping one — and a
+  non-granted anchor yields `trust_list_service_not_granted` (`unknown`,
+  blocking) instead of `cert_path_ok`, after the other candidate paths have
+  been tried. It is `unknown` rather than `failed`, because missing trust is
+  not evidence against a signature: the verdict is capped at `indeterminate`
+  and is never `invalid` for this reason. A `--trust-store` anchor is
+  unaffected, and where a list records a certificate only under a service of
+  another kind it is treated as a trust-store anchor would be, provided some
+  service it does record was granted then. See [A path may only end at a
+  service that was granted
+  then](docs/architecture.md#a-path-may-only-end-at-a-service-that-was-granted-then).
+- `sign` no longer lets the dossier being signed choose what the operator's
+  key signs. The `OBJREF` and `Id` attributes a reference points at, the
+  declared media type an `xades:DataObjectFormat` carries and the root
+  namespace the signature profile object declares were interpolated into the
+  signature XML unescaped, and every digest is computed after the values are
+  already in the document, so a hostile dossier could write an
+  attacker-supplied `ds:Reference` with no transforms or a forged
+  `xades:CommitmentTypeIndication` into what was signed, and `verify` would
+  then accept all of it. Both halves are fixed: an `Id` or `OBJREF` that is
+  not an XML NCName, a media type outside the characters a media type may
+  use, and a namespace URI holding a markup delimiter, a quote character or a
+  control character are all refused with `document_not_signable`; and every
+  remaining interpolation goes through the writer's attribute and text
+  escapers, so no dossier-derived string reaches signature XML unescaped.
 - The release workflow no longer pipes the cargo-dist installer script into a
   shell. `.github/workflows/release.yml` runs with `contents: write`, so a
   tampered installer asset would have run with a token that can rewrite the
@@ -1667,8 +1961,8 @@ This release performs no cryptographic verification of any kind.
 
 [0.1.0]: https://github.com/watt-mind/openSzigno/releases/tag/v0.1.0
 [0.2.0]: https://github.com/watt-mind/openSzigno/compare/v0.1.0...v0.2.0
-[Unreleased]: https://github.com/watt-mind/openSzigno/compare/v0.7.1...develop
-[0.7.1]: https://github.com/watt-mind/openSzigno/compare/v0.7.0...v0.7.1
+[Unreleased]: https://github.com/watt-mind/openSzigno/compare/v0.8.0...develop
+[0.8.0]: https://github.com/watt-mind/openSzigno/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/watt-mind/openSzigno/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/watt-mind/openSzigno/compare/v0.5.1...v0.6.0
 [0.5.1]: https://github.com/watt-mind/openSzigno/compare/v0.5.0...v0.5.1

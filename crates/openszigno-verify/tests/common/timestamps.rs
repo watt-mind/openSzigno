@@ -18,7 +18,12 @@ use super::pki::SigningKey;
 /// not itself produce the verification logic for, and it must never move into
 /// a shipped crate.
 pub fn build_timestamp_token(spec: &TimestampSpec, imprint_input: &[u8]) -> Vec<u8> {
-    build_timestamp_token_for_imprint(spec, &Sha256::digest(imprint_input))
+    let imprint = if spec.sha1_imprint {
+        sha1::Sha1::digest(imprint_input).to_vec()
+    } else {
+        Sha256::digest(imprint_input).to_vec()
+    };
+    build_timestamp_token_for_imprint(spec, &imprint)
 }
 
 /// Build one RFC 3161 token over an imprint that is already a digest.
@@ -45,6 +50,20 @@ pub fn build_timestamp_token_for_imprint(spec: &TimestampSpec, imprint: &[u8]) -
         oid: oid("2.16.840.1.101.3.4.2.1"),
         parameters: None,
     };
+    let sha1_algorithm = AlgorithmIdentifierOwned {
+        oid: oid("1.3.14.3.2.26"),
+        parameters: None,
+    };
+    let imprint_algorithm = if spec.sha1_imprint {
+        sha1_algorithm.clone()
+    } else {
+        sha256_algorithm.clone()
+    };
+    let signer_algorithm = if spec.sha1_signer_digest {
+        sha1_algorithm
+    } else {
+        sha256_algorithm.clone()
+    };
 
     let mut imprint = imprint.to_vec();
     if spec.wrong_imprint {
@@ -55,7 +74,7 @@ pub fn build_timestamp_token_for_imprint(spec: &TimestampSpec, imprint: &[u8]) -
         version: 1,
         policy: oid("1.3.6.1.4.1.99999.1"),
         message_imprint: MessageImprint {
-            hash_algorithm: sha256_algorithm.clone(),
+            hash_algorithm: imprint_algorithm,
             hashed_message: OctetString::new(imprint).expect("the imprint encodes"),
         },
         serial_number: x509_cert::serial_number::SerialNumber::new(&[0x2a])
@@ -89,7 +108,12 @@ pub fn build_timestamp_token_for_imprint(spec: &TimestampSpec, imprint: &[u8]) -
         attribute(
             "1.2.840.113549.1.9.4",
             Any::encode_from(
-                &OctetString::new(Sha256::digest(&econtent).to_vec()).expect("encodes"),
+                &OctetString::new(if spec.sha1_signer_digest {
+                    sha1::Sha1::digest(&econtent).to_vec()
+                } else {
+                    Sha256::digest(&econtent).to_vec()
+                })
+                .expect("encodes"),
             )
             .expect("the message digest encodes"),
         ),
@@ -100,9 +124,18 @@ pub fn build_timestamp_token_for_imprint(spec: &TimestampSpec, imprint: &[u8]) -
     let signature = match &spec.tsa_key.signing {
         SigningKey::Rsa(private) => {
             use rsa::signature::{SignatureEncoding as _, Signer as _};
-            rsa::pkcs1v15::SigningKey::<Sha256>::new((**private).clone())
-                .sign(&message)
-                .to_vec()
+            // The `signature_algorithm` below is a bare `rsaEncryption`, which
+            // means "PKCS#1 v1.5 with the digest the SignerInfo named", so the
+            // two have to agree.
+            if spec.sha1_signer_digest {
+                rsa::pkcs1v15::SigningKey::<sha1::Sha1>::new((**private).clone())
+                    .sign(&message)
+                    .to_vec()
+            } else {
+                rsa::pkcs1v15::SigningKey::<Sha256>::new((**private).clone())
+                    .sign(&message)
+                    .to_vec()
+            }
         }
         _ => panic!("the synthetic TSA signs with RSA"),
     };
@@ -115,7 +148,7 @@ pub fn build_timestamp_token_for_imprint(spec: &TimestampSpec, imprint: &[u8]) -
     }
     let signed_data = SignedData {
         version: CmsVersion::V3,
-        digest_algorithms: SetOfVec::try_from(vec![sha256_algorithm.clone()])
+        digest_algorithms: SetOfVec::try_from(vec![signer_algorithm.clone()])
             .expect("one digest algorithm"),
         encap_content_info: EncapsulatedContentInfo {
             econtent_type: oid("1.2.840.113549.1.9.16.1.4"),
@@ -132,7 +165,7 @@ pub fn build_timestamp_token_for_imprint(spec: &TimestampSpec, imprint: &[u8]) -
                     issuer: tsa.tbs_certificate.issuer.clone(),
                     serial_number: tsa.tbs_certificate.serial_number.clone(),
                 }),
-                digest_alg: sha256_algorithm,
+                digest_alg: signer_algorithm,
                 signed_attrs: Some(signed_attrs),
                 signature_algorithm: AlgorithmIdentifierOwned {
                     oid: oid("1.2.840.113549.1.1.1"),

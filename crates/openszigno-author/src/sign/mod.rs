@@ -23,6 +23,7 @@
 //! | `dsig` | `ds:SignedInfo`, its references, and the canonicalized octets each one digests. |
 //! | `xades` | `xades:QualifyingProperties`: the signed properties, and the evidence in the unsigned half. |
 //! | `signer` | The [`Signer`] trait and [`SoftwareSigner`], the local-key implementation. |
+//! | `names` | What a dossier may contribute to signature XML: the checks, and the escapers every interpolation goes through. |
 //! | `csc` | Cloud Signature Consortium API v2 request bodies and response readers, for a hash-only remote backend. Pure: the sockets are the CLI's. |
 //! | `tsa` | RFC 3161 requests and responses, as bytes in and bytes out. |
 //!
@@ -53,6 +54,7 @@
 pub mod csc;
 mod dsig;
 mod error;
+mod names;
 mod signer;
 mod tsa;
 mod xades;
@@ -310,6 +312,29 @@ fn refuse_unsafe_placement(lookup: &dsig::Lookup<'_>, scope: SignScope) -> Resul
     Ok(())
 }
 
+/// Refuse to write into an element an existing signature already covers.
+///
+/// [`refuse_unsafe_placement`] catches the two cases that can be judged
+/// without knowing where the element goes. This one needs the insertion
+/// point, so it runs once that is resolved: an existing `ds:Reference` whose
+/// target is the insertion point itself or an ancestor of it would stop
+/// matching the moment anything is added there.
+fn refuse_broken_cover(
+    lookup: &dsig::Lookup<'_>,
+    insertion: openszigno_core::roxmltree::Node<'_, '_>,
+) -> Result<(), SignError> {
+    if lookup.covers_ancestor_or_self(insertion) {
+        return Err(SignError::new(
+            SignErrorCode::DocumentAlreadySigned,
+            "this dossier cannot have a signature added to it: an existing \
+             signature references the element the new signature would be written \
+             into, or something containing it, so adding it would break that \
+             signature",
+        ));
+    }
+    Ok(())
+}
+
 /// Resolve every signature this run writes: its identifiers, its references,
 /// and where the element goes.
 fn plan_signatures(
@@ -321,11 +346,17 @@ fn plan_signatures(
     timestamped: bool,
 ) -> Result<Vec<Plan>, SignError> {
     let namespace = dossier.namespace.as_str();
+    // Everything below this line that ends up in signature XML came out of
+    // the dossier, and the dossier is untrusted input.
+    names::check_namespace(namespace)?;
     let mut plans = Vec::new();
     match request.scope {
         SignScope::Dossier => {
             let profile = lookup.dossier_child_id(namespace, "DossierProfile")?;
             let documents = lookup.dossier_child_id(namespace, "Documents")?;
+            names::check_id("Id", &profile)?;
+            names::check_id("Id", &documents)?;
+            refuse_broken_cover(lookup, lookup.root())?;
             plans.push(build_plan(
                 lookup,
                 PlanSpec {
@@ -347,6 +378,9 @@ fn plan_signatures(
         SignScope::Document => {
             for document in targets {
                 let id = format!("sig-doc{}", document.index);
+                names::check_id("OBJREF", &document.object_ref)?;
+                let mime_type = document.mime_type.essence();
+                names::check_mime_essence(&mime_type)?;
                 let node = lookup.by_id(&document.object_ref).ok_or_else(|| {
                     SignError::new(
                         SignErrorCode::DocumentNotSignable,
@@ -365,7 +399,7 @@ fn plan_signatures(
                             format!("document {} has no es:Document element", document.index),
                         )
                     })?;
-                let profile = lookup.document_profile_id(container).ok_or_else(|| {
+                let profile = lookup.document_profile_id(container, namespace).ok_or_else(|| {
                     SignError::new(
                         SignErrorCode::DocumentNotSignable,
                         format!(
@@ -374,6 +408,8 @@ fn plan_signatures(
                         ),
                     )
                 })?;
+                names::check_id("Id", &profile)?;
+                refuse_broken_cover(lookup, container)?;
                 plans.push(build_plan(
                     lookup,
                     PlanSpec {
@@ -382,11 +418,7 @@ fn plan_signatures(
                         document_index: Some(document.index),
                         insert_at: lookup.insert_offset(container)?,
                         covered: vec![
-                            (
-                                "object",
-                                document.object_ref.clone(),
-                                Some(document.mime_type.essence()),
-                            ),
+                            ("object", document.object_ref.clone(), Some(mime_type)),
                             ("document-profile", profile, None),
                         ],
                         timestamped,
@@ -429,21 +461,11 @@ fn build_plan(
         covered,
         timestamped,
     } = spec;
+    let mut names: Vec<&str> = covered.iter().map(|(name, _, _)| *name).collect();
+    names.extend(["signature-profile", "signed-properties"]);
+    let id = names::allocate_id(lookup, &id, &names)?;
     let signed_properties_id = format!("signed-props-{id}");
     let profile_object_id = xades::signature_profile_object_id(&id);
-    for taken in [&signed_properties_id, &profile_object_id] {
-        if lookup.by_id(taken).is_some() {
-            return Err(SignError::failed(
-                "an identifier this signature needs is already used in the dossier",
-            ));
-        }
-    }
-    if lookup.by_id(&id).is_some() {
-        return Err(SignError::new(
-            SignErrorCode::DocumentAlreadySigned,
-            "a signature with the identifier this run would write already exists",
-        ));
-    }
 
     let mut references = Vec::new();
     for (name, target, mime_type) in covered {
@@ -463,8 +485,9 @@ fn build_plan(
     ));
 
     let mut element = format!(
-        "<ds:Signature xmlns:ds=\"{}\" Id=\"{id}\">",
-        dsig::XMLDSIG_NS
+        "<ds:Signature xmlns:ds=\"{}\" Id=\"{}\">",
+        dsig::XMLDSIG_NS,
+        names::attribute(&id)
     );
     element.push_str(&dsig::render_signed_info(
         &id,

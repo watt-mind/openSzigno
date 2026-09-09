@@ -22,6 +22,7 @@ use openszigno_verify::{C14nAlgorithm, C14nBackend, NodeSet, RoxmltreeC14n};
 use sha2::{Digest as _, Sha256};
 
 use super::error::SignError;
+use super::names::attribute;
 use super::signer::SignatureAlgorithm;
 
 /// Exclusive XML Canonicalization 1.0, without comments.
@@ -104,13 +105,17 @@ pub(crate) fn render_signed_info(
             .reference_type
             .map(|value| format!(" Type=\"{value}\""))
             .unwrap_or_default();
+        // Every interpolated value is escaped, the reference URI included:
+        // it is built from an `Id` the dossier chose, and a value that
+        // reached the attribute unescaped would let the dossier write the
+        // reference set rather than describe it.
         out.push_str(&format!(
             "<ds:Reference Id=\"{}\" URI=\"{}\"{declared}>\
 <ds:Transforms><ds:Transform Algorithm=\"{C14N_EXCLUSIVE}\"/></ds:Transforms>\
 <ds:DigestMethod Algorithm=\"{SHA256_URI}\"/>\
 <ds:DigestValue>{}</ds:DigestValue></ds:Reference>",
-            reference.id,
-            reference.uri,
+            attribute(&reference.id),
+            attribute(&reference.uri),
             digest_placeholder(&reference.id)
         ));
     }
@@ -245,10 +250,22 @@ impl<'input> Lookup<'input> {
     }
 
     /// The `Id` of the `es:DocumentProfile` inside one `es:Document`.
-    pub(crate) fn document_profile_id(&self, container: Node<'_, 'input>) -> Option<String> {
+    ///
+    /// The namespace is required, exactly as it is in [`Self::dossier_child_id`]:
+    /// matching on the local name alone let a `DocumentProfile` from a foreign
+    /// namespace, placed first, decide what the signature referenced.
+    pub(crate) fn document_profile_id(
+        &self,
+        container: Node<'_, 'input>,
+        namespace: &str,
+    ) -> Option<String> {
         container
             .children()
-            .find(|node| node.is_element() && node.tag_name().name() == "DocumentProfile")
+            .find(|node| {
+                node.is_element()
+                    && node.tag_name().name() == "DocumentProfile"
+                    && node.tag_name().namespace() == Some(namespace)
+            })
             .and_then(|node| node.attribute("Id"))
             .map(str::to_owned)
     }
@@ -266,6 +283,39 @@ impl<'input> Lookup<'input> {
                     && node.tag_name().namespace() == Some(XMLDSIG_NS)
             })
             .any(|node| node.attribute("URI").unwrap_or_default().is_empty())
+    }
+
+    /// Whether an existing signature already covers the element a new
+    /// signature would be written into, or anything containing it.
+    ///
+    /// Adding a `ds:Signature` changes the canonical form of the element it
+    /// goes into and of every ancestor of that element, so any existing
+    /// reference resolving to one of them would stop matching. Only the
+    /// same-document `#id` form is resolved; a reference this module cannot
+    /// resolve may name anything, so it is treated as covering rather than
+    /// assumed harmless.
+    pub(crate) fn covers_ancestor_or_self(&self, insertion: Node<'_, 'input>) -> bool {
+        let chain: Vec<openszigno_core::roxmltree::NodeId> =
+            insertion.ancestors().map(|node| node.id()).collect();
+        self.signatures().into_iter().any(|signature| {
+            signature
+                .descendants()
+                .filter(|node| {
+                    node.is_element()
+                        && node.tag_name().name() == "Reference"
+                        && node.tag_name().namespace() == Some(XMLDSIG_NS)
+                })
+                .any(|reference| {
+                    match reference
+                        .attribute("URI")
+                        .and_then(|uri| uri.strip_prefix('#'))
+                        .and_then(|id| self.by_id(id))
+                    {
+                        Some(target) => chain.contains(&target.id()),
+                        None => true,
+                    }
+                })
+        })
     }
 
     /// Whether something at the dossier level already covers `es:Documents`.
@@ -409,6 +459,34 @@ mod tests {
         assert!(text.contains("text"));
         assert!(!text.contains("gone"));
         assert_eq!(digest_value(b"").len(), 44);
+    }
+
+    /// A `DocumentProfile` from another namespace, placed first, is not the
+    /// one a signature references. Matching on the local name alone let a
+    /// dossier point the mandated reference wherever it liked.
+    #[test]
+    fn a_document_profile_from_another_namespace_is_never_the_one_referenced() {
+        let working = Working::parse(
+            "<Dossier xmlns=\"urn:es\" xmlns:x=\"urn:other\"><Document>\
+<x:DocumentProfile Id=\"foreign\"/><DocumentProfile Id=\"real\"/>\
+</Document></Dossier>",
+        )
+        .expect("this parses");
+        working
+            .with_tree(|lookup| {
+                let container = lookup
+                    .root()
+                    .children()
+                    .find(Node::is_element)
+                    .expect("the document element is there");
+                assert_eq!(
+                    lookup.document_profile_id(container, "urn:es"),
+                    Some("real".to_owned())
+                );
+                assert_eq!(lookup.document_profile_id(container, "urn:absent"), None);
+                Ok(())
+            })
+            .expect("the lookup runs");
     }
 
     #[test]

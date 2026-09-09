@@ -1,0 +1,1 @@
+warning [encrypted_document_unsupported]: document 0 is encrypted; only `extract --decrypt-key` can read it

@@ -113,7 +113,10 @@ fn unwrap_response(response: &[u8]) -> Result<Vec<u8>, SignError> {
 
 fn granted_token(response: &TimeStampResp) -> Result<Vec<u8>, SignError> {
     let PkiStatusInfo { status, .. } = response.status;
-    if status > 1 {
+    // `granted` is 0 and `grantedWithMods` is 1; every other value, a
+    // negative one included, is a refusal. `status > 1` read a negative
+    // PKIStatus as granted and went on to embed whatever the answer carried.
+    if !(0..=1).contains(&status) {
         return Err(tsa_failed(format!(
             "the timestamp authority refused the request (PKIStatus {status})"
         )));
@@ -192,6 +195,26 @@ mod tests {
         let error = timestamp_token(&response, b"octets").expect_err("the request was refused");
         assert_eq!(error.code(), SignErrorCode::TsaFailed);
         assert!(error.message().contains("PKIStatus 2"));
+    }
+
+    /// RFC 3161 numbers `PKIStatus` from zero, so a negative value is not a
+    /// status at all. It used to compare below the refusal threshold and be
+    /// read as granted.
+    #[test]
+    fn a_negative_status_is_a_refusal_too() {
+        let response = TimeStampResp {
+            status: PkiStatusInfo {
+                status: -1,
+                status_string: None,
+                fail_info: None,
+            },
+            time_stamp_token: None,
+        }
+        .to_der()
+        .expect("the response encodes");
+        let error = timestamp_token(&response, b"octets").expect_err("this is no grant");
+        assert_eq!(error.code(), SignErrorCode::TsaFailed);
+        assert!(error.message().contains("PKIStatus -1"));
     }
 
     #[test]

@@ -133,11 +133,19 @@ cargo llvm-cov --workspace --lcov --output-path lcov.info
 python3 scripts/coverage_gate.py --lcov lcov.info --base origin/develop
 ```
 
-It reads `lcov.info` and checks three things: every crate (`crates/<name>`)
-is at or above 90% line coverage; lines added or modified since `--base`
+It reads `lcov.info` and checks four things: every crate directory under
+`crates/` appears in the report at all; every crate (`crates/<name>`) is at
+or above 90% line coverage, where a crate with no instrumented lines scores
+0 rather than 100; lines added or modified since `--base`
 under `crates/*/src/` are at or above 80% covered, when the change touches
 at least 20 instrumentable lines; and no crate has dropped more than 1.0
-point below the value recorded for it in `scripts/coverage-floors.txt`. The
+point below the value recorded for it in `scripts/coverage-floors.txt`.
+
+`python3 scripts/coverage_gate.py --self-test` runs the script's own unit
+tests for the `-U0` diff parser that patch coverage rests on — the part
+whose edge cases (an added line beginning with `++`, a removed one
+beginning with `--`, a hunk header without counts) a coverage report cannot
+show. The
 workspace's `--fail-under-lines 85` check in CI stays as a coarse backstop
 after this gate. See
 [CONTRIBUTING.md](../CONTRIBUTING.md#coverage-quality-gate) for the ratchet
@@ -251,8 +259,10 @@ an OCSP response, a timestamp token, or a trusted list.
 | --- | --- |
 | `parse_dossier` | `openszigno_core::parse`, with both `Limits::default()` and a deliberately tiny `Limits`, so early limit-check bailouts get their own coverage. |
 | `sniff` | `openszigno_core::sniff`. |
-| `decode_payload` | The `base64` and `zip -> base64` document decode chains, through a synthetic minimal dossier wrapping the fuzzed bytes as one document's payload. |
+| `decode_payload` | The document decode chains — `base64`, `zip -> base64`, and the two `encrypt` chains with no decryption key — through a synthetic minimal dossier wrapping the fuzzed bytes as one document's payload, driven through both `decode_document` and `decode_document_with`. Asserts that a decode without a key never reports a decryption. |
 | `decrypt_cms` | The CMS `encrypt` transform decrypt path, through `decode_document_with` with a synthetic RSA recipient key and self-signed certificate generated at run time from a fixed seed (never committed; see the doc comment on `fuzz/fuzz_targets/decrypt_cms.rs`). |
+| `extract_plan` | The CLI's extraction planner: `extract/names.rs` and `extract/plan.rs`, driven with arbitrary titles and declared extensions through a synthetic dossier. Asserts that no planned name is a path, that no two names in one directory collide, and that planning the same dossier twice yields the same names. Both modules are included by `#[path]` over a small `response` stand-in, because the `openszigno` binary crate has no library target to depend on. |
+| `destination_url` | The `--online` destination policy, `online/destination.rs`, likewise included by `#[path]`. Asserts that `permitted` never hands back an address its own `verdict` refuses, that a non-HTTP scheme and userinfo are refused whatever `--online-allow-private` says, and that a relative `Location` resolved by `resolve` stays on the base URL's authority. No input reaches the network: `permitted` is called only for a host the policy answers without a lookup. |
 | `c14n` | `openszigno_verify::c14n`: parses arbitrary bytes as XML, then canonicalizes the whole document with every implemented `C14nAlgorithm` variant (inclusive/exclusive, with/without comments). |
 | `crl_parse` | CRL parsing via `openszigno_verify::revocation::classify`, the function a revocation store loader runs over every file. |
 | `ocsp_parse` | OCSP response parsing via the same `classify` function. |

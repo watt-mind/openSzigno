@@ -7,6 +7,13 @@ two `sign` refusals,
 normalises the two time values that cannot be stable, and compares the result
 against the committed files under `tests/golden/`.
 
+**Both streams are captured.** In human mode every diagnostic goes to stderr,
+so capturing stdout alone pinned an empty file for each failing case and left
+the human wording of every error and warning unpinned — and left the
+"no absolute path ever reaches the output" check looking at the one stream
+the paths were least likely to be on. Each case now writes three files: the
+stdout golden, `<case>.stderr.txt`, and `<case>.exit`.
+
 Subcommands:
 
     check  --bin PATH   run the matrix and diff against the goldens
@@ -90,6 +97,14 @@ def cases(fixture, temp):
         str(temp / "extract" / slug),
         "--json",
     ]
+
+    # `extract --stdout` writes one document's raw payload bytes to stdout and
+    # nothing else, which is a different contract from the JSON envelope and
+    # was pinned nowhere. It is captured for document `#0` of every fixture:
+    # where that document decodes, the golden is its payload; where it does
+    # not, the golden is the refusal on stderr and the exit status. No
+    # `--output` is involved, so no temporary path can reach it at all.
+    yield "extract.stdout", ["extract", rel, "--stdout", "--document", "#0"]
 
     if not is_signed(fixture):
         return
@@ -257,19 +272,53 @@ def run(binary, argv, temp, cwd=REPO):
         cwd=cwd,
         env=env,
         capture_output=True,
-        text=True,
+        # `extract --stdout` writes raw payload bytes, so the decoding is
+        # pinned rather than left to the machine's locale, and a byte that is
+        # not UTF-8 is replaced rather than raising.
+        encoding="utf-8",
+        errors="replace",
         check=False,
     )
     stdout = completed.stdout
-    # No golden may carry a machine-local path. The output directories and
-    # trust stores are the only absolute paths the matrix supplies, so their
-    # root appearing in stdout is a contract bug, not a normalisation gap.
-    if str(temp) in stdout:
-        raise SystemExit(
-            f"contract failure: output of `{' '.join(argv)}` leaks the temporary "
-            f"directory {temp}; the envelope must never carry an absolute path"
-        )
-    return stdout, completed.returncode
+    stderr = completed.stderr
+    # No golden may carry a machine-local path, and that goes for both
+    # streams: the human renderer writes its diagnostics to stderr, which is
+    # exactly where a message that echoed the path it was given would appear.
+    # The output directories and trust stores are the only absolute paths the
+    # matrix supplies, so their root appearing anywhere is a contract bug, not
+    # a normalisation gap.
+    for stream, text in (("stdout", stdout), ("stderr", stderr)):
+        if str(temp) in text:
+            raise SystemExit(
+                f"contract failure: {stream} of `{' '.join(argv)}` leaks the "
+                f"temporary directory {temp}; no message may carry an "
+                "absolute path"
+            )
+    return stdout, stderr, completed.returncode
+
+
+def is_text_case(name):
+    """Whether a case's stdout is text rather than a JSON envelope.
+
+    `--json` is the default in the matrix; the exceptions are the `.human`
+    variants and `extract --stdout`, which writes a document's payload.
+    """
+    return name.endswith(".human") or name.endswith(".stdout")
+
+
+def record(produced, prefix, name, stdout, stderr, status):
+    """Store the three files one case produces."""
+    if is_text_case(name):
+        body, extension = normalise_text(stdout), "txt"
+    else:
+        body, extension = normalise_json(stdout), "json"
+    produced[f"{prefix}/{name}.{extension}"] = body
+    # stderr is masked with the same rule and stored as text whatever the
+    # mode: in `--json` mode it is expected to be empty, and pinning that
+    # empty file is what keeps "JSON mode says nothing on stderr" a contract
+    # rather than a habit.
+    produced[f"{prefix}/{name}.stderr.txt"] = normalise_text(stderr)
+    produced[f"{prefix}/{name}.exit"] = f"{status}\n"
 
 
 def matrix(binary, temp):
@@ -278,22 +327,12 @@ def matrix(binary, temp):
     for fixture in fixtures():
         directory = fixture.relative_to(FIXTURES).with_suffix("").as_posix()
         for name, argv in cases(fixture, temp):
-            stdout, status = run(binary, argv, temp)
-            if name.endswith(".human"):
-                body, extension = normalise_text(stdout), "txt"
-            else:
-                body, extension = normalise_json(stdout), "json"
-            produced[f"{directory}/{name}.{extension}"] = body
-            produced[f"{directory}/{name}.exit"] = f"{status}\n"
+            stdout, stderr, status = run(binary, argv, temp)
+            record(produced, directory, name, stdout, stderr, status)
     for group, generator in (("create", create_cases), ("sign", sign_cases)):
         for name, argv, cwd in generator(temp):
-            stdout, status = run(binary, argv, temp, cwd=cwd)
-            if name.endswith(".human"):
-                body, extension = normalise_text(stdout), "txt"
-            else:
-                body, extension = normalise_json(stdout), "json"
-            produced[f"{group}/{name}.{extension}"] = body
-            produced[f"{group}/{name}.exit"] = f"{status}\n"
+            stdout, stderr, status = run(binary, argv, temp, cwd=cwd)
+            record(produced, group, name, stdout, stderr, status)
     return produced
 
 

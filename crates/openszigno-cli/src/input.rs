@@ -102,6 +102,15 @@ pub(crate) fn read_bounded_file(path: &Path, limit: u64) -> Result<Vec<u8>, Boun
     read_bounded(open_without_following(path)?, limit)
 }
 
+/// Whether a path may be opened through a final symlink.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Links {
+    /// Refuse a final symlink (`O_NOFOLLOW`). Everything but the dossier.
+    Refuse,
+    /// Resolve a final symlink. The dossier the caller named itself.
+    Follow,
+}
+
 /// Read one caller-supplied file the same way, but resolving a symlink on the
 /// path rather than refusing it.
 ///
@@ -113,10 +122,7 @@ pub(crate) fn read_bounded_file_following_links(
     path: &Path,
     limit: u64,
 ) -> Result<Vec<u8>, BoundedReadError> {
-    read_bounded(
-        File::open(path).map_err(|_| BoundedReadError::Inspect)?,
-        limit,
-    )
+    read_bounded(open_following(path)?, limit)
 }
 
 fn read_bounded(mut file: File, limit: u64) -> Result<Vec<u8>, BoundedReadError> {
@@ -124,6 +130,11 @@ fn read_bounded(mut file: File, limit: u64) -> Result<Vec<u8>, BoundedReadError>
     if !metadata.is_file() {
         return Err(BoundedReadError::NotRegular);
     }
+    // The open above is non-blocking on Unix, so that naming a FIFO cannot
+    // park the process before the type check above ever runs. A regular file
+    // is read blocking, which is what `read_to_end` expects, so the flag is
+    // cleared now that the descriptor is known to be one.
+    clear_nonblocking(&file)?;
     let declared = metadata.len();
     if declared > limit {
         return Err(BoundedReadError::TooLarge {
@@ -149,39 +160,82 @@ fn read_bounded(mut file: File, limit: u64) -> Result<Vec<u8>, BoundedReadError>
 /// it before. On Windows the file is opened with
 /// `FILE_FLAG_OPEN_REPARSE_POINT`, which opens the reparse point itself, and
 /// the `fstat` that follows then refuses it for not being a regular file.
-#[cfg(unix)]
 fn open_without_following(path: &Path) -> Result<File, BoundedReadError> {
+    open_for_read(path, Links::Refuse)
+}
+
+/// The same, resolving a final symlink rather than refusing it.
+fn open_following(path: &Path) -> Result<File, BoundedReadError> {
+    open_for_read(path, Links::Follow)
+}
+
+/// Open a caller-named path for reading, non-blocking.
+///
+/// `O_NONBLOCK` is the point of this function on Unix. Without it, naming a
+/// FIFO parks the process inside `open(2)` until somebody opens the other end
+/// — which the caller controls and this tool does not — so the "is it a
+/// regular file?" check below could never run, and a `--decrypt-key` or an
+/// input path pointed at a FIFO would hang instead of being refused. With it
+/// the open returns at once, `fstat` refuses the FIFO as not a regular file,
+/// and [`clear_nonblocking`] puts the descriptor back into blocking mode
+/// before a single byte is read. On a regular file the flag changes nothing.
+#[cfg(unix)]
+fn open_for_read(path: &Path, links: Links) -> Result<File, BoundedReadError> {
     use rustix::fs::{Mode, OFlags};
     use rustix::io::Errno;
 
-    match rustix::fs::open(
-        path,
-        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-        Mode::empty(),
-    ) {
+    let mut flags = OFlags::RDONLY | OFlags::NONBLOCK | OFlags::CLOEXEC;
+    if links == Links::Refuse {
+        flags |= OFlags::NOFOLLOW;
+    }
+    match rustix::fs::open(path, flags, Mode::empty()) {
         Ok(descriptor) => Ok(File::from(descriptor)),
-        Err(Errno::LOOP | Errno::NOTDIR) => Err(BoundedReadError::NotRegular),
+        Err(Errno::LOOP | Errno::NOTDIR) if links == Links::Refuse => {
+            Err(BoundedReadError::NotRegular)
+        }
+        // `O_NONBLOCK` on a device with no reader or writer on the other end
+        // is refused rather than parked; it is not a regular file either way.
+        Err(Errno::NXIO) => Err(BoundedReadError::NotRegular),
         Err(_) => Err(BoundedReadError::Inspect),
     }
 }
 
+/// On Windows the order is the one this module has always used: `std`'s open,
+/// then the `fstat` that follows refuses anything that is not a regular file.
+/// There is no `O_NONBLOCK` to ask for, and a named pipe is not opened by the
+/// path syntax an operator passes here.
 #[cfg(windows)]
-fn open_without_following(path: &Path) -> Result<File, BoundedReadError> {
+fn open_for_read(path: &Path, links: Links) -> Result<File, BoundedReadError> {
     use std::os::windows::fs::OpenOptionsExt as _;
 
     /// `FILE_FLAG_OPEN_REPARSE_POINT`: open the link, never its target.
     const OPEN_REPARSE_POINT: u32 = 0x0020_0000;
 
-    std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(OPEN_REPARSE_POINT)
-        .open(path)
-        .map_err(|_| BoundedReadError::Inspect)
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    if links == Links::Refuse {
+        options.custom_flags(OPEN_REPARSE_POINT);
+    }
+    options.open(path).map_err(|_| BoundedReadError::Inspect)
 }
 
 #[cfg(not(any(unix, windows)))]
-fn open_without_following(path: &Path) -> Result<File, BoundedReadError> {
+fn open_for_read(path: &Path, _links: Links) -> Result<File, BoundedReadError> {
     File::open(path).map_err(|_| BoundedReadError::Inspect)
+}
+
+/// Put a descriptor opened with `O_NONBLOCK` back into blocking mode.
+#[cfg(unix)]
+fn clear_nonblocking(file: &File) -> Result<(), BoundedReadError> {
+    use rustix::fs::OFlags;
+
+    let flags = rustix::fs::fcntl_getfl(file).map_err(|_| BoundedReadError::Inspect)?;
+    rustix::fs::fcntl_setfl(file, flags & !OFlags::NONBLOCK).map_err(|_| BoundedReadError::Inspect)
+}
+
+#[cfg(not(unix))]
+fn clear_nonblocking(_file: &File) -> Result<(), BoundedReadError> {
+    Ok(())
 }
 
 fn too_large(limits: &Limits) -> CliError {

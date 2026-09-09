@@ -10,7 +10,7 @@ use openszigno_core::roxmltree::Node;
 
 use crate::codes::{Check, CheckCode};
 use crate::dsig::{Context, XADES_NAMESPACES, direct_child, direct_children, text_of};
-use crate::references::{Reference, effective_node_sets};
+use crate::references::{Reference, ReferenceScope};
 use crate::report::SignatureScope;
 
 /// `ds:Reference/@Type` values that announce a `SignedProperties` reference.
@@ -78,7 +78,7 @@ pub(crate) fn reference_scope_check(
     placement: &Placement<'_, '_>,
     xades: Option<Node<'_, '_>>,
     references: &[Reference],
-    resolved: &[Option<Node<'_, '_>>],
+    scopes: &[ReferenceScope],
 ) -> Check {
     let scope = placement.scope;
     let namespace = context.namespace;
@@ -180,13 +180,17 @@ pub(crate) fn reference_scope_check(
 
     if xades.is_some() {
         // Decided by what the references actually digest: a reference whose
-        // effective node set contains the `SignedProperties` element covers
-        // it, whether it resolved to that element or to an ancestor still
-        // holding it after the transforms.
-        required.push((
-            "xades:SignedProperties",
-            signed_properties(signature).into_iter().collect(),
-        ));
+        // effective node set contains a `SignedProperties` element covers it,
+        // whether it resolved to that element or to an ancestor still holding
+        // it after the transforms.
+        //
+        // *Every* `SignedProperties` this signature owns satisfies the
+        // requirement, because a `ds:Object` is open content that no reference
+        // has to cover: an inserted, unreferenced one must not be able to add
+        // a coverage requirement the real signature was never going to meet.
+        // Stage C reads the same covered element, so what is required here and
+        // what the binding is evaluated against cannot drift apart.
+        required.push(("xades:SignedProperties", signed_properties(signature)));
     }
 
     // Coverage is membership of a reference's *effective* node set, not of
@@ -195,7 +199,6 @@ pub(crate) fn reference_scope_check(
     // reference carrying it digests nothing inside the signature and covers
     // neither the `xades:SignedProperties` nor the profile object, both of
     // which live there.
-    let scopes = effective_node_sets(signature, references, resolved);
     let is_covered = |node: Node<'_, '_>| scopes.iter().any(|scope| scope.covers(node));
 
     let mut missing: Vec<&'static str> = Vec::new();
@@ -270,11 +273,19 @@ fn signature_profile_nodes<'a, 'input>(
     nodes
 }
 
-/// The `xades:SignedProperties` element of this signature, in any XAdES
-/// namespace this crate recognises.
-fn signed_properties<'a, 'input>(signature: Node<'a, 'input>) -> Option<Node<'a, 'input>> {
-    signature.descendants().find(|node| {
-        node.is_element()
+/// Every `xades:SignedProperties` element of this signature, in any XAdES
+/// namespace this crate recognises, in document order.
+///
+/// All of them, not the first: a signature carries as many `ds:Object`
+/// children as whoever assembled the file chose to write, and covering any one
+/// of its own `SignedProperties` is what the format asks for. Requiring the
+/// first would let one prepended decoy object turn a sound signature into
+/// `reference_scope_incomplete`.
+fn signed_properties<'a, 'input>(signature: Node<'a, 'input>) -> Vec<Node<'a, 'input>> {
+    signature
+        .descendants()
+        .filter(|node| {
+            node.is_element()
             && node.tag_name().name() == "SignedProperties"
             && node
                 .tag_name()
@@ -284,7 +295,8 @@ fn signed_properties<'a, 'input>(signature: Node<'a, 'input>) -> Option<Node<'a,
             // properties has signed properties of its own; they are not this
             // signature's, and covering them would satisfy nothing here.
             && owning_signature(*node) == Some(signature)
-    })
+        })
+        .collect()
 }
 
 /// Classify one `ds:Signature` by where it sits.

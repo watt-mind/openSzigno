@@ -70,7 +70,7 @@ pub use tsa::{TimestampKind, TimestampReport};
 use crate::certs::{CertificateSource, ParsedCertificate, dedup};
 use crate::report::{Counts, VerificationTime};
 use crate::trust::TimeSource;
-use crate::tsa::{TokenInput, verify_token};
+use crate::tsa::{TokenInput, verify_token_at};
 
 /// How one dossier is verified.
 pub struct VerifyOptions<'a> {
@@ -134,12 +134,24 @@ pub(crate) struct Context<'a, 'input, 's, 'o> {
     /// Untrusted extra path candidates: every non-self-signed trust entry and
     /// every intermediate the trust source offered.
     pub(crate) store_intermediates: Vec<ParsedCertificate>,
-    /// Every trusted-list service identity, whether or not it is also an
-    /// anchor. These decide qualified status; they never grant trust.
+    /// Every trusted-list service identity, whether or not it is also a
+    /// self-signed anchor. They decide qualified status, and — through
+    /// [`certs::AnchorStatus::terminates`] — where a path may end: a listed
+    /// issuing CA is a trust anchor for the paths that reach it.
     pub(crate) services: &'o [trust::TrustServiceIdentity],
     pub(crate) revocation_policy: trust::RevocationPolicy,
     /// The clock reading for this run.
     pub(crate) time: trust::UnixTime,
+}
+
+impl Context<'_, '_, '_, '_> {
+    /// Everything a path search needs to know about where it may end and
+    /// whether it may end there: the anchors' provenance, and the trusted-list
+    /// service identities, which terminate a path wherever the list speaks —
+    /// at a listed issuing CA as readily as at a self-signed root.
+    pub(crate) fn anchor_status(&self) -> certs::AnchorStatus<'_> {
+        certs::AnchorStatus::new(&self.anchor_provenance).with_services(self.services)
+    }
 }
 
 /// Verify every `ds:Signature` in a dossier.
@@ -414,21 +426,24 @@ pub fn verify(bytes: &[u8], options: &VerifyOptions<'_>) -> Result<VerifyReport,
             });
             continue;
         }
-        let token = verify_token(&TokenInput {
-            kind: source.kind(),
-            document_index: source.document_index(),
-            token: source.token.clone(),
-            imprint_input: source.imprint_input.clone(),
-            anchors: &context.anchors,
-            extra_certificates: &container_candidates,
-            limits: &options.limits,
-            allow_legacy_algorithms: options.allow_legacy_algorithms,
-            revocation: container_revocation,
-            revocation_policy,
-            // A container timestamp is not attached to any claimed signing
-            // time, so there is no ordering claim to contradict.
-            claimed_signing_time: None,
-        });
+        let token = verify_token_at(
+            &TokenInput {
+                kind: source.kind(),
+                document_index: source.document_index(),
+                token: source.token.clone(),
+                imprint_input: source.imprint_input.clone(),
+                anchors: &context.anchors,
+                extra_certificates: &container_candidates,
+                limits: &options.limits,
+                allow_legacy_algorithms: options.allow_legacy_algorithms,
+                revocation: container_revocation,
+                revocation_policy,
+                // A container timestamp is not attached to any claimed signing
+                // time, so there is no ordering claim to contradict.
+                claimed_signing_time: None,
+            },
+            context.anchor_status(),
+        );
         dossier_checks.push(estimestamp::summarise(
             source.scope,
             &token.report.checks,

@@ -145,6 +145,7 @@ check_codes! {
     XadesPresent => "xades_present",
     XadesAbsent => "xades_absent",
     XadesNotValidated => "xades_not_validated",
+    XadesExtraQualifyingProperties => "xades_extra_qualifying_properties",
     XadesSigningCertificateBound => "xades_signing_certificate_bound",
     XadesSigningCertificateMismatch => "xades_signing_certificate_mismatch",
     XadesSigningCertificateAbsent => "xades_signing_certificate_absent",
@@ -178,9 +179,11 @@ check_codes! {
     CertRevoked => "cert_revoked",
     CertRevokedAfterValidationTime => "cert_revoked_after_validation_time",
     RevocationStatusUnknown => "revocation_status_unknown",
+    RevocationStatusUnknownByResponder => "revocation_status_unknown_by_responder",
     RevocationDataStale => "revocation_data_stale",
     RevocationDataInvalid => "revocation_data_invalid",
     OcspResponderTrusted => "ocsp_responder_trusted",
+    RevocationSourcesDisagree => "revocation_sources_disagree",
     OnlineFetchFailed => "online_fetch_failed",
 
     // Trusted lists (ETSI TS 119 612).
@@ -283,6 +286,7 @@ impl CheckCode {
                 | Self::CertRevoked
                 | Self::CertRevokedAfterValidationTime
                 | Self::RevocationStatusUnknown
+                | Self::RevocationStatusUnknownByResponder
                 | Self::RevocationDataStale
                 | Self::RevocationDataInvalid
                 | Self::OcspResponderTrusted

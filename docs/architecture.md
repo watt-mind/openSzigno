@@ -548,12 +548,32 @@ names, and each entry of a `--trust-store` and a `--revocation-store`.
 - Reading stops one byte past the cap, and the file is refused at that point,
   so a reported length that is not the truth is bounded all the same. A file of
   exactly the cap is read; one byte more is not.
+- On Unix the open is non-blocking (`O_NONBLOCK`), and the flag is cleared on
+  the descriptor once the `fstat` above has established that it is a regular
+  file. Opening a FIFO for reading otherwise blocks inside `open(2)` until
+  somebody opens the writing end, which is the caller's choice and not this
+  tool's, so a dossier path or a `--decrypt-key` pointing at a named pipe would
+  wait indefinitely before the type check could refuse it. It now returns at
+  once and is refused as not a regular file. On Windows the order is unchanged:
+  the open, then the type check.
 
 The caps are `max_input_bytes` (64 MiB) for a dossier, 1 MiB for key material
 and the `--csc` configuration, 4 MiB for one trust-store entry or trusted list,
 and `MAX_REVOCATION_ITEM_BYTES` (16 MiB) for one CRL or OCSP response. Each
 caller words its own refusal, with the code that path already used, and no
 message names the file, because the path may be private.
+
+A store is a directory, so it is bounded twice: per file, and in total. A
+`--trust-store` may hold 1024 files per directory and **64 MiB across the whole
+store**; a `--revocation-store` may hold 4096 files per directory and **256 MiB
+across the whole store**. The total spans both of a store's directories
+(`anchors/` and `intermediates/`, `crls/` and `ocsp/`), so a store cannot be
+padded out by splitting it, and every file is read before any of it is parsed,
+so a store over the total is refused for its size rather than for whatever the
+file that crossed the line happened to contain. Exceeding either total is
+`trust_store_invalid` or `revocation_store_invalid` — the store's own code,
+exit 3 — and it is a refusal, never a truncation: a partially loaded store
+would silently change what "trusted" or "not revoked" means.
 
 An input that is not a regular file, a directory most often, is `io_error`
 (exit 3) with `input.bytes` reported as `null` on every operating system. A
@@ -667,6 +687,24 @@ The envelope fields are always present:
 Messages never contain input paths, document titles, or payload content. On
 failure `data` is `null`, `warnings` is empty, and `input.format` is `null`
 when the input could not be parsed as a dossier.
+
+**Every string in `data` that came out of the input is sanitised before the
+envelope is written.** A dossier chooses its title, its document titles, its
+MIME type halves, its object references, its transform names and its signature
+ids, and a `verify` report adds the common names of certificates it carried.
+Each of those has Unicode `Cc` and `Cf` characters dropped — the bidirectional
+overrides among them — and is bounded: 256 characters for a title, 128 for
+everything else, with a value that was cut short ending in `...` inside its
+cap. The pass runs once, over the finished `data`, and the human summary is
+rendered from that same value, so a consumer of either channel sees the same
+text. Warnings and errors are filtered the same way, to 512 characters.
+
+Two things this does not change. Field names, types and presence are exactly
+what they were: sanitising alters the *content* of a string, never the shape of
+the envelope, and `schema_version` stays `1`. And `extracted[].path` is left
+untouched, because it has to keep naming the file that was written; the
+extraction name rules ([Extraction policy](#extraction-policy)) already refuse
+a title carrying such a character before a filename is derived from it.
 
 Example, from `inspect --json` on `tests/fixtures/plain-base64.es3`. The tool
 writes one compact line; this is pretty-printed:
@@ -932,7 +970,7 @@ I/O and extraction policy.
 | `invalid_signing_certificate` | author | 4 | `--cert`, `--chain`, `--tsa-cert`, or the certificate inside the key file is not a readable X.509 certificate. |
 | `signing_certificate_required` | author | 4 | `--key` was given with no `--cert` and the key file carries none, so nothing would bind the signature to a certificate. |
 | `signing_key_mismatch` | author | 4 | The certificate's public key is not the signing key's public key. |
-| `document_not_signable` | author | 4 | A selected document has no payload `ds:Object` or no `es:DocumentProfile` with an `Id`, so the mandated reference set cannot be written for it. |
+| `document_not_signable` | author | 4 | A selected document has no payload `ds:Object` or no `es:DocumentProfile` with an `Id`, so the mandated reference set cannot be written for it; or the dossier holds a value a signature would have to quote and cannot: an `Id`/`OBJREF` that is not an XML NCName, a media type outside the token characters, or a namespace URI holding markup, a quote character or a control character. See [Nothing the dossier says decides what is signed](#nothing-the-dossier-says-decides-what-is-signed). |
 | `document_already_signed` | author | 4 | Adding this signature would invalidate one the dossier already carries. See [Signing a dossier that is already signed](#signing-a-dossier-that-is-already-signed). |
 | `tsa_failed` | author, CLI | 5 | The `--tsa` request could not be made, was refused by the destination policy, or the answer was not a granted RFC 3161 response carrying a token over the requested imprint. The message names the reason. |
 | `csc_config_invalid` | CLI, author | 4 | The `--csc` configuration file cannot be used (a missing or empty key, an unknown key, a value outside the accepted TOML subset, a `redirect_uri` that is not a loopback URI, or a plain `http` `base_url` without `--online-allow-private`), or the service it names does not report a CSC API v2 `specs` version or will not sign a data-to-be-signed representation. Nothing is contacted and nothing is written. |
@@ -945,15 +983,15 @@ I/O and extraction policy.
 | `sign_failed` | author | 5 | Signing could not be completed: an identifier the signature needs is already used in the dossier, an element could not be canonicalized, or the key refused to sign. |
 | `invalid_output_path` | CLI | 4 | The `create --output` or `sign --output` path does not name a file. |
 | `unsafe_output_name` | CLI | 5 | A document title or declared extension cannot be used as a filename, or the derived `<file>.d` directory name would be too long. |
-| `output_name_collision` | CLI | 5 | Residual: two outputs still map to the same name in one directory after deduplication. |
+| `output_name_collision` | CLI | 5 | Residual: two outputs still map to the same name in one directory after all 64 deduplicated candidates were taken. |
 | `output_exists` | CLI | 5 | A destination file already exists or cannot be created safely. |
 | `document_not_found` | CLI, author | 4 | A `--document` selector matches no document, is not a decimal index after `#`, or names a document inside an embedded dossier. `sign` reports it for its own selectors. |
 | `document_ambiguous` | CLI | 4 | A `--document` `object_ref` selector matches more than one document. Unreachable through a parsed dossier, whose XML IDs are unique. |
 | `stdout_requires_single_document` | CLI | 4 | `--stdout` did not resolve to exactly one document, or the one it resolved to embeds a dossier while recursion is on. |
 | `document_not_extractable` | CLI | 5 | The document `--stdout` selected is encrypted or uses an unsupported transform chain. |
-| `trust_store_invalid` | CLI | 3 | `--trust-store` does not name a readable directory, holds a file that is not PEM or DER certificate data, or holds no trust anchor. A partially loaded store would silently change what "trusted" means, so the run fails instead. |
+| `trust_store_invalid` | CLI | 3 | `--trust-store` does not name a readable directory, holds more files than the loader will read, holds a file larger than 4 MiB or more than 64 MiB in total, holds a file that is not PEM or DER certificate data, or holds no trust anchor. A partially loaded store would silently change what "trusted" means, so the run fails instead. |
 | `trust_list_invalid` | CLI | 3 | A `--trust-list`, `--lotl`, or `--trust-list-signer` file could not be read or parsed. A trusted list that loaded only in part would silently change what "trusted" means, so the run fails instead. |
-| `revocation_store_invalid` | CLI | 3 | `--revocation-store` does not name a readable directory, holds more files than the loader will read, holds a file larger than `MAX_REVOCATION_ITEM_BYTES`, or holds a file that is neither a CRL nor an OCSP response. |
+| `revocation_store_invalid` | CLI | 3 | `--revocation-store` does not name a readable directory, holds more files than the loader will read, holds a file larger than `MAX_REVOCATION_ITEM_BYTES` or more than 256 MiB in total, or holds a file that is neither a CRL nor an OCSP response. |
 | `online_options_invalid` | CLI | 3 or 4 | The network transport could not be built, which today means `--online-proxy` is not a usable proxy URL. `verify --online` reports it as exit 3; `sign --tsa` and `sign --csc` report it as exit 4. |
 | `online_cache_invalid` | CLI | 3 | The `--online-cache` directory could not be opened safely, or a cache file could not be written. A name inside it that already holds something else is not this error; that is one `online_fetch_failed` with the class `cache_collision`, and the run continues. |
 | `unsafe_output_directory` | CLI | 5 | The output path contains a symlink or reparse point, or is not a real directory. |
@@ -1242,6 +1280,18 @@ Two further rules follow from what real dossiers actually contain:
   the versioned forms are recognised, and a reference that declares one but
   resolves elsewhere is called out in the failure message, because that is the
   shape a wrapping attempt takes.
+- **Any `SignedProperties` the signature owns satisfies it, not the first
+  one.** The XMLDSig schema allows a signature any number of `ds:Object`
+  children with open content, and nothing obliges a reference to cover a given
+  one, so anyone able to append bytes to a dossier can add an
+  `xades:SignedProperties` the signer never signed. Requiring the *first* would
+  let one such decoy turn a sound signature into `reference_scope_incomplete`
+  — and its document into `documents_uncovered` — which is a
+  denial-of-verification, not a finding. The elements a countersignature nested
+  in this signature owns are still that signature's and satisfy nothing here.
+  [Stage C](#xades-signed-properties) reads the same covered element, so what
+  the scope rule requires and what the binding is evaluated against cannot
+  drift apart.
 
 Where the specification does not define the mandated set — a signature in a
 placement the format does not describe, or one inside a `Document` that carries
@@ -1276,6 +1326,12 @@ An element counts as covered when it is inside the [effective node
 set](#the-effective-node-set) of one of the signature's references, which is
 exactly the rule — and the same code — the scope check applies. A
 document-level signature covers only the document it is placed in.
+
+The payload `ds:Object` an `OBJREF` names is found under the three spellings
+of the identifier attribute the rest of the tool accepts, `Id`, `ID` and `id`,
+the same three the parser resolves an `OBJREF` with and a `URI="#..."`
+reference is resolved by. A dossier that spells it `id` therefore reports the
+same coverage as one that spells it `Id`.
 
 The states, per document:
 
@@ -1452,6 +1508,20 @@ below 2048 bits stay refused whatever it is set to. It does not loosen
 certificate-path validation either — a SHA-1-signed certificate is still
 `cert_algorithm_rejected`.
 
+The same rule holds **inside an RFC 3161 timestamp token**, in both places a
+token can name SHA-1: the `messageImprint` digest algorithm, and the
+`SignerInfo` digest — which is what the signed `messageDigest` attribute is
+computed with and, under a bare `rsaEncryption` signature algorithm, what the
+signature itself is computed with. Without the flag both are refused, as
+`timestamp_imprint_mismatch` and `timestamp_signature_invalid` respectively.
+With it the imprint is recomputed and the signature is checked, and what is
+emitted is `algorithm_legacy_allowed` (`unknown`) instead of
+`timestamp_imprint_ok`/`timestamp_signature_ok` (`passed`). The token therefore
+stays `verified: false`, does not become the validation time, and the verdict
+stays capped at `indeterminate`: recomputing a SHA-1 imprint is diagnosis, not
+proof, because a second preimage would let the same token be claimed over other
+data.
+
 Canonicalization is implemented in-tree, over the same `roxmltree` tree the
 structural parser built, rather than delegated. The candidate library named in
 the design (`bergshamra-c14n`) canonicalizes its own parser's tree and selects
@@ -1469,7 +1539,7 @@ Reported verbatim under `data.limits` in `verify --json`.
 | `max_signatures` | 64 | `ds:Signature` elements examined per dossier. |
 | `max_references_per_signature` | 32 | `ds:Reference` elements per signature. |
 | `max_transforms_per_reference` | 8 | Transforms in one reference's chain. |
-| `max_certificates` | 64 | Certificates admitted into path building. |
+| `max_certificates` | 64 | Certificates admitted into path building, and the largest `certs` list read from one OCSP response. |
 | `max_timestamps_per_signature` | 8 | `xades:SignatureTimeStamp` elements processed per signature. |
 | `max_chain_length` | 8 | Certificates in one candidate path, inclusive: a path of exactly this many certificates that ends at an anchor is accepted. |
 | `max_paths` | 32 | Completed candidate paths explored. |
@@ -1507,6 +1577,35 @@ mandated reference set requires the signature to cover, so what they say is
 signed. `verify` therefore treats the certificate their `CertDigest` names as
 the certificate the signature claims, in every recognised XAdES namespace
 (1.1.1, 1.2.2, 1.3.2, 1.4.1).
+
+**Which properties, though, is itself decided by coverage.** A `ds:Object` is
+open content: the schema allows any number of them under a `ds:Signature` and
+nothing requires a reference to cover one, so an inserted decoy object can hold
+a whole `xades:QualifyingProperties` the signer never signed. The properties
+stage C reads are therefore the ones a reference of *this* signature actually
+digests — the `xades:SignedProperties` that lies inside one reference's
+[effective node set](#the-effective-node-set), and the
+`xades:QualifyingProperties` holding it — never simply the first such element
+in document order. The `Type` attribute
+`http://uri.etsi.org/01903#SignedProperties` is corroboration, exactly as it is
+in the scope rule, and never the rule itself. Three consequences:
+
+- when no reference of the signature covers any `SignedProperties`, nothing
+  there is signed: the signed properties are treated as absent and the binding
+  reports `xades_signing_certificate_absent` rather than believing an unsigned
+  property. Such a signature also fails `reference_scope_incomplete` whenever
+  the mandated set is defined;
+- when more than one `xades:QualifyingProperties` belongs to one signature,
+  covered or not, it is said once as `xades_extra_qualifying_properties`
+  (`info`) and the uncovered ones are ignored. Informational on purpose:
+  blocking would hand anyone who can append a `ds:Object` the power to cap a
+  sound signature at `indeterminate`, which is the same lever this rule closes;
+- a countersignature's qualifying properties belong to the countersignature.
+  The signature they are nested in never reads them, and they never satisfy its
+  requirements.
+
+A `Target` attribute that names another signature is reported as it always was
+and decides nothing: coverage is the rule.
 
 The rules:
 
@@ -1625,7 +1724,7 @@ what M3 added.
 | Step | What is required |
 | --- | --- |
 | Placement | A direct `es:TimeStamp` child of `es:Dossier` is a **dossier timestamp**; a direct child of `es:Document` is a **document timestamp**. Anywhere else, the format does not say what the element protects and nothing is digested. |
-| Resolution | Every `xades:Include/@URI` is `#id` and must resolve, through the ID space `openszigno-core` validated, to exactly one element. Nothing is ever dereferenced off the document. |
+| Resolution | Only an `Include` in a recognised XAdES namespace selects data; an element another vocabulary happens to call `Include` is ignored, exactly as everywhere else this crate reads XAdES. Every `xades:Include/@URI` is `#id` and must resolve, through the ID space `openszigno-core` validated, to exactly one element. Nothing is ever dereferenced off the document. |
 | Scope | A dossier timestamp must cover `/es:Dossier/es:DossierProfile` **and** `/es:Dossier/es:Documents`. A document timestamp must cover its `es:DocumentProfile` **and** the document's payload `ds:Object`. An element is covered when an `Include` resolves to it or to an ancestor of it. |
 | Imprint | Each included element is canonicalized on its own with the algorithm the timestamp's `ds:CanonicalizationMethod` names — inclusive C14N 1.0 when it names none, as XAdES 7.1.4.3.1 prescribes — and the results are concatenated **in `Include` document order**. Reordering the `Include` elements changes the imprint, which is the point. |
 | Token | Verified by exactly the machinery a signature timestamp uses: the CMS parse, the imprint, the `SignerInfo` signature, the critical `id-kp-timeStamping` requirement, and a TSA path validated at `genTime`. |
@@ -1724,13 +1823,17 @@ result.
 | A self-signed file in the trust store | `trust_store` | **Trust anchor.** |
 | The `certificates` set of an RFC 3161 token | `timestamp_token` | Untrusted path candidates for that token's TSA certificate. The signature's own candidates and the store's intermediates are offered alongside them, because real dossiers carry the TSA's issuing CA in `xades:CertificateValues`. |
 
-The rule that matters: **only the trust store can supply an anchor.** A
-self-signed root found inside a dossier is a candidate like any other and can
-never make itself trusted; a dossier that carries its own root and no store is
-configured still reports `cert_path_unknown`. Candidates are deduplicated by
-DER, keeping the source they were first seen in, and a certificate the store
-already anchors is used only in that role, so it cannot appear twice in one
-path.
+The rule that matters: **only trust the caller configured can supply an
+anchor** — a `--trust-store` file or a `--trust-list` service digital identity.
+A self-signed root found inside a dossier is a candidate like any other and can
+never make itself trusted; a dossier that carries its own root with no trust
+material configured still reports `cert_path_unknown`. Candidates are
+deduplicated by DER, keeping the source they were first seen in, and a
+certificate the store already anchors is used only in that role, so it cannot
+appear twice in one path. A certificate a trusted list names stays an ordinary
+candidate *and* becomes a place a path may end, because the paths that climb
+past it still need it as a link — see [A path may only end at a service that
+was granted then](#a-path-may-only-end-at-a-service-that-was-granted-then).
 
 ### Certificate path validation
 
@@ -1753,7 +1856,8 @@ implemented subset is:
   must not read as a finding against the signature;
 - completion checked before the length bound, so a chain of exactly
   `max_chain_length` certificates that reaches an anchor is a path rather than
-  one the search refused to look at;
+  one the search refused to look at, and recorded before the search climbs any
+  further, so the nearest place a chain may end is the one preferred;
 - every link's signature verified with the issuer's public key under the
   algorithm allowlist above;
 - every certificate's validity window checked against the validation time;
@@ -1840,6 +1944,17 @@ says they should is `cert_malformed` (failed). Treating a decoding failure as
 absence would make a corrupt `keyUsage` or `nameConstraints` silently vanish,
 which is the wrong direction for every one of them.
 
+**The two algorithm identifiers must agree.** RFC 5280 section 4.1.1.2
+requires a certificate's outer `signatureAlgorithm` to repeat
+`tbsCertificate.signature`, and one on which they differ is `cert_malformed`
+(failed). Only the inner field is covered by the CA's signature, so a reader
+that verifies under the outer one would be verifying under an algorithm the CA
+never attested to. The comparison is on the OID, with an absent `parameters`
+field and an explicit `NULL` treated as the same statement: RFC 4055 requires
+`NULL` for the RSA family and RFC 5758 requires absence for the ECDSA one, and
+real CAs have emitted both spellings, so anything else must match byte for
+byte.
+
 Not implemented: authority/subject key identifier matching as a path
 hint, certificate policies and `policyConstraints`, `inhibitAnyPolicy`,
 qualified-status determination, and cross-certificate handling beyond what
@@ -1861,7 +1976,10 @@ would be as wrong as saying "valid".
 A directory holding certificate files directly, with no `anchors`
 subdirectory, is read the same way. The split between the two subdirectories is
 a convention, not a grant: **the verifier classifies what it is given**, and a
-certificate is a trust anchor if and only if it is self-signed. Dropping an
+certificate in a `--trust-store` directory is a trust anchor if and only if it
+is self-signed. (A trusted list is the other way round: a certificate it names
+is an anchor whether or not it is self-signed, because the list says so.)
+Dropping an
 intermediate into `anchors/` therefore makes it an extra untrusted path
 candidate, not a trusted one, and a store holding only intermediates yields no
 anchors and so `cert_path_unknown`. A self-signed anchor's own signature is
@@ -1891,16 +2009,72 @@ entry's `trust_anchor_origin` (`trust_store` or `trust_list`).
 A trusted list gives what a directory of certificates cannot: **when** each CA
 was entitled to issue qualified certificates. For every `TSPService` of type
 `.../Svctype/CA/QC` or `.../Svctype/TSA/QTST`, each `X509Certificate` in the
-service digital identity becomes an anchor carrying the service's status
-timeline — the current `ServiceStatus` and `StatusStartingTime` plus every
-`ServiceHistoryInstance`. The status in force **at the validation time**
-decides, which is what lets a signature made while a CA was supervised still
-verify after that CA was withdrawn.
+service digital identity becomes an anchor — self-signed or not — carrying the
+service's status timeline: the current `ServiceStatus` and
+`StatusStartingTime` plus every `ServiceHistoryInstance`. The status in force
+**at the validation time** decides, which is what lets a signature made while a
+CA was supervised still verify after that CA was withdrawn.
 
-Only `granted` and `recognisedatnationallevel` count as granted. The pre-eIDAS
-statuses (`undersupervision`, `accredited`) and every terminal one
-(`withdrawn`, `supervisionceased`, the `deprecated*` family) do not: this build
-refuses to guess which historical status was equivalent to which.
+`granted` and `recognisedatnationallevel` count as granted at any time. The
+pre-eIDAS statuses `undersupervision` and `accredited` count only at a
+validation time before 2016-07-01, when eIDAS began to apply; every terminal
+status (`withdrawn`, `supervisionceased`, the `deprecated*` family) never does.
+See [Trusted lists](trust.md#what-is-read-and-what-is-not) for why the
+pre-eIDAS window is closed rather than open-ended.
+
+#### A path ends where the list speaks
+
+A trusted-list service digital identity ends a path **whether or not it is
+self-signed**, which is the ETSI TS 119 615 model and matters because of what a
+real national list looks like. The Hungarian list records NetLock's qualified
+issuing CAs as CA/QC services, with `undersupervision` from 2003 and `granted`
+from 2016-06-30, and records the root that signed them only as a QTST service
+granted from 2018. A path that had to climb to a self-signed anchor would be
+judged by an entry that says nothing about issuing certificates, and a 2014
+signature under a plainly listed issuing CA would be refused.
+
+So the **nearest** listed certificate along a chain ends the path. The
+terminating certificate is that path's trust anchor: nothing above it is
+validated or reported, it is the chain's last entry with `is_trust_anchor:
+true` and `trust_anchor_origin: "trust_list"`, its own revocation is not
+checked — no anchor's is — and `qualified` derives from its service exactly as
+it does for a self-signed listed anchor. Preferring the nearest is what stops a
+root's QTST-only entry from overriding the granted CA/QC entry of the issuing
+CA below it. When the nearest listed certificate's service was **not** granted
+at the validation time the search carries on upward, and the run is refused
+only if no listed certificate and no `--trust-store` anchor further up will end
+the path either.
+
+`--trust-store` anchors and self-signed trusted-list entries behave exactly as
+they did: this widens where a path may end, and relaxes nothing about whether
+it may end there.
+
+#### A path may only end at a service that was granted then
+
+When a built and validated path ends at a **trusted-list** anchor, that
+anchor's service record is consulted before the path is accepted:
+
+| The list records, for this certificate | Then |
+| --- | --- |
+| A service of the kind the path needs — CA/QC for a signing or OCSP-signing path, TSA/QTST for a timestamping one — granted at the validation time | The path ends here: `cert_path_ok`. |
+| A service of that kind that was **not** granted then | `trust_list_service_not_granted` (`unknown`). The search carries on to the other candidate paths first, because another anchor may still be entitled to end one. |
+| Only services of some *other* kind, at least one of them granted then | The list has said nothing about this use, so the anchor is treated as a trust-store one would be and the path ends here. A national list that names a root under its CA/QC services and nowhere else still vouches for that root when a timestamp authority beneath it is checked. |
+| Only services none of which was granted then | `trust_list_service_not_granted`. The list has stopped vouching for the certificate altogether. |
+
+A `--trust-store` anchor is unaffected: the operator put the file in the
+directory, and that is the whole of the statement. When the same certificate
+arrives both ways, the trust store's unconditional statement stands.
+
+`trust_list_service_not_granted` is **`unknown`, never `failed`**. Trust that
+is missing is not evidence against a signature: the same distinction
+`cert_path_unknown` draws. It blocks, so the verdict is capped at
+`indeterminate`, and it never makes a run `invalid`. The chain is still
+reported in full, and so is the qualified determination, because a reader
+needs to see *which* anchor was refused and under which service.
+
+For a timestamp the same check runs at the token's `genTime` against the
+TSA/QTST service type, and the code is reported in place of
+`timestamp_tsa_path_ok`, again as `unknown`.
 
 `--trust-list-signer CERT` supplies the certificate the list must have been
 signed with, obtained out of band — for the EU list of trusted lists, from the
@@ -1981,8 +2155,10 @@ determination.
 
 ### Revocation
 
-Offline by default and offline only. Data is consulted in this order, and the
-first source that yields a definite answer for a certificate wins:
+Offline by default and offline only. **Every source is asked about every
+certificate, and the answers are then weighed** ([Which answer
+wins](#which-answer-wins)). The order below is the order sources are *read*
+in; it never decides which answer is believed:
 
 1. the signature's own validation data — `EncapsulatedOCSPValue`, then
    `EncapsulatedCRLValue` — from **either** placement: directly under
@@ -2043,7 +2219,7 @@ is reported in `chain[].revocation.responder_model`.
 | Model | What it requires | Where the authority comes from |
 | --- | --- | --- |
 | `issuer` | The CA that issued the queried certificate signed the response itself. | The CA. |
-| `delegated` | A certificate that same CA issued, naming itself in the `ResponderID`, carrying `id-kp-OCSPSigning` and valid at the validation time, signed it. | The CA's signature over the responder certificate *is* the delegation, so no trust store is needed. |
+| `delegated` | A certificate that same CA issued, naming itself in the `ResponderID`, carrying `id-kp-OCSPSigning` and valid at the response's `producedAt`, signed it. | The CA's signature over the responder certificate *is* the delegation, so no trust store is needed. |
 | `trusted` | The responder carries `id-kp-OCSPSigning` and its own path validates to a **configured trust anchor** — trust store or trusted list — at the response's `producedAt`, under the same path rules and `keyUsage` checks every other chain gets. | The caller's own trust material. |
 
 The third model is not a relaxation of the first two; it is the third thing
@@ -2059,14 +2235,59 @@ vouched for by the caller's own store, through a full path validation with
 `id-kp-OCSPSigning` required on the leaf; a responder that reaches no
 configured anchor authorises nothing. So this can never admit a response whose
 signer the operator had not already chosen to trust, and it is tried **last**,
-so a CA's own word always wins where both apply. The path is validated at
-`producedAt`, the instant the responder asserts it spoke: a certificate that
-had expired by then was not entitled to say anything, and one that expired
-afterwards said it while it still was.
+so a CA's own word always wins where both apply.
+
+Both models that involve a responder certificate ask about it at
+**`producedAt`**, the instant the responder asserts it spoke: the trusted model
+validates the path at that instant, and the delegated model checks the
+responder certificate's own validity there. A certificate that had expired by
+then, or was not yet in force, was not entitled to say anything; one that
+expired afterwards said it while it still was. Asking at the validation time
+instead would discard every archived response whose responder certificate has
+since expired, which is most of them.
 
 `ocsp_responder_trusted` (`info`) is emitted when the third model was used, so
 a reader can tell an answer that rests on the issuing CA from one that rests on
 their own trust store. It reports rather than decides, so it never blocks.
+
+The work one response can ask for is bounded, because the response is an
+untrusted input. A `BasicOCSPResponse` carries an unbounded `certs` field, so
+at most `max_certificates` of them are read and the list is deduplicated by DER
+before anything is verified. The trusted-responder path search is then run at
+most **once per distinct responder public key**: the question that search
+answers is whether the caller's anchors vouch for whoever holds the key that
+signed the response, so two certificates over one key — a responder re-issued
+with a new serial, say — ask it once. Without either bound, a response packed
+with re-issues of one responder certificate that no anchor vouches for drove
+one full path search per certificate.
+
+#### Which answer wins
+
+The reading order above is a preference about where to look first, not about
+what to believe. The signature's own `RevocationValues` are supplied by the
+signer, so a rule that stopped at the first definite answer let a genuine but
+older embedded OCSP `good`, still inside its own `nextUpdate`, hide the
+operator's newer CRL revoking the same certificate. For one certificate at one
+validation time:
+
+1. every source is consulted, and every usable, definite answer is gathered;
+2. **a revocation from any source beats `good` from any other.** A source that
+   records a revocation has seen something a source reporting `good` has not,
+   and which tier it came from is irrelevant;
+3. among answers that say the same thing, the one whose source speaks for the
+   later instant is the one reported — the later `producedAt` where the source
+   stated one, otherwise the later `thisUpdate` — because that source knew
+   everything the earlier one did. A tie keeps the earlier source, which is the
+   reading order;
+4. the freshness rules and the revocation-after-validation-time rule below are
+   unchanged, and are applied to the answer that was chosen.
+
+`chain[].revocation.source` names the source the reported answer came from, so
+"which CRL said this" is always answerable. When the usable sources did not
+agree, `revocation_sources_disagree` (`info`) is emitted for the chain and the
+same sentence is added to that certificate's `chain[].revocation.detail`. It
+reports rather than decides, so it never blocks: the disagreement has already
+been resolved by the rules above.
 
 #### Tier fallback
 
@@ -2135,7 +2356,17 @@ data stated. The path-level summary is one check: `revocation_ok` when every
 non-anchor certificate has fresh, verified, non-revoked status; `cert_revoked`
 when any was revoked at or before the validation time; and otherwise the worst
 of `cert_revoked_after_validation_time`, `revocation_data_invalid`,
-`revocation_data_stale`, and `revocation_status_unknown`.
+`revocation_data_stale`, `revocation_status_unknown_by_responder`, and
+`revocation_status_unknown`.
+
+**An OCSP `unknown` is not stale data.** RFC 6960 section 2.2 gives `unknown`
+its own meaning: the responder does not know about this certificate. That is a
+well-formed, authorised, current answer that happens to answer nothing, so it
+is reported as `revocation_status_unknown_by_responder` (`unknown`) rather than
+as `revocation_data_stale`. The distinction is what a reader has to act on:
+staleness is fixed by fetching something newer, while a responder that does not
+serve this certificate will say the same thing however often it is asked. It
+blocks like every other `unknown`.
 
 **Naming what is missing.** The summary message names *which* certificate is
 the problem — by role (`the end-entity certificate`, `the intermediate CA
@@ -2236,7 +2467,7 @@ build is willing to open a socket to:
 | --- | --- | --- |
 | Scheme | `http` and `https` only | Every other scheme is refused, never rewritten into one this build speaks. |
 | Userinfo | refused, always | `user:password@host` is a way of writing a URL that reads as one host and names another, and it is credential material this tool has no business sending. `--online-allow-private` does not waive it. |
-| Address | loopback (`127/8`, `::1`), RFC 1918 private (`10/8`, `172.16/12`, `192.168/16`), link-local (`169.254/16`, `fe80::/10`), unique-local (`fc00::/7`), unspecified (`0.0.0.0/8`, `::`), broadcast (`255.255.255.255`) and multicast (`224/4`, `ff00::/8`) are all refused, as are the cloud metadata addresses `169.254.169.254` and `fd00:ec2::254` and the name `localhost` (and `*.localhost`) | Otherwise a dossier could point the verifier at `http://169.254.169.254/` — instance metadata, credentials included — or at a service on the operator's own subnet, turning a signature check into an SSRF primitive. An IPv4-mapped IPv6 address is judged as the IPv4 address it carries, so it is not a way round any of these. The two metadata addresses are named in their own refusal, because that is the one an operator wants to be told about explicitly. |
+| Address | loopback (`127/8`, `::1`), RFC 1918 private (`10/8`, `172.16/12`, `192.168/16`), link-local (`169.254/16`, `fe80::/10`), unique-local (`fc00::/7`), unspecified (`0.0.0.0/8`, `::`), broadcast (`255.255.255.255`) and multicast (`224/4`, `ff00::/8`) are all refused, as are carrier-grade NAT (`100.64.0.0/10`), IETF protocol assignments (`192.0.0.0/24`), benchmarking (`198.18.0.0/15`), the deprecated site-local prefix (`fec0::/10`), the tunnel prefixes 6to4 (`2002::/16`), Teredo (`2001::/32`) and NAT64 (`64:ff9b::/96`), the cloud metadata addresses `169.254.169.254` and `fd00:ec2::254`, and the name `localhost` (and `*.localhost`) | Otherwise a dossier could point the verifier at `http://169.254.169.254/` — instance metadata, credentials included — or at a service on the operator's own subnet, turning a signature check into an SSRF primitive. An IPv4-mapped (`::ffff:a.b.c.d`) or IPv4-compatible (`::a.b.c.d`) IPv6 address is judged as the IPv4 address it carries, so neither is a way round any of these; the three tunnel prefixes are refused outright for the same reason, since each carries an IPv4 destination the IPv4 rules would never see. The two metadata addresses are named in their own refusal, because that is the one an operator wants to be told about explicitly. |
 | Resolved address | re-checked against the same ranges before connecting | A public name that resolves to `127.0.0.1` is refused on the address, not on the name, so DNS rebinding does not walk past the rule. |
 | The address that is dialled | exactly the addresses the check approved | The policy hands its resolution to `ureq` as a pinned answer for that host and port, and a name that was not vetted for the fetch in hand does not resolve at all: there is no second lookup, so a zone that answers with a public address and then with a private one has no window between the check and the socket. A host that resolves to nothing is a `transport` failure and nothing is contacted. |
 | The name that is verified | unchanged | Pinning is an address decision only. The URL is sent as published, so the `Host` header, the TLS SNI value and the certificate host-name verification all still use the name the certificate named. |
@@ -2674,7 +2905,7 @@ verify), and `revocation_not_checked` (the caller switched revocation off).
 | `signature_algorithm_allowed` | `passed` | `ds:SignatureMethod` is inside the allowlist. |
 | `digest_algorithm_allowed` | `passed` | Every `ds:DigestMethod` is inside the allowlist. |
 | `algorithm_rejected` | `failed` | A signature method, a digest method, or a signing key is outside the pinned policy. May appear more than once. |
-| `algorithm_legacy_allowed` | `unknown` | SHA-1 was admitted because `--allow-legacy-algorithms` was given. Blocking: caps the verdict at `indeterminate`. May appear twice, once for the signature method and once for the digests. |
+| `algorithm_legacy_allowed` | `unknown` | SHA-1 was admitted because `--allow-legacy-algorithms` was given. Blocking: caps the verdict at `indeterminate`. May appear more than once: for the signature method, for the reference digests, and inside a timestamp token for its message imprint and its `SignerInfo` digest. |
 | `transforms_allowed` | `passed` | Every transform is inside the allowlist. |
 | `transform_not_allowed` | `failed` | A transform is outside it; XSLT and XPath always are. |
 | `references_same_document` | `passed` | Every `ds:Reference/@URI` is `""` or `#id`. |
@@ -2695,13 +2926,14 @@ verify), and `revocation_not_checked` (the caller switched revocation off).
 | `xades_not_validated` | `info` | Unsigned qualifying properties this build does not validate are present; the message and `xades.unvalidated_properties` name them. Informational: they live outside the signature and cannot change what it says, and the ones that carry evidence this build *does* use — `CertificateValues`, `RevocationValues`, `TimeStampValidationData` — are consumed and not counted here. Omitted entirely when nothing is left to name. |
 | `xades_signing_certificate_bound` | `passed` | The signing certificate matches the digest the signed `SigningCertificate` / `SigningCertificateV2` property names. |
 | `xades_signing_certificate_mismatch` | `failed` | It does not: no offered certificate answers to the digest, an issuer and serial contradict it, the declared digest algorithm is outside the allowlist, or the certificate whose key verified the signature is not the digested one. The certificate-substitution check. |
-| `xades_signing_certificate_absent` | `unknown` | The signature carries no such property, so nothing signed says which certificate signed it. |
+| `xades_signing_certificate_absent` | `unknown` | The signature carries no such property in the signed properties its own references cover, so nothing signed says which certificate signed it. |
+| `xades_extra_qualifying_properties` | `info` | More than one `xades:QualifyingProperties` belongs to this signature; the one its own references cover is read and the others are ignored. Informational: an unreferenced `ds:Object` is open content the schema allows, so an extra one says nothing about the signature and must not be able to block it. |
 | `xades_signature_policy_implied` | `info` | An implied signature policy is declared. Informational: a declared policy describes how the signature was made and says nothing about whether it is sound, so it does not block. No policy is processed. |
 | `xades_signature_policy_explicit` | `info` | An explicit signature policy is declared. Its identifier is reported; no policy document is fetched or applied. Informational for the same reason. |
 | `signing_certificate_available` | `passed` | A usable certificate was found in `ds:KeyInfo`. |
 | `signing_certificate_missing` | `failed` | None was. |
 | `signing_time_present` | `info` | Reports whether a claimed `xades:SigningTime` was read. Informational: the claim is unauthenticated whether it is there or not, so its presence decides nothing. |
-| `cert_malformed` | `failed` | A certificate in the path could not be re-encoded or its signature is not a whole number of bytes. |
+| `cert_malformed` | `failed` | A certificate in the path could not be re-encoded, its signature is not a whole number of bytes, an extension's bytes do not decode as its OID says they should, or its outer `signatureAlgorithm` differs from `tbsCertificate.signature` (RFC 5280 4.1.1.2). |
 | `cert_path_ok` | `passed` | A path to a configured anchor was built and every rule above holds. |
 | `cert_path_unknown` | `unknown` | No trust anchors were configured. |
 | `cert_path_untrusted` | `failed` | No path to a configured anchor exists. The message says how many candidates were considered and names the issuer CN of the highest certificate reached, which is the public CA name a caller needs to add to the store. |
@@ -2722,15 +2954,17 @@ verify), and `revocation_not_checked` (the caller switched revocation off).
 | `cert_revoked` | `failed` | A certificate in the path was revoked at or before the validation time. `certificateHold` counts. |
 | `cert_revoked_after_validation_time` | `info` / `unknown` | A certificate was revoked *after* the instant being validated, so that revocation did not apply then. `info` when the validation time was **proven** by a fully verified signature timestamp, `unknown` when it was merely asserted by `--at` or the clock. Never `passed`: the certificate really was revoked, and the message gives the time and reason. |
 | `revocation_status_unknown` | `unknown` | No usable revocation data covers a certificate in the path, or no path was built to ask about. Blocking. A failed `--online` fetch reaches a verdict through this check and not on its own; see `online_fetch_failed`. |
-| `revocation_data_stale` | `unknown` | The data's `nextUpdate` had passed at the validation time, or it carries none and its `thisUpdate` precedes it. Also the OCSP `unknown` status. |
+| `revocation_data_stale` | `unknown` | The data's `nextUpdate` had passed at the validation time, or it carries none and its `thisUpdate` precedes it. |
+| `revocation_status_unknown_by_responder` | `unknown` | An authorised OCSP responder answered with the RFC 6960 `unknown` status: it does not know about this certificate, so it neither confirms nor denies a revocation. Distinct from `revocation_data_stale`, because fetching newer data from the same responder would not help. Blocking. |
 | `revocation_data_invalid` | `unknown` | Every source that covered a certificate was found but could not be used: signed by someone unauthorised, a delta or indirect CRL, an unimplemented `issuingDistributionPoint` form, a critical CRL extension this build does not implement, an OCSP response whose status is not `successful`, or an item larger than `MAX_REVOCATION_ITEM_BYTES`, whose size and limit the message names. The message names the cause. Emitted only after every tier has been tried. `unknown`, not `failed`: unusable data means the tool could not answer. |
 | `online_fetch_failed` | `info` | Under `--online`, one fetch did not produce a usable artefact. The message names the URL and the failure class: `timeout`, `http status <code>`, `too large` with the limit, `redirect`, `invalid`, `transport`, `destination_refused` with the rule that refused the destination before any socket was opened (`redirect_downgrade` for a redirect that would leave `https` for `http`, `credentials_require_https` for a request carrying credentials over a scheme that is not `https`, and the address and scheme rules), or `cache_collision` when `--online-cache` already held a different file under an artefact's name and nothing was overwritten. Informational: whether the missing data mattered is answered by the chain that needed it, through `revocation_status_unknown`, which blocks. |
+| `revocation_sources_disagree` | `info` | The usable revocation sources for one certificate did not say the same thing: one recorded a revocation and another reported it as not revoked. The message names both sides and which chain it is about. Reports rather than decides — the disagreement is already settled by [Which answer wins](#which-answer-wins), where a revocation beats a `good` from any other source — so it never blocks. |
 | `ocsp_responder_trusted` | `info` | An OCSP response was accepted under the RFC 6960 section 2.2 trusted-responder model: the responder is not the issuing CA and that CA did not delegate to it, but its certificate carries `id-kp-OCSPSigning` and chains to a configured anchor. Reported because this rests on the caller's trust store rather than on the issuing CA's word. |
 | `trust_list_loaded` | `info` | A `--trust-list` file was read; the message says how many anchors it contributed. |
 | `trust_list_unverified` | `unknown` | A trusted list was used without `--trust-list-signer`, so its own signature was not checked. Blocking. |
 | `trust_list_signature_ok` | `passed` | The list's enveloped XMLDSig signature verified against the supplied signer certificate and covers the whole document. |
 | `trust_list_signature_invalid` | `failed` | It did not verify, does not cover the whole list, uses an algorithm or transform outside the allowlist, or is absent while a signer was demanded. |
-| `trust_list_service_not_granted` | never emitted | Reserved in `CheckCode` and never produced by this build: a service that is not granted at the validation time is reported through `certificate_not_qualified` instead. Listed here because the code is part of the stable enumeration a consumer may see in a later release. |
+| `trust_list_service_not_granted` | `unknown` | A path was built and validated but ends at a trusted-list anchor the list does not record as granted at the validation time for the use the path was built for. Replaces `cert_path_ok` (and, for a timestamp, `timestamp_tsa_path_ok`); the other candidate paths are tried first. `unknown`, never `failed`: missing trust is not evidence against the signature, so it caps the verdict at `indeterminate` rather than making it `invalid`. See [A path may only end at a service that was granted then](#a-path-may-only-end-at-a-service-that-was-granted-then). |
 | `certificate_qualified` | `info` | The chain ends at a trusted-list CA/QC service granted at the validation time, and any post-eIDAS certificate asserts `QcCompliance`. |
 | `certificate_not_qualified` | `info` | The trusted list does not record the anchor's service as granted then, or a post-eIDAS certificate carries no `QcCompliance`. |
 | `certificate_qualified_unknown` | `info` | No trusted list covers the anchor, so qualified status is not determined. Distinct from `certificate_not_qualified`. |
@@ -2956,7 +3190,9 @@ refuse is `unsafe_document_title` here, so a created dossier is always
 extractable.
 
 `--zip` stores every `--document` payload as `zip -> base64`, in a
-one-member archive named after the document. An embedded dossier is always
+one-member archive named with the same canonical title `es:Title` carries,
+trimmed and in NFC, because `extract` names the file it writes from the
+archive member. An embedded dossier is always
 stored as `base64`, and is never encrypted either. A payload that deflates
 better than `max_zip_compression_ratio` is refused as `zip_ratio_limit`,
 because the reader would refuse to expand it.
@@ -3209,8 +3445,14 @@ and a token over the wrong one is a token nobody recomputes.
 | `xades:SignedProperties` | `signed-props-<signature id>`. |
 | each `ds:Reference` | `ref-<signature id>-<what it covers>`. |
 
-No identifier is random, and one already in use in the dossier is a refusal
-rather than a collision. Given the same input, key, signing time and flags,
+No identifier is random. One already in use in the dossier is disambiguated
+rather than allowed to collide: the signature's `Id` gains a `-2`, `-3` and so
+on until every identifier the new signature would introduce is free, and every
+identifier derived from it follows (`sig-doc0-2`, `signed-props-sig-doc0-2`,
+`ref-sig-doc0-2-object`). That is what makes co-signing work; see
+[Signing a dossier that is already signed](#signing-a-dossier-that-is-already-signed).
+A dossier that has exhausted 64 variants of one base identifier is
+`document_already_signed`. Given the same input, key, signing time and flags,
 **RSA PKCS#1 v1.5 produces byte-identical output**: the signature is a
 deterministic function of what it signs. RSA-PSS salts its input and ECDSA
 draws a nonce, so those two do not, and `--signing-time` is what pins the one
@@ -3244,6 +3486,30 @@ reported `reference_digest_mismatch` for.
 The ranges never overlap, because no signature this tool writes ever contains
 another, and they are applied last first so that the earlier ones stay valid
 as lengths change.
+
+### Nothing the dossier says decides what is signed
+
+Some of the values in a signature come out of the dossier rather than out of
+this tool: the `Id` and `OBJREF` attributes a `ds:Reference` points at, the
+declared media type an `xades:DataObjectFormat` carries, and the root
+namespace the signature-profile object declares. A dossier is untrusted input,
+and every digest is computed *after* those values are in the document, so a
+value that reached the XML unescaped would let the dossier write the reference
+set and the signed properties rather than describe them, under the operator's
+own key.
+
+Two rules hold, and both are enforced:
+
+- **Refusal.** An `Id` or `OBJREF` that is not an XML
+  [NCName](https://www.w3.org/TR/xml-names/#NT-NCName), a declared media type
+  outside the characters `create` itself allows a media type (both halves
+  non-empty, at most 64 characters, ASCII alphanumerics and `.-+_`), and a
+  namespace URI holding `<`, `>`, `"`, `'`, `&` or a control character are all
+  `document_not_signable`, before anything is rendered. The refusal names the
+  attribute, never its value.
+- **Escaping.** Every remaining interpolation goes through the same attribute
+  and text escapers the unsigned writer uses, so no dossier-derived string can
+  reach signature XML unescaped whatever a later change adds to the rendering.
 
 ### Algorithms
 
@@ -3423,19 +3689,30 @@ and refused with a clear message rather than half-supported.
 A second signature can be added to a dossier that already carries one, and a
 document that already has a signature can be given another: neither
 signature's references reach inside the other, so nothing that verified stops
-verifying.
+verifying. Co-signing a document this tool has already signed works too — the
+identifiers are disambiguated, as
+[Identifiers and determinism](#identifiers-and-determinism) describes, and the
+first signature is not read, not rewritten and not removed.
 
-Two cases are refused with `document_already_signed`, because writing them
+Three cases are refused with `document_already_signed`, because writing them
 would silently break what is already there:
 
 - adding a document signature to a dossier that carries a dossier-level
   signature or a dossier-level `es:TimeStamp`, both of which cover
   `es:Documents` and would stop matching the moment a document changes;
 - adding anything to a dossier carrying a signature with a `URI=""`
-  reference, which covers everything outside itself.
+  reference, which covers everything outside itself;
+- adding a signature to an element an existing `ds:Reference` already
+  resolves to, or to an element inside one. Adding a `ds:Signature` changes
+  the canonical form of its container and of every ancestor of that
+  container, so such a reference would stop matching: an `es:Document` with an
+  `Id` of its own, referenced by `URI="#doc0"`, is the shape this catches.
+  Only the same-document `#id` form is resolved, and a reference this tool
+  cannot resolve may name anything, so it counts as covering rather than
+  being assumed harmless.
 
-Nothing this tool writes falls into either case, so the limitation is about
-dossiers from elsewhere. `sign` never rewrites or removes a signature.
+Nothing this tool writes falls into any of the three, so the limitation is
+about dossiers from elsewhere. `sign` never rewrites or removes a signature.
 
 ### The JSON shape
 
@@ -3511,13 +3788,21 @@ is `signing_key_mismatch` and is refused before anything is signed.
   payload file, so a renamed embedded dossier lands in `court-7.dosszie.d`;
   a directory name that clashes on its own is renamed by the same rule. Each
   rename is reported as `output_name_deduplicated`, naming the document index
-  and its `dossier_path` only. Comparison stays case-insensitive, and a name
-  that still collides after renaming is the residual error
-  `output_name_collision`, which aborts the run with nothing written.
+  and its `dossier_path` only. Comparison stays case-insensitive. A renamed
+  candidate that is itself taken — which a title crafted to spell it makes
+  easy — does not end the run: the candidates keep counting,
+  `ruling-7.pdf`, then `ruling-7-2.pdf`, `ruling-7-3.pdf` and on, up to 64
+  candidates per name. Only a name still taken after all 64 is the residual
+  error `output_name_collision`, which aborts the run with nothing written.
 - All documents in the whole tree are decoded in memory and all output names,
   collisions, and destination existence are checked before the output
   directory is touched; a decode failure, an unsafe name, a collision, or a
   pre-existing destination file or subdirectory aborts with no files written.
+  The existence check and the creation cannot be one operation, so a name
+  taken in between is caught by the creation itself: `O_CREAT | O_EXCL` for a
+  file, `mkdir`'s own `EEXIST` for a `<file>.d` subdirectory. Both are
+  `output_exists` (exit 5) — the no-clobber rule working, not a broken
+  filesystem — and both roll the run back.
 - Derive output names from the document title only after sanitization.
   Reject empty titles, `.` / `..`, path separators, absolute paths, control,
   format, bidirectional, invisible, and private-use characters,
@@ -3526,7 +3811,14 @@ is `signing_key_mismatch` and is refused before anything is signed.
   extension must be short and alphanumeric or the document is rejected; it
   is appended when the title does not already end with it. Names are
   NFC-normalised and collisions are detected case-insensitively on the
-  normalised form.
+  normalised form. The comparison key is a real case fold — NFC, then the full
+  Unicode uppercase mapping, then the full lowercase mapping — not a plain
+  lower-casing, which leaves U+017F (`ſ`) and U+00DF (`ß`) alone and so would
+  miss two titles a filesystem that upper-cases to compare maps onto one file.
+  It deliberately errs towards more names comparing equal than any one
+  filesystem merges: the cost of that direction is a deduplicated name and a
+  warning, the cost of the other is a lost document. The key is only ever
+  compared; the file that is written keeps the title's own NFC spelling.
 - The output directory may be new or existing. Its path must not contain
   symlinks (or reparse points on Windows). A directory created by this run
   has mode `0700` on Unix; an existing directory keeps its mode.

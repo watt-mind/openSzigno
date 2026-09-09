@@ -1,0 +1,1 @@
+error [duplicate_id]: XML IDs must be non-empty and unique

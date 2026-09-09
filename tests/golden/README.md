@@ -34,7 +34,7 @@ above the change falls under, defeats the point of the directory.
 ## Layout
 
 ```text
-tests/golden/<fixture>/<command>[.<variant>].json|.txt|.exit
+tests/golden/<fixture>/<command>[.<variant>].json|.txt|.stderr.txt|.exit
 ```
 
 `<fixture>` is the fixture's path under `tests/fixtures/` with `.es3`
@@ -44,7 +44,8 @@ removed, so `tests/fixtures/xmldsig/openssl-rsa-sha256.es3` becomes
 | Suffix | Contents |
 | --- | --- |
 | `.json` | Stdout of the `--json` run, pretty-printed with sorted keys. The tool writes one compact line; the stored form is expanded so a diff is readable. |
-| `.txt` | Stdout of the human-mode run, byte for byte apart from the masking below. |
+| `.txt` | Stdout of the human-mode run (or, for `extract.stdout`, the document's raw payload), byte for byte apart from the masking below. |
+| `.stderr.txt` | Stderr of the same run, masked by the same rule. |
 | `.exit` | The process exit status, on its own line. |
 
 Variants:
@@ -53,6 +54,7 @@ Variants:
 | --- | --- |
 | none | `<command> <fixture> --json` |
 | `human` | `<command> <fixture>`, no `--json` |
+| `stdout` | `extract <fixture> --stdout --document '#0'`: the first document's raw payload bytes and nothing else |
 | `trusted` | `verify --trust-store <anchors> --at 2026-01-02T03:04:05Z`, signed fixtures only |
 | `trusted-in-validity` | The same, at `2027-01-01T00:00:00Z` |
 
@@ -84,18 +86,32 @@ instead: `crates/openszigno-cli/tests/create_encrypt.rs` and
 `crates/openszigno-author/tests/encryption.rs`.
 
 The commands captured over a fixture are `inspect`, `list`,
-`validate-structure`, `verify` and `extract` in JSON mode, and `inspect`,
-`list`, `validate-structure` and `verify` in human mode; `create` and `sign`
+`validate-structure`, `verify` and `extract` in JSON mode, `inspect`,
+`list`, `validate-structure` and `verify` in human mode, and
+`extract --stdout`; `create` and `sign`
 are captured in both modes by the two groups above. `extract` writes into a
 throwaway directory under the
 system temporary directory; the script fails the run if that directory's path
 ever appears in captured output, because the envelope must never carry an
 absolute path.
 
-Only stdout is captured. In JSON mode stdout is the whole envelope, warnings
-included; in human mode warnings and errors go to stderr, so a human golden
-for a fixture that only fails is empty and its `.exit` file carries the
-finding.
+Both streams are captured, each case writing a stdout golden, a
+`<case>.stderr.txt` and a `<case>.exit`. In JSON mode stdout is the whole
+envelope, warnings included, and stderr is expected to be empty — the empty
+`.stderr.txt` beside each `.json` is what makes "JSON mode says nothing on
+stderr" a checked contract rather than a habit. In human mode warnings and
+errors go to stderr instead, so a human golden for a fixture that only fails
+has an empty `.txt` and its wording pinned in `.stderr.txt`. Capturing stdout
+alone left every one of those diagnostics unpinned, and left the "no absolute
+path ever appears in the output" check looking at the one stream a leaked path
+was least likely to be on; that check now runs over both.
+
+`extract.stdout` is the one case whose stdout is not an envelope at all:
+`extract --stdout --document '#0'` writes the first document's payload bytes
+and nothing else. Where that document decodes, the golden is the payload;
+where it does not — an encrypted document, an unparseable dossier — the
+golden is the refusal in `.stderr.txt` and the status in `.exit`. It passes no
+`--output`, so no temporary path is involved.
 
 ## The trusted runs
 
@@ -126,6 +142,9 @@ golden that still holds a real clock reading is obvious on sight.
 | `signatures[].validation_time` | JSON | Only when the sibling `validation_time_source` is `current_time`. With `--at` the source is `at_flag` and the value is the operator's, so it stays. |
 | `Validation time: ...` | Human | Always. The line renders `verification_time.effective`. |
 | The indented `validation time: ... (source: current_time)` line | Human | The per-signature line, under exactly the JSON rule above. |
+
+Stderr is masked with the human rule, because that is the renderer writing
+to it.
 
 Nothing else is normalised. Byte counts, certificate validity dates, creation
 dates, digests, and the order of every array are part of the contract and are

@@ -56,6 +56,21 @@ const TABLE: &[(&str, &str, &str)] = &[
     ("zip", "application", "zip"),
 ];
 
+/// Whether one half of a `type/subtype` is written in the characters a media
+/// type is allowed to use.
+///
+/// RFC 2045 tokens, narrowed to what the profile actually carries. The signer
+/// applies the same rule to a media type it reads back out of a dossier, so
+/// that a type this crate would refuse to write is also one it refuses to
+/// copy into a signed `xades:DataObjectFormat`.
+pub(crate) fn is_essence_token(part: &str) -> bool {
+    !part.is_empty()
+        && part.len() <= 64
+        && part.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '.' | '-' | '+' | '_')
+        })
+}
+
 /// Split a caller-supplied `type/subtype` into its two halves.
 ///
 /// Only the essence is accepted: a parameter such as `; charset=utf-8` is not
@@ -69,14 +84,7 @@ fn split_essence(essence: &str) -> Result<(String, String), Error> {
         )
     };
     let (media_type, subtype) = essence.split_once('/').ok_or_else(invalid)?;
-    let usable = |part: &str| {
-        !part.is_empty()
-            && part.len() <= 64
-            && part.chars().all(|character| {
-                character.is_ascii_alphanumeric() || matches!(character, '.' | '-' | '+' | '_')
-            })
-    };
-    if !usable(media_type) || !usable(subtype) {
+    if !is_essence_token(media_type) || !is_essence_token(subtype) {
         return Err(invalid());
     }
     Ok((

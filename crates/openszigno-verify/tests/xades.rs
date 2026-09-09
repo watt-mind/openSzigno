@@ -7,7 +7,7 @@
 mod common;
 
 use common::{
-    CertSpec, DossierSpec, SHA1_URI, SHA512_URI, SigningCertificateSpec, TestKey, build,
+    CertSpec, DossierSpec, SHA1_URI, SHA512_URI, SigningCertificateSpec, TestKey, XADES_NS, build,
     document_signature, issued_by, keys, rsa_key, self_signed,
 };
 use openszigno_verify::codes::{CheckCode, CheckStatus};
@@ -514,4 +514,175 @@ fn the_binding_does_not_grant_trust() {
         CheckStatus::Passed,
     );
     assert_check(&report, CheckCode::CertPathUntrusted, CheckStatus::Failed);
+}
+
+// ---------------------------------------------------------------------------
+// Decoy `ds:Object` children (LAB-308)
+// ---------------------------------------------------------------------------
+//
+// The XMLDSig schema allows any number of `ds:Object` children of a
+// `ds:Signature`, with open content, and nothing requires a reference to cover
+// any given one. So anyone able to append bytes to a dossier can add an
+// `xades:QualifyingProperties` the signature never signed. Which properties
+// stage C reads must therefore be decided by what the signature's own
+// references cover, and one inserted decoy must change nothing but the
+// informational `xades_extra_qualifying_properties`.
+
+/// A `ds:Object` holding an empty `xades:QualifyingProperties`, covered by no
+/// reference, emitted before the signature's real one.
+fn empty_decoy() -> String {
+    format!(
+        "<ds:Object Id=\"decoy-doc\"><xades:QualifyingProperties xmlns:xades=\"{XADES_NS}\" Target=\"#sig-doc\"/></ds:Object>"
+    )
+}
+
+/// The same dossier as [`dossier`], with unreferenced decoy objects prepended
+/// to the signature's own objects.
+fn dossier_with_decoys(
+    pki: &Pki,
+    spec: Option<SigningCertificateSpec>,
+    certificates: Vec<Vec<u8>>,
+    decoys: Vec<String>,
+) -> String {
+    let mut signature = document_signature(certificates);
+    signature.signing_certificate = spec;
+    signature.decoy_objects = decoys;
+    let dossier = DossierSpec {
+        document_signature: Some(signature),
+        ..Default::default()
+    };
+    build(&dossier, &[("doc", &pki.signer_key)])
+}
+
+/// Every check bar the one the decoy is expected to add.
+fn codes_without_the_extra_notice(report: &VerifyReport) -> Vec<String> {
+    let extra = format!(
+        "{}={}",
+        CheckCode::XadesExtraQualifyingProperties.as_str(),
+        CheckStatus::Info.as_str()
+    );
+    codes(report)
+        .into_iter()
+        .filter(|code| *code != extra)
+        .collect()
+}
+
+/// The substitution case with a decoy prepended. Before the fix the empty
+/// decoy was the first `xades:QualifyingProperties` under the signature, so
+/// stage C read *it*: `xades_signing_certificate_mismatch` (failed, so
+/// `invalid`) became `xades_signing_certificate_absent` (unknown, so
+/// `indeterminate`), and a forged dossier stopped being reported as forged.
+#[test]
+fn an_empty_decoy_object_does_not_soften_a_substituted_certificate() {
+    let pki = pki();
+    let certificates = vec![pki.signer_der.clone(), pki.twin_der.clone()];
+    let plain = dossier_with_decoys(
+        &pki,
+        Some(SigningCertificateSpec::v1(pki.twin_der.clone())),
+        certificates.clone(),
+        Vec::new(),
+    );
+    let decoyed = dossier_with_decoys(
+        &pki,
+        Some(SigningCertificateSpec::v1(pki.twin_der.clone())),
+        certificates,
+        vec![empty_decoy()],
+    );
+    let before = run(&plain, vec![pki.root_der.clone()]);
+    let after = run(&decoyed, vec![pki.root_der.clone()]);
+
+    assert_check(
+        &after,
+        CheckCode::XadesSigningCertificateMismatch,
+        CheckStatus::Failed,
+    );
+    assert_eq!(after.verdict, Verdict::Invalid);
+    assert_eq!(after.verdict, before.verdict);
+    // The decoy adds the informational notice and nothing else.
+    assert_eq!(
+        codes_without_the_extra_notice(&after),
+        codes_without_the_extra_notice(&before)
+    );
+    assert_check(
+        &after,
+        CheckCode::XadesExtraQualifyingProperties,
+        CheckStatus::Info,
+    );
+    // The properties read are still the covered ones, so the signer reported
+    // is the identity the signed property designates.
+    assert_eq!(after.signatures[0].signing_certificate_index, Some(1));
+    assert_eq!(
+        after.signatures[0].xades.signing_time,
+        before.signatures[0].xades.signing_time
+    );
+}
+
+/// The same decoy on a sound signature changes nothing either: the binding is
+/// decided by the covered properties, so the notice is the only difference.
+#[test]
+fn an_empty_decoy_object_does_not_disturb_a_bound_signature() {
+    let pki = pki();
+    let plain = dossier_with_decoys(
+        &pki,
+        Some(SigningCertificateSpec::v1(pki.signer_der.clone())),
+        vec![pki.signer_der.clone()],
+        Vec::new(),
+    );
+    let decoyed = dossier_with_decoys(
+        &pki,
+        Some(SigningCertificateSpec::v1(pki.signer_der.clone())),
+        vec![pki.signer_der.clone()],
+        vec![empty_decoy()],
+    );
+    let before = run(&plain, vec![pki.root_der.clone()]);
+    let after = run(&decoyed, vec![pki.root_der.clone()]);
+
+    assert_check(
+        &after,
+        CheckCode::XadesSigningCertificateBound,
+        CheckStatus::Passed,
+    );
+    assert_eq!(
+        codes_without_the_extra_notice(&after),
+        codes_without_the_extra_notice(&before)
+    );
+    assert_eq!(after.verdict, before.verdict);
+}
+
+/// A decoy carrying a whole *signed-properties* block of its own — a different
+/// `SigningCertificate`, a different `SigningTime` — is still unsigned, so
+/// none of it is read.
+#[test]
+fn a_decoy_signing_certificate_is_never_the_one_that_binds() {
+    let pki = pki();
+    let decoy = format!(
+        "<ds:Object Id=\"decoy-doc\"><xades:QualifyingProperties xmlns:xades=\"{XADES_NS}\" Target=\"#sig-doc\">\
+<xades:SignedProperties Id=\"sp-decoy\"><xades:SignedSignatureProperties>\
+<xades:SigningTime>1999-12-31T23:59:59Z</xades:SigningTime>\
+</xades:SignedSignatureProperties></xades:SignedProperties></xades:QualifyingProperties></ds:Object>"
+    );
+    let xml = dossier_with_decoys(
+        &pki,
+        Some(SigningCertificateSpec::v1(pki.signer_der.clone())),
+        vec![pki.signer_der.clone()],
+        vec![decoy],
+    );
+    let report = run(&xml, vec![pki.root_der.clone()]);
+
+    assert_check(
+        &report,
+        CheckCode::XadesSigningCertificateBound,
+        CheckStatus::Passed,
+    );
+    assert_check(
+        &report,
+        CheckCode::XadesExtraQualifyingProperties,
+        CheckStatus::Info,
+    );
+    // The signed properties the signature covers, not the ones prepended to
+    // it.
+    assert_eq!(
+        report.signatures[0].xades.signing_time.as_deref(),
+        Some("2020-01-01T00:00:00Z")
+    );
 }

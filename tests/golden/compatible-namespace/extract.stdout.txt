@@ -1,0 +1,1 @@
+Company-court namespace synthetic fixture.

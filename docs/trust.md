@@ -44,13 +44,22 @@ openszigno verify dossier.es3 --json \
 
 A directory holding certificate files directly, with no `anchors`
 subdirectory, is read the same way. The split is a convention, not a grant:
-**a certificate is a trust anchor if and only if it is self-signed**, so
-dropping an intermediate into `anchors/` makes it an extra untrusted path
-candidate rather than a trusted one.
+**a certificate in this directory is a trust anchor if and only if it is
+self-signed**, so dropping an intermediate into `anchors/` makes it an extra
+untrusted path candidate rather than a trusted one. A trusted list is the other
+way round: a certificate it names anchors a path whether or not it is
+self-signed, because the list says so.
 
 Every file is parsed at load time. One malformed entry fails the whole store
 (`trust_store_invalid`, exit 3), because a half-loaded store would silently
 change what "trusted" means.
+
+The store is bounded twice: 4 MiB per file, 1024 files per directory, and
+**64 MiB across the whole store**, counting `anchors/` and `intermediates/`
+together so a store cannot be padded out by splitting it. Every file is read
+before any of it is parsed, so a store over the total is refused for its size,
+not for whatever the file that crossed the line held. Exceeding it is the same
+`trust_store_invalid` refusal, and a refusal it stays: nothing is truncated.
 
 ### Where the Hungarian roots come from
 
@@ -157,10 +166,42 @@ every `X509Certificate` in the service digital identity becomes a trust anchor,
 carrying the service's status timeline: the current `ServiceStatus` with its
 `StatusStartingTime`, plus every `ServiceHistoryInstance`.
 
+**A listed certificate anchors a path whether or not it is self-signed.** In a
+real national list the CA/QC identities are the *issuing* CAs, which are
+intermediates: the Hungarian list records NetLock's qualified issuing CAs as
+CA/QC services with pre-eIDAS history, and the root that signed them only as a
+qualified timestamping service granted from 2018. Following ETSI TS 119 615,
+the path ends where the list speaks — at the issuing CA — rather than climbing
+to the root and being judged by an entry that was never about issuing
+certificates. The nearest listed certificate along a chain wins, so a root's
+entry cannot override the issuing CA's below it; when the nearest one's service
+was not granted at the validation time, the search carries on upward, and only
+refuses if no listed certificate and no `--trust-store` anchor above it will
+end the path either. The terminating certificate is the trust anchor: nothing
+above it is validated, it is the last entry of the reported `chain` with
+`trust_anchor_origin: "trust_list"`, its revocation is not checked (an anchor's
+never is), and `qualified` follows from its service exactly as for a listed
+root.
+
 A path that ends at such an anchor is trusted only if the service was granted
 **at the validation time**. That is what lets a signature made while a CA was
 supervised still verify after that CA was withdrawn, and stops a signature made
-after the withdrawal from doing so. The statuses treated as granted are:
+after the withdrawal from doing so: the path then reports
+`trust_list_service_not_granted` instead of `cert_path_ok`, and every other
+candidate path is tried before that is concluded. The check is `unknown`, not
+`failed` — trust you no longer have is not evidence against a signature — so
+the run is capped at `indeterminate` and is never `invalid` for this reason
+alone. A `--trust-store` anchor is unaffected.
+
+The kind of service has to match the use: a CA/QC service for a signing path
+(and for an OCSP responder's own path), a TSA/QTST service for a timestamping
+one. Where a list records a certificate only under some *other* kind of
+service, it has said nothing about that use, and the anchor is treated as a
+trust-store one would be — provided some service it does record was granted
+then. A certificate every one of whose listed services has been withdrawn
+anchors nothing.
+
+The statuses treated as granted are:
 
 - `.../Svcstatus/granted`
 - `.../Svcstatus/recognisedatnationallevel`
@@ -186,7 +227,7 @@ they are not equally strong:
 
 | Form | What it can do |
 | --- | --- |
-| `X509Certificate` | Becomes a **trust anchor**, and can establish that a chain certificate *was issued by* the listed service — a verified signature, not a name match. |
+| `X509Certificate` | Becomes a **trust anchor** — self-signed or not, so a listed issuing CA ends a path — and can establish that a chain certificate *was issued by* the listed service: a verified signature, not a name match. |
 | `X509SKI` | Recognises a certificate already in the validated chain by its `subjectKeyIdentifier`. Contributes **no anchor** and grants no trust; it can only decide `qualified`. |
 | `X509SubjectName` | The same, matched attribute by attribute against the certificate's subject, exactly as written — no case folding, no normalisation. The weakest form. |
 
@@ -257,7 +298,14 @@ OCSP response fails the run (`revocation_store_invalid`, exit 3) — "no
 revocation data" is itself an answer that changes a verdict, so a store that
 quietly dropped half its contents would be worse than no store at all.
 
-### Where the data comes from, in priority order
+The store is bounded twice: `MAX_REVOCATION_ITEM_BYTES` (16 MiB) per file,
+4096 files per directory, and **256 MiB across the whole store**, counting
+`crls/` and `ocsp/` together. Every file is read before any of it is
+classified, so a store over the total is refused for its size rather than for
+the contents of whichever file crossed the line, with the same
+`revocation_store_invalid` code.
+
+### Where the data comes from, and which answer wins
 
 1. The signature's own validation data — `CRLValues` and `OCSPValues` — from
    **either** placement: directly under
@@ -269,8 +317,27 @@ quietly dropped half its contents would be worse than no store at all.
    1.3.2-namespaced values under a 1.4.1-namespaced container.
 2. `--revocation-store DIR`.
 
-Within each tier OCSP is asked first, because it answers about *this*
+Within each tier OCSP is read first, because it answers about *this*
 certificate rather than about a list.
+
+That order is about where the tool looks first, **not** about what it
+believes. Every source is asked about every certificate, and the answers are
+then weighed:
+
+- A revocation from any source beats `good` from any other. The signature's own
+  `RevocationValues` are supplied by the signer, so an older embedded OCSP
+  `good` that is still inside its own `nextUpdate` cannot hide the newer CRL in
+  your store that revokes the same certificate.
+- Among answers that say the same thing, the one speaking for the later instant
+  is reported: the later `producedAt` where the source stated one, otherwise the
+  later `thisUpdate`. `chain[].revocation.source` says which source that was.
+- Freshness is unchanged: a stale source answers nothing at all, whatever it
+  says.
+
+When the usable sources did not agree, `revocation_sources_disagree` (`info`)
+says so and names both sides, and the same sentence appears in that
+certificate's `chain[].revocation.detail`. It never blocks: the disagreement is
+already settled by the rules above.
 
 ### What real dossiers actually embed, and what you still have to fetch
 
@@ -350,9 +417,9 @@ had already chosen to trust.
 
 ### One unusable answer is not the end
 
-Sources are consulted in the priority order above, and a source that is found
-but refused does not stop the search: the next tier is tried, and only when
-they are all exhausted is the certificate reported as uncovered. An OCSP
+A source that is found but refused does not stop the search: every other source
+is still read, and only when they are all exhausted is the certificate reported
+as uncovered. An OCSP
 response this build cannot authorise, followed by the CA's own CRL, ends as
 `good` from the CRL.
 
@@ -489,12 +556,23 @@ openszigno verify dossier.es3 --json \
   | unspecified | `0.0.0.0/8`, `::` |
   | broadcast | `255.255.255.255` |
   | multicast | `224.0.0.0/4`, `ff00::/8` |
+  | carrier-grade NAT | `100.64.0.0/10` |
+  | IETF protocol assignments | `192.0.0.0/24` |
+  | benchmarking | `198.18.0.0/15` |
+  | site-local (deprecated) | `fec0::/10` |
+  | 6to4 | `2002::/16` |
+  | Teredo | `2001::/32` |
+  | NAT64 (well-known prefix) | `64:ff9b::/96` |
   | cloud instance metadata | `169.254.169.254`, `fd00:ec2::254` |
   | by name | `localhost`, `*.localhost` |
 
-  An IPv4-mapped IPv6 address (`::ffff:127.0.0.1`) is judged as the IPv4
-  address it carries. `--online-allow-private` waives these address rules, and
-  only these, for an internal CA that really does publish on your own network.
+  The last four IPv6 rows are there because each carries an IPv4 destination
+  inside the address, which the IPv4 rules above would otherwise never see.
+
+  An IPv4-mapped IPv6 address (`::ffff:127.0.0.1`) and the IPv4-compatible
+  form (`::127.0.0.1`) are both judged as the IPv4 address they carry.
+  `--online-allow-private` waives these address rules, and only these, for an
+  internal CA that really does publish on your own network.
 - **The check is bound to the connection.** The addresses the policy approved
   are the only ones the request may be sent to: they are handed to the HTTP
   client as the resolution for that host and port, and a name that was not

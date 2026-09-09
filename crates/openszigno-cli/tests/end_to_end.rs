@@ -411,13 +411,13 @@ fn a_trusted_list_supplies_a_qualified_anchor() {
         "--revocation-store",
         stores.revocation().to_str().unwrap(),
     ]);
+    let response = parse_json(&output);
     assert_eq!(
         status(&output),
         0,
         "stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let response = parse_json(&output);
     assert_eq!(response["data"]["verdict"], "valid");
     assert_eq!(response["data"]["signatures"][0]["qualified"], true);
     let anchor = response["data"]["signatures"][0]["chain"]
@@ -431,6 +431,124 @@ fn a_trusted_list_supplies_a_qualified_anchor() {
     assert_eq!(snapshot["territory"], "HU");
     assert_eq!(snapshot["sequence_number"], 7);
     assert_eq!(snapshot["signature_verified"], true);
+}
+
+/// A 2014 signature under an issuing CA the list records, with the root listed
+/// only as a qualified timestamping service granted from 2018 and pinned
+/// nowhere. This is the shape of a real Hungarian dossier, and the path has to
+/// end at the issuing CA: judging it by the root's timestamping entry would
+/// refuse a signature the list plainly vouches for.
+#[test]
+fn a_listed_issuing_ca_ends_the_path_over_the_command_line() {
+    const NOT_BEFORE: (i32, u8, u8) = (2003, 1, 1);
+    const AT_2014: &str = "2014-06-01T00:00:00Z";
+    let root_key = rsa_key(keys::ROOT_RSA2048);
+    let ca_key = rsa_key(keys::INTERMEDIATE_RSA2048);
+    let signer_key = rsa_key(keys::SIGNER_RSA2048);
+
+    let mut root_spec = CertSpec::ca("openSzigno Test Root", BasicConstraints::Unconstrained);
+    root_spec.not_before = NOT_BEFORE;
+    let root = self_signed(&root_spec, &root_key);
+    let mut ca_spec = CertSpec::ca(
+        "Qualified openSzigno CA 2009",
+        BasicConstraints::Constrained(0),
+    );
+    ca_spec.not_before = NOT_BEFORE;
+    let ca = issued_by(&ca_spec, &ca_key, &root, &root_key);
+    let mut signer_spec = CertSpec::signer("openSzigno Test Signer");
+    signer_spec.not_before = NOT_BEFORE;
+    let signer = issued_by(&signer_spec, &signer_key, &ca, &ca_key);
+    let mut tsa_spec = CertSpec::signer("openSzigno Test TSA");
+    tsa_spec.not_before = NOT_BEFORE;
+    tsa_spec.custom_extensions = vec![extended_key_usage_extension(&[ID_KP_TIME_STAMPING], true)];
+    let tsa = issued_by(&tsa_spec, &rsa_key(keys::THIRD_RSA2048), &ca, &ca_key);
+
+    let mut sig = document_signature(vec![signer.der.clone()]);
+    sig.signing_certificate = Some(SigningCertificateSpec::v1(signer.der.clone()));
+    sig.certificate_values = vec![ca.der.clone()];
+    let mut timestamp = TimestampSpec::new(
+        rsa_key(keys::THIRD_RSA2048),
+        tsa.der.clone(),
+        "2014-05-30T09:00:00Z",
+    );
+    timestamp.token_certificates = vec![ca.der.clone()];
+    sig.timestamp = Some(timestamp);
+    sig.signing_time = Some("2014-05-30T08:00:00Z".to_owned());
+    let spec = DossierSpec {
+        document_signature: Some(sig),
+        ..Default::default()
+    };
+    let xml = build(&spec, &[("doc", &signer_key)]);
+
+    let directory = scratch();
+    let path = write_dossier(&directory, &xml);
+    let revocation = directory.path().join("revocation/crls");
+    std::fs::create_dir_all(&revocation).expect("the revocation store is created");
+    let mut crl = CrlSpec::new(ca.der.clone(), rsa_key(keys::INTERMEDIATE_RSA2048));
+    crl.this_update = "2014-05-01T00:00:00Z".to_owned();
+    crl.next_update = Some("2014-07-01T00:00:00Z".to_owned());
+    std::fs::write(revocation.join("ca.crl"), build_crl(&crl)).expect("the CRL is written");
+
+    // The list names the issuing CA as a supervised, later granted, CA/QC
+    // service, and the root only as a timestamping service that started in
+    // 2018 — which says nothing about a 2014 signature.
+    let mut ca_service = TlService::ca_qc("Qualified openSzigno CA 2009", ca.der.clone());
+    ca_service.status_starting_time = "2016-06-30T00:00:00Z".to_owned();
+    ca_service.history = vec![(
+        "http://uri.etsi.org/TrstSvc/TrustedList/Svcstatus/undersupervision".to_owned(),
+        "2005-01-01T00:00:00Z".to_owned(),
+    )];
+    let mut root_service = TlService::ca_qc("openSzigno Test Root QTSA", root.der.clone());
+    root_service.service_type = "http://uri.etsi.org/TrstSvc/Svctype/TSA/QTST".to_owned();
+    root_service.status_starting_time = "2018-01-01T00:00:00Z".to_owned();
+
+    let tl_signer = self_signed(
+        &CertSpec::signer("openSzigno Test Trusted List Signer"),
+        &rsa_key(keys::SECOND_RSA2048),
+    );
+    let mut list = TrustListSpec::new(vec![ca_service, root_service]);
+    list.signer = Some((rsa_key(keys::SECOND_RSA2048), tl_signer.der.clone()));
+    let list_path = directory.path().join("HU_TL.xml");
+    std::fs::write(&list_path, build_trust_list(&list)).expect("the list is written");
+    let signer_path = directory.path().join("tl-signer.pem");
+    write_pem(&signer_path, "CERTIFICATE", &tl_signer.der);
+
+    let output = run(&[
+        "verify",
+        path.to_str().unwrap(),
+        "--json",
+        "--at",
+        AT_2014,
+        "--trust-list",
+        list_path.to_str().unwrap(),
+        "--trust-list-signer",
+        signer_path.to_str().unwrap(),
+        "--revocation-store",
+        directory.path().join("revocation").to_str().unwrap(),
+    ]);
+    assert_eq!(
+        status(&output),
+        0,
+        "stdout: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let response = parse_json(&output);
+    assert_eq!(response["data"]["verdict"], "valid");
+    assert_eq!(response["data"]["signatures"][0]["qualified"], true);
+    assert_eq!(
+        response["data"]["signatures"][0]["qualified_service"],
+        "Qualified openSzigno CA 2009"
+    );
+    // The JSON contract is unchanged: the chain simply ends one entry earlier,
+    // at the issuing CA, with the trusted list as its provenance.
+    let chain = response["data"]["signatures"][0]["chain"]
+        .as_array()
+        .expect("an array");
+    assert_eq!(chain.len(), 2);
+    let anchor = chain.last().expect("an anchor");
+    assert_eq!(anchor["is_trust_anchor"], true);
+    assert_eq!(anchor["trust_anchor_origin"], "trust_list");
+    assert_eq!(anchor["subject_cn"], "Qualified openSzigno CA 2009");
 }
 
 /// Without `--trust-list-signer` the list is used but reported as unverified,

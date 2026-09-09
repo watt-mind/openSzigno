@@ -751,6 +751,48 @@ fn three_documents_with_the_same_title_each_get_their_own_name() {
     assert_eq!(count_entries(&output_dir), 3);
 }
 
+/// A title crafted to spell the deduplicated name a later document will be
+/// given used to abort the whole extraction: deduplication produced one
+/// candidate, `stem-<index>`, and a document that had already taken it left
+/// nothing to fall back on, so `output_name_collision` was raised and not one
+/// file — including every innocent document in the dossier — was written.
+/// The candidates now count upwards until one is free.
+#[test]
+fn a_title_crafted_to_take_the_deduplicated_name_does_not_abort_the_run() {
+    let xml = dossier(&format!(
+        "{}{}{}{}",
+        text_document(0, "ruling.txt", "one"),
+        // Exactly the name document 2's deduplication will reach for first.
+        text_document(1, "ruling-2.txt", "decoy"),
+        text_document(2, "ruling.txt", "two"),
+        text_document(3, "keep.txt", "innocent"),
+    ));
+    let (output, _directory, output_dir) = extract_with(&xml, &[]);
+    assert!(output.status.success(), "the run must not be aborted");
+    let response = parse_json(&output);
+    let names: Vec<&str> = response["data"]["extracted"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["filename"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        names,
+        ["ruling.txt", "ruling-2.txt", "ruling-2-2.txt", "keep.txt"]
+    );
+    assert_eq!(warning_codes(&response), ["output_name_deduplicated"]);
+    assert_eq!(count_entries(&output_dir), 4);
+    assert_eq!(
+        std::fs::read(output_dir.join("ruling-2-2.txt")).unwrap(),
+        b"two"
+    );
+    // The document that never collided is on disk, which is the whole point.
+    assert_eq!(
+        std::fs::read(output_dir.join("keep.txt")).unwrap(),
+        b"innocent"
+    );
+}
+
 #[test]
 fn deduplication_is_scoped_to_one_directory() {
     // The same title inside and outside an embedded dossier is no clash: the
@@ -891,16 +933,25 @@ fn a_deduplicated_name_that_would_be_too_long_is_an_unsafe_output_name() {
     assert_eq!(count_entries(&output_dir), 0, "nothing may be written");
 }
 
+/// `output_name_collision` survives, for the one case it is still for: every
+/// deduplicated candidate taken. Sixty-four candidates are tried, so the
+/// dossier below spells all sixty-four of the last document's out in advance —
+/// `a-65.txt`, `a-65-2.txt` … `a-65-64.txt` — and then hands it a title that
+/// collides. Nothing is written, exactly as before.
 #[test]
-fn a_name_that_still_collides_after_renaming_is_the_residual_error() {
-    // The deduplicated name of document 2 is exactly document 1's own title.
-    let xml = dossier(&format!(
-        "{}{}{}",
-        text_document(0, "a.txt", "one"),
-        text_document(1, "a-2.txt", "two"),
-        text_document(2, "a.txt", "three"),
-    ));
-    let (output, _directory, output_dir) = extract_with(&xml, &[]);
+fn a_name_that_exhausts_every_deduplicated_candidate_is_the_residual_error() {
+    let last = 65;
+    let mut documents = text_document(0, "a.txt", "one");
+    for attempt in 1..=64 {
+        let title = match attempt {
+            1 => format!("a-{last}.txt"),
+            other => format!("a-{last}-{other}.txt"),
+        };
+        documents.push_str(&text_document(attempt, &title, "decoy"));
+    }
+    documents.push_str(&text_document(last, "a.txt", "colliding"));
+
+    let (output, _directory, output_dir) = extract_with(&dossier(&documents), &[]);
     assert_eq!(output.status.code(), Some(5));
     assert_eq!(
         parse_json(&output)["errors"][0]["code"],

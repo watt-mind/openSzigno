@@ -218,6 +218,34 @@ file, the `--csc` configuration and the secrets it names, and each entry of a
 - **A refusal never names the file**, because the path may be private. It names
   the kind of file and, where an operator needs it to act, the limit.
 
+## Text the input supplied
+
+A dossier chooses its own title, its document titles, the two halves of every
+MIME type it declares, the extension and character set beside them, its object
+references, its transform names and the `Id` of every signature it carries. A
+verifier's report adds the subject and issuer common names of certificates that
+came out of that same file. None of it is typed by the operator, and all of it
+ends up in the JSON envelope and, because the human summary is rendered from
+that envelope, on a terminal, which reads more than text.
+
+Every such value is sanitised, by the same filter and to the same rule as the
+values a remote service supplies below: Unicode `Cc` and `Cf` are dropped
+rather than escaped, and the value is bounded, ending in `...` inside its cap
+when it was cut short. A title is bounded to 256 characters, because real
+dossier titles are long prose and cutting one short would make the tool wrong
+about its input; every other value is bounded to 128. The pass runs once, over
+the finished `data` of every command that reads a dossier, which is the one
+point both output channels go through, and warnings and errors go through it
+too. `Cc` was never reachable from a dossier — the bounded XML parser refuses
+the C0 and C1 ranges outright — but `Cf`, where the bidirectional overrides
+live, was, and so was unbounded length: nothing in the e-dossier format bounds
+a `subtype`.
+
+One string is deliberately left as it stands: the name of a file `extract`
+wrote. The extraction name rules already refuse a title carrying a control,
+invisible or formatting character and bound what is left, and the envelope has
+to keep naming the file that is actually on disk.
+
 ## Text a remote service supplied
 
 A Cloud Signature Consortium service chooses the credential identifiers it
@@ -279,10 +307,16 @@ attacker-supplied until something the operator configured vouches for it:
   loopback (`127.0.0.0/8`, `::1`), private (`10.0.0.0/8`, `172.16.0.0/12`,
   `192.168.0.0/16`), link-local (`169.254.0.0/16`, `fe80::/10`), unique-local
   (`fc00::/7`), unspecified (`0.0.0.0/8`, `::`), broadcast
-  (`255.255.255.255`), multicast (`224.0.0.0/4`, `ff00::/8`), and the cloud
+  (`255.255.255.255`), multicast (`224.0.0.0/4`, `ff00::/8`), carrier-grade
+  NAT (`100.64.0.0/10`), IETF protocol assignments (`192.0.0.0/24`),
+  benchmarking (`198.18.0.0/15`), the deprecated site-local prefix
+  (`fec0::/10`), the tunnel prefixes that carry an IPv4 destination inside the
+  address — 6to4 (`2002::/16`), Teredo (`2001::/32`) and the well-known NAT64
+  prefix (`64:ff9b::/96`) — and the cloud
   instance metadata addresses `169.254.169.254` and `fd00:ec2::254`, plus the
-  names `localhost` and `*.localhost`. An IPv4-mapped IPv6 address is judged as
-  the IPv4 address it carries. The host's *resolved* addresses are checked
+  names `localhost` and `*.localhost`. An IPv4-mapped IPv6 address
+  (`::ffff:127.0.0.1`) and the IPv4-compatible form (`::127.0.0.1`) are both
+  judged as the IPv4 address they carry. The host's *resolved* addresses are checked
   against the same list before connecting, so a public name that resolves
   inwards is refused too. Refusals are reported as `online_fetch_failed`
   (`info`) with the class `destination_refused` and the rule that refused the
@@ -398,7 +432,8 @@ openSzigno aims to guarantee that a hostile input cannot:
   the read;
 - put terminal control sequences or bidirectional overrides into human output,
   an error message, or the JSON envelope, whether through a dossier or through
-  a remote signing service;
+  a remote signing service, or make any single value it chose — a title, a MIME
+  `subtype` — unbounded in either;
 - leave a partial extraction behind after a mid-run failure;
 - smuggle content into the machine-readable channel, since JSON mode emits
   exactly one object on stdout and all diagnostics go to stderr;

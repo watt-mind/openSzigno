@@ -938,3 +938,45 @@ fn a_ca_extended_key_usage_is_enforced_only_when_critical() {
     )]);
     assert_check(&permitted, CheckCode::CertPathOk, CheckStatus::Passed);
 }
+
+/// RFC 5280 section 4.1.1.2: the outer `signatureAlgorithm` must repeat
+/// `tbsCertificate.signature`. Only the inner field is signed, so a
+/// certificate on which the two disagree lets a reader that consults the outer
+/// field verify under one algorithm what the CA attested under another. The
+/// certificate is malformed, not merely badly signed, and is refused as such.
+#[test]
+fn a_certificate_whose_outer_algorithm_differs_is_malformed() {
+    use der::{Decode as _, Encode as _};
+
+    let root_key = rsa_key(keys::ROOT_RSA2048);
+    let signer_key = rsa_key(keys::SIGNER_RSA2048);
+    let root = self_signed(
+        &CertSpec::ca("Root", BasicConstraints::Unconstrained),
+        &root_key,
+    );
+    let signer = issued_by(&CertSpec::signer("Signer"), &signer_key, &root, &root_key);
+
+    // Take the freshly issued certificate apart and rewrite only the outer
+    // algorithm identifier: sha256WithRSAEncryption becomes
+    // sha384WithRSAEncryption, and the signed `tbsCertificate` is untouched.
+    let mut certificate =
+        x509_cert::Certificate::from_der(&signer.der).expect("the issued certificate parses");
+    certificate.signature_algorithm.oid =
+        const_oid::ObjectIdentifier::new_unwrap("1.2.840.113549.1.1.12");
+    let rewritten = certificate.to_der().expect("the certificate re-encodes");
+    assert_ne!(rewritten, signer.der);
+
+    let dossier = DossierSpec {
+        document_signature: Some(document_signature(vec![rewritten])),
+        ..Default::default()
+    };
+    let xml = build(&dossier, &[("doc", &signer_key)]);
+    let report = run(&xml, vec![root.der], Vec::new());
+
+    assert_check(&report, CheckCode::CertMalformed, CheckStatus::Failed);
+    let seen = codes(&report);
+    assert!(
+        !seen.iter().any(|entry| entry.starts_with("cert_path_ok=")),
+        "a malformed certificate never yields a validated path: {seen:?}"
+    );
+}

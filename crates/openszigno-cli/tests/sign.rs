@@ -741,3 +741,325 @@ fn a_title_that_reads_like_a_placeholder_is_signed_and_listed_unchanged() {
         .collect();
     assert_eq!(listed, titles);
 }
+
+// ---------------------------------------------------------------------------
+// 9. A dossier never chooses what the operator's key signs
+// ---------------------------------------------------------------------------
+
+/// The default e-dossier namespace, as `create` writes it.
+const ESZIGNO_NAMESPACE: &str = "https://www.microsec.hu/ds/e-szigno30#";
+
+/// Rewrite the unsigned dossier in place, so a test can plant a value a
+/// well-behaved `create` run would never write.
+fn patch_input(fixture: &Fixture, replacements: &[(String, String)]) {
+    let input = fixture.path("input.es3");
+    let mut text = String::from_utf8(std::fs::read(&input).expect("the dossier is read"))
+        .expect("it is UTF-8");
+    for (from, to) in replacements {
+        assert!(text.contains(from.as_str()), "the fixture holds {from}");
+        text = text.replace(from.as_str(), to.as_str());
+    }
+    std::fs::write(&input, text).expect("the patched dossier is written");
+}
+
+/// A dossier that writes markup into the values a signature has to quote is
+/// refused, one value at a time.
+///
+/// The digests are computed after the values are in the document, so a value
+/// that reached the XML unescaped would let the dossier write the reference
+/// set and the signed properties instead of describing them: an
+/// attacker-chosen `ds:Reference` with no transforms, or a forged
+/// `xades:CommitmentTypeIndication`, both under the operator's own key and
+/// both of which `verify` would then accept.
+#[test]
+fn markup_in_a_dossier_never_reaches_the_signature_it_would_shape() {
+    /// One planted value, and the extra flags the run needs to reach it.
+    struct HostileCase {
+        what: &'static str,
+        replacements: Vec<(String, String)>,
+        extra: Vec<String>,
+    }
+
+    // Each of these parses to a value holding `"`, `<`, `>` and `&`.
+    const HOSTILE: &str = "a&quot;b&lt;c&gt;d&amp;e";
+    let hostile_namespace = format!("urn:openszigno:test:{HOSTILE}");
+    let pki = pki();
+    let cases = vec![
+        HostileCase {
+            what: "the payload OBJREF and the object it names",
+            replacements: vec![
+                (
+                    "OBJREF=\"obj0\"".to_owned(),
+                    format!("OBJREF=\"{HOSTILE}\""),
+                ),
+                (
+                    "<ds:Object Id=\"obj0\">".to_owned(),
+                    format!("<ds:Object Id=\"{HOSTILE}\">"),
+                ),
+            ],
+            extra: Vec::new(),
+        },
+        HostileCase {
+            what: "the document profile Id",
+            replacements: vec![("Id=\"profile0\"".to_owned(), format!("Id=\"{HOSTILE}\""))],
+            extra: Vec::new(),
+        },
+        HostileCase {
+            what: "the declared media type",
+            replacements: vec![("type=\"text\"".to_owned(), format!("type=\"{HOSTILE}\""))],
+            extra: Vec::new(),
+        },
+        HostileCase {
+            what: "the declared subtype",
+            replacements: vec![(
+                "subtype=\"plain\"".to_owned(),
+                format!("subtype=\"{HOSTILE}\""),
+            )],
+            extra: Vec::new(),
+        },
+        HostileCase {
+            what: "the dossier namespace",
+            replacements: vec![(
+                format!("xmlns:es=\"{ESZIGNO_NAMESPACE}\""),
+                format!("xmlns:es=\"{hostile_namespace}\""),
+            )],
+            extra: vec![
+                "--allow-namespace".to_owned(),
+                "urn:openszigno:test:a\"b<c>d&e".to_owned(),
+            ],
+        },
+    ];
+    for HostileCase {
+        what,
+        replacements,
+        extra,
+    } in cases
+    {
+        let fixture = fixture(&pki, 1);
+        patch_input(&fixture, &replacements);
+        let borrowed: Vec<&str> = extra.iter().map(String::as_str).collect();
+        let output = sign_output(&fixture, &borrowed);
+        let report = json(&output);
+        assert_eq!(
+            report["errors"][0]["code"], "document_not_signable",
+            "{what}: {report}"
+        );
+        assert_eq!(output.status.code(), Some(4), "{what}");
+        assert!(
+            !fixture.path("signed.es3").exists(),
+            "{what}: nothing may be written"
+        );
+    }
+}
+
+/// Unusual is not hostile. A dossier whose identifiers and media type are odd
+/// but legal signs, and the signature has exactly the shape the format
+/// mandates: four references, and one `xades:DataObjectFormat`.
+#[test]
+fn a_dossier_with_unusual_but_valid_values_signs_to_the_mandated_shape() {
+    let pki = pki();
+    let fixture = fixture(&pki, 1);
+    patch_input(
+        &fixture,
+        &[
+            (
+                "OBJREF=\"obj0\"".to_owned(),
+                "OBJREF=\"_\u{e9}rt.\u{e9}s-0\"".to_owned(),
+            ),
+            (
+                "<ds:Object Id=\"obj0\">".to_owned(),
+                "<ds:Object Id=\"_\u{e9}rt.\u{e9}s-0\">".to_owned(),
+            ),
+            (
+                "Id=\"profile0\"".to_owned(),
+                "Id=\"prof.\u{ed}l-0_x\"".to_owned(),
+            ),
+            (
+                "subtype=\"plain\"".to_owned(),
+                "subtype=\"x.unusual+test-1\"".to_owned(),
+            ),
+        ],
+    );
+
+    let signed = sign(&fixture, &[]);
+    assert_eq!(signed["ok"], Value::Bool(true));
+    let text = String::from_utf8(std::fs::read(fixture.path("signed.es3")).expect("it is read"))
+        .expect("it is UTF-8");
+    assert_eq!(text.matches("<ds:Reference ").count(), 4, "{text}");
+    assert_eq!(text.matches("<xades:DataObjectFormat").count(), 1);
+    assert!(text.contains("<xades:MimeType>text/x.unusual+test-1</xades:MimeType>"));
+    assert!(text.contains("URI=\"#_\u{e9}rt.\u{e9}s-0\""));
+
+    let report = json(&verify(&fixture, &[]));
+    assert_check(&report, "reference_digest_ok", "passed");
+    assert_check(&report, "signature_value_ok", "passed");
+    assert_check(&report, "reference_scope_complete", "passed");
+}
+
+/// An existing signature whose reference resolves to the element the new
+/// signature would go into, or to anything containing it, is a refusal.
+///
+/// Adding a `ds:Signature` changes the canonical form of its container and of
+/// every ancestor of it, so such a reference stops matching. Only `URI=""`
+/// and dossier-level cover used to be detected, which left an `es:Document`
+/// with an `Id` of its own, referenced by `URI="#doc0"`, silently broken.
+#[test]
+fn a_signature_that_would_break_an_existing_reference_is_refused() {
+    let pki = pki();
+    let cases: [(&str, &str, Vec<&str>); 3] = [
+        ("the es:Document it would be written into", "#doc0", vec![]),
+        (
+            "the es:Dossier it would be written into",
+            "#root0",
+            vec!["--scope", "dossier"],
+        ),
+        ("something this tool cannot resolve", "#nowhere", vec![]),
+    ];
+    for (what, uri, extra) in cases {
+        let fixture = fixture(&pki, 1);
+        patch_input(
+            &fixture,
+            &[
+                (
+                    "<es:Dossier ".to_owned(),
+                    "<es:Dossier Id=\"root0\" ".to_owned(),
+                ),
+                (
+                    "<es:Document>".to_owned(),
+                    "<es:Document Id=\"doc0\">".to_owned(),
+                ),
+            ],
+        );
+        // One signature, written by this tool, then aimed at a target it
+        // would never choose itself.
+        assert_eq!(sign(&fixture, &[])["ok"], Value::Bool(true));
+        let signed = String::from_utf8(
+            std::fs::read(fixture.path("signed.es3")).expect("the signed dossier is read"),
+        )
+        .expect("it is UTF-8");
+        assert!(signed.contains("URI=\"#obj0\""), "{what}");
+        std::fs::write(
+            fixture.path("input.es3"),
+            signed.replace("URI=\"#obj0\"", &format!("URI=\"{uri}\"")),
+        )
+        .expect("the patched dossier is written");
+        std::fs::remove_file(fixture.path("signed.es3")).expect("the output is removed");
+
+        let output = sign_output(&fixture, &extra);
+        let report = json(&output);
+        assert_eq!(
+            report["errors"][0]["code"], "document_already_signed",
+            "{what}: {report}"
+        );
+        assert_eq!(output.status.code(), Some(4), "{what}");
+        assert!(
+            !fixture.path("signed.es3").exists(),
+            "{what}: nothing may be written"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 10. Co-signing
+// ---------------------------------------------------------------------------
+
+/// A document this tool has already signed can be signed again, by another
+/// key, and both signatures verify.
+///
+/// Every identifier used to be derived from the document index alone, so the
+/// second run collided with its own first signature and reported
+/// `sign_failed`. The identifiers are disambiguated instead, and the first
+/// signature is left exactly as it was.
+#[test]
+fn a_document_already_signed_by_this_tool_can_be_co_signed() {
+    let root_key = rsa_key(keys::ROOT_RSA2048);
+    let root = self_signed(
+        &CertSpec::ca("openSzigno Test Root", BasicConstraints::Unconstrained),
+        &root_key,
+    );
+    let first = issued_by(
+        &CertSpec::signer("openSzigno Test Signer"),
+        &rsa_key(keys::SIGNER_RSA2048),
+        &root,
+        &root_key,
+    );
+    let second = issued_by(
+        &CertSpec::signer("openSzigno Second Signer"),
+        &rsa_key(keys::SECOND_RSA2048),
+        &root,
+        &root_key,
+    );
+    let pki = Pki {
+        root_der: root.der,
+        signer_der: first.der,
+        signer_key_der: pkcs8(keys::SIGNER_RSA2048),
+        tsa_der: Vec::new(),
+        tsa_key: rsa_key(keys::THIRD_RSA2048),
+    };
+    let fixture = fixture(&pki, 1);
+    std::fs::write(fixture.path("second.key"), pkcs8(keys::SECOND_RSA2048))
+        .expect("the second key is written");
+    std::fs::write(fixture.path("second.crt"), &second.der)
+        .expect("the second certificate is written");
+
+    let signed = sign(&fixture, &[]);
+    assert_eq!(signed["data"]["signatures"][0]["id"], "sig-doc0");
+    let once = std::fs::read(fixture.path("signed.es3")).expect("the first output is read");
+    std::fs::rename(fixture.path("signed.es3"), fixture.path("input.es3"))
+        .expect("the signed dossier becomes the next run's input");
+
+    let output = sign_with(&fixture, "second.key", "second.crt", &[]);
+    let report = json(&output);
+    assert!(
+        output.status.success(),
+        "the second run must succeed: {report}"
+    );
+    assert_eq!(report["data"]["signatures"][0]["id"], "sig-doc0-2");
+
+    // The first signature is untouched: its bytes are still in the file.
+    let twice = String::from_utf8(
+        std::fs::read(fixture.path("signed.es3")).expect("the second output is read"),
+    )
+    .expect("it is UTF-8");
+    let once = String::from_utf8(once).expect("it is UTF-8");
+    let first_element = once
+        .split_once("<ds:Signature ")
+        .expect("the first signature is there")
+        .1;
+    let first_element = first_element
+        .split_once("</ds:Signature>")
+        .expect("it ends")
+        .0;
+    assert!(
+        twice.contains(first_element),
+        "the first signature must be left exactly as it was"
+    );
+    assert!(twice.contains("Id=\"signed-props-sig-doc0-2\""));
+
+    let verified = json(&verify(&fixture, &[]));
+    assert_eq!(
+        verified["data"]["signatures"]
+            .as_array()
+            .expect("an array")
+            .len(),
+        2
+    );
+    assert_eq!(
+        checks(&verified)
+            .iter()
+            .filter(|(code, status)| code == "signature_value_ok" && status == "passed")
+            .count(),
+        2,
+        "both signatures verify: {:?}",
+        checks(&verified)
+    );
+    let covered = verified["data"]["documents"][0]["covered_by"]
+        .as_array()
+        .expect("an array");
+    let mut indices: Vec<i64> = covered
+        .iter()
+        .map(|entry| entry["signature_index"].as_i64().expect("an index"))
+        .collect();
+    indices.sort_unstable();
+    assert_eq!(indices, vec![0, 1], "both signatures cover the document");
+}

@@ -13,7 +13,7 @@ use crate::commands::structural_warnings;
 use crate::input::{load, valid_input};
 use crate::response::{CliError, CliResult, Success, failure};
 use crate::trust::{load_signer, load_trust_list, snapshot_of};
-use crate::{online, revocation_store, trust};
+use crate::{online, revocation_store, sanitize, trust};
 
 /// How many verification/fetch rounds one `--online` run may take.
 ///
@@ -372,12 +372,17 @@ pub(crate) fn verify_command(args: &VerifyArgs) -> CliResult {
         Verdict::Indeterminate => 7,
         Verdict::Valid => 0,
     };
-    let data = serde_json::to_value(&report).map_err(|_| {
+    let mut data = serde_json::to_value(&report).map_err(|_| {
         failure(
             input.clone(),
             CliError::io("the result could not be serialised"),
         )
     })?;
+    // A certificate's subject and issuer common names are text a CA wrote and
+    // this run never chose, and a hostile dossier can carry any certificate it
+    // likes. They reach the envelope and the human summary through this value
+    // and nowhere else, so one pass over it covers both.
+    sanitize::data(&mut data);
 
     Ok(Success {
         input,

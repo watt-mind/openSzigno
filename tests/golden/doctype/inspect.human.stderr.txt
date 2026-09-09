@@ -1,0 +1,1 @@
+error [unsafe_xml]: DTD and entity declarations are not allowed

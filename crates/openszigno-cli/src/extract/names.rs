@@ -12,36 +12,74 @@ use crate::response::CliError;
 
 /// The key two names are compared on: NFC-normalised and case-folded, so a
 /// case-insensitive filesystem cannot map two outputs onto one file.
+///
+/// The fold is the full uppercase mapping followed by the full lowercase
+/// mapping, both NFC-normalised. `str::to_lowercase` alone is *not* case
+/// folding: it leaves U+017F (`ſ`, long s) and U+00DF (`ß`, sharp s) exactly
+/// as they are, so `ſ.txt` and `s.txt` — which NTFS's uppercase table maps
+/// onto one file — compared as two different names, and the extractor would
+/// have tried to create both and lost one document's bytes to the other. The
+/// round trip through uppercase gives `ſ` → `S` → `s` and `ß` → `SS` → `ss`,
+/// which is what a fold has to do.
+///
+/// It errs towards *more* names comparing equal than any one filesystem would
+/// merge, which is the safe direction: the cost is a deduplicated name and a
+/// warning, never two documents written to one file. Nothing outside this
+/// comparison uses the key — the file that is written keeps the title's own
+/// spelling, NFC-normalised.
 pub(crate) fn name_key(name: &str) -> String {
-    name.nfc().collect::<String>().to_lowercase()
+    name.nfc()
+        .collect::<String>()
+        .to_uppercase()
+        .to_lowercase()
+        .nfc()
+        .collect()
 }
 
-/// Insert `-<index>` before the extension, so a repeated title still yields a
-/// distinct, predictable filename.
-pub(crate) fn deduplicated_name(name: &str, index: usize) -> String {
+/// How many deduplicated candidates are tried before a name is given up on.
+///
+/// A title crafted to collide with the name deduplication itself produces
+/// would otherwise abort the whole run, so the counter keeps going; it is
+/// bounded because a run that has tried this many names is not going to find a
+/// free one, and an unbounded search is its own denial of service.
+pub(crate) const MAX_DEDUPLICATION_ATTEMPTS: u32 = 64;
+
+/// Insert a distinguishing suffix before the extension, so a repeated title
+/// still yields a distinct, predictable filename.
+///
+/// `attempt` counts from 1. The first candidate is `stem-<index>.<ext>`, which
+/// is what a repeated title has always produced; a title crafted to be exactly
+/// that name is why there is a second, third and further candidate,
+/// `stem-<index>-2.<ext>` onwards.
+pub(crate) fn deduplicated_name(name: &str, index: usize, attempt: u32) -> String {
+    let suffix = match attempt {
+        0 | 1 => format!("-{index}"),
+        other => format!("-{index}-{other}"),
+    };
     let path = Path::new(name);
     match (
         path.file_stem().and_then(|stem| stem.to_str()),
         path.extension().and_then(|extension| extension.to_str()),
     ) {
         (Some(stem), Some(extension)) if !stem.is_empty() => {
-            format!("{stem}-{index}.{extension}")
+            format!("{stem}{suffix}.{extension}")
         }
-        _ => format!("{name}-{index}"),
+        _ => format!("{name}{suffix}"),
     }
 }
 
-/// Reject two documents that would target the same name in one directory.
-///
-/// Kept for the pathological case that survives deduplication.
-pub(crate) fn claim_name(names: &mut HashSet<String>, name: &str) -> Result<(), CliError> {
-    if names.insert(name_key(name)) {
-        return Ok(());
-    }
-    Err(CliError::unsafe_output(
+/// Take a name in one directory, reporting whether it was free.
+pub(crate) fn try_claim_name(names: &mut HashSet<String>, name: &str) -> bool {
+    names.insert(name_key(name))
+}
+
+/// Two documents whose names still collide after every deduplicated candidate
+/// was tried.
+pub(crate) fn name_collision() -> CliError {
+    CliError::unsafe_output(
         "output_name_collision",
         "two outputs resolve to the same name in one directory",
-    ))
+    )
 }
 
 pub(crate) fn join_path(directory: &str, name: &str) -> String {
@@ -317,9 +355,56 @@ mod tests {
     #[test]
     fn a_repeated_output_name_in_one_directory_is_a_collision() {
         let mut names = HashSet::new();
-        assert!(claim_name(&mut names, "Report.txt").is_ok());
-        let error = claim_name(&mut names, "report.TXT").expect_err("names collide");
+        assert!(try_claim_name(&mut names, "Report.txt"));
+        // The comparison is case-insensitive: a case-insensitive filesystem
+        // must not be able to map two outputs onto one file.
+        assert!(!try_claim_name(&mut names, "report.TXT"));
+        let error = name_collision();
         assert_eq!(error.code, "output_name_collision");
         assert_eq!(error.exit, 5);
+    }
+
+    /// The comparison key really folds case rather than merely lower-casing.
+    /// `to_lowercase` leaves both of these characters untouched, so each pair
+    /// below used to compare as two distinct names while a filesystem that
+    /// upper-cases to compare — NTFS does — would have mapped them onto one
+    /// file.
+    #[test]
+    fn the_comparison_key_folds_rather_than_lower_cases() {
+        // U+017F, long s: its uppercase mapping is plain `S`.
+        assert_eq!(name_key("\u{17f}.txt"), name_key("s.txt"));
+        assert_eq!(name_key("\u{17f}.txt"), name_key("S.TXT"));
+        // U+00DF, sharp s: its uppercase mapping is `SS`.
+        assert_eq!(name_key("stra\u{df}e.txt"), name_key("STRASSE.TXT"));
+        assert_eq!(name_key("stra\u{df}e.txt"), name_key("strasse.txt"));
+        // The ordinary cases still hold, and unrelated names stay unrelated.
+        assert_eq!(name_key("Report.TXT"), name_key("report.txt"));
+        assert_eq!(name_key("e\u{301}rt.txt"), name_key("\u{e9}rt.txt"));
+        assert_ne!(name_key("report.txt"), name_key("reports.txt"));
+    }
+
+    /// Two documents whose titles differ only by a fold are deduplicated, not
+    /// written over each other.
+    #[test]
+    fn two_titles_that_fold_together_collide() {
+        let mut names = HashSet::new();
+        assert!(try_claim_name(&mut names, "stra\u{df}e.txt"));
+        assert!(!try_claim_name(&mut names, "STRASSE.txt"));
+    }
+
+    /// The deduplicated candidates are a sequence, not one name: the first is
+    /// the `stem-<index>` form a repeated title has always produced, and the
+    /// ones after it carry an increasing counter, which is what keeps a title
+    /// crafted to spell the first candidate from aborting the run.
+    #[test]
+    fn the_deduplicated_candidates_count_upwards() {
+        assert_eq!(deduplicated_name("report.txt", 3, 1), "report-3.txt");
+        assert_eq!(deduplicated_name("report.txt", 3, 2), "report-3-2.txt");
+        assert_eq!(deduplicated_name("report.txt", 3, 64), "report-3-64.txt");
+        // A name with no extension keeps the suffix at its end.
+        assert_eq!(deduplicated_name("report", 3, 1), "report-3");
+        assert_eq!(deduplicated_name("report", 3, 5), "report-3-5");
+        // A dotfile-looking name has no stem to split, so it is suffixed whole.
+        assert_eq!(deduplicated_name(".env", 0, 2), ".env-0-2");
     }
 }

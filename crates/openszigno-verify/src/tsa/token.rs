@@ -268,12 +268,19 @@ pub(super) fn subject_key_identifier(certificate: &ParsedCertificate) -> Option<
 /// attributes must exist, must name the encapsulated content type, must carry
 /// a message digest equal to the digest of the eContent, and the signature
 /// must verify over the DER `SET OF` encoding of those attributes.
+///
+/// `Ok(true)` reports that everything held but only because
+/// `--allow-legacy-algorithms` admitted SHA-1 as the `SignerInfo` digest — the
+/// digest the `messageDigest` attribute is computed with and, for a bare
+/// `rsaEncryption`, the one the signature itself is computed with. The caller
+/// reports that as `algorithm_legacy_allowed` rather than as a verified
+/// signature, so the token stays unverified.
 pub(super) fn verify_signer_info(
     signer: &SignerInfo,
     certificate: &ParsedCertificate,
     econtent: &[u8],
     allow_legacy_algorithms: bool,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     let Some(attributes) = signer.signed_attrs.as_ref() else {
         return Err("the SignerInfo carries no signed attributes".to_owned());
     };
@@ -318,7 +325,8 @@ pub(super) fn verify_signer_info(
         signer.signature.as_bytes(),
         true,
     )
-    .map_err(|_| "the signature over the signed attributes did not verify".to_owned())
+    .map_err(|_| "the signature over the signed attributes did not verify".to_owned())?;
+    Ok(digest_algorithm.is_legacy())
 }
 
 pub(super) fn attribute_value(attributes: &Attributes, oid: ObjectIdentifier) -> Option<&Any> {

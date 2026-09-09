@@ -632,3 +632,42 @@ fn container_timestamp_checks_never_block_except_when_invalid() {
         }
     }
 }
+
+/// XAdES 7.1.4.3.1 selects the timestamped data with `xades:Include`, and only
+/// an `Include` in a recognised XAdES namespace is one. Matching on the local
+/// name alone let an element some other vocabulary happens to call `Include`
+/// add its target to the imprint, which changes what the timestamp is taken to
+/// cover — a foreign element deciding the meaning of a XAdES one.
+#[test]
+fn a_foreign_namespace_include_selects_nothing() {
+    let pki = pki();
+    let plain = ContainerTimestampSpec::dossier(token(&pki));
+    let mut intruded = ContainerTimestampSpec::dossier(token(&pki));
+    // A same-document reference that resolves: the payload object really is
+    // there, so the only reason it stays out of the imprint is its namespace.
+    intruded.foreign_include = Some("#obj0".to_owned());
+
+    let plain = run(&dossier(&pki, vec![plain]), vec![pki.root_der.clone()]);
+    let intruded = run(&dossier(&pki, vec![intruded]), vec![pki.root_der.clone()]);
+
+    assert_dossier_check(
+        &intruded,
+        CheckCode::DossierTimestampVerified,
+        CheckStatus::Info,
+    );
+    assert!(intruded.timestamps[0].verified);
+    assert_eq!(intruded.verdict, plain.verdict);
+    assert_eq!(
+        intruded.counts.timestamps_verified,
+        plain.counts.timestamps_verified
+    );
+    // The imprint is the point: the token was built over the two mandated
+    // elements, and it still matches, so the foreign sibling added nothing.
+    let imprint_ok = |report: &VerifyReport| {
+        report.timestamps[0].checks.iter().any(|check| {
+            check.code == CheckCode::TimestampImprintOk && check.status == CheckStatus::Passed
+        })
+    };
+    assert!(imprint_ok(&plain));
+    assert!(imprint_ok(&intruded));
+}

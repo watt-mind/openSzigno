@@ -110,6 +110,15 @@ pub struct SigSpec {
     /// Emit the qualifying-properties object before the signature-profile
     /// object, which real dossiers do occasionally.
     pub objects_reversed: bool,
+    /// Raw `ds:Object` elements emitted *before* this signature's own profile
+    /// and qualifying-properties objects, and covered by no reference.
+    ///
+    /// The XMLDSig schema allows any number of `ds:Object` children with open
+    /// content, so anyone who can append bytes to a dossier can add one. This
+    /// is how a test inserts such a decoy: it changes no digest, so a
+    /// signature built with one must produce exactly the check list it
+    /// produces without it.
+    pub decoy_objects: Vec<String>,
     /// Certificates to place in `xades:CertificateValues`, which is where real
     /// dossiers carry the intermediates and usually the root.
     pub certificate_values: Vec<Vec<u8>>,
@@ -253,6 +262,14 @@ pub struct TimestampSpec {
     pub duplicate_token: bool,
     /// Emit a token that is not decodable Base64.
     pub undecodable_token: bool,
+    /// Name SHA-1 as the message imprint's digest algorithm, and compute the
+    /// imprint with it. A legacy algorithm this build admits only under
+    /// `--allow-legacy-algorithms`, and then only for diagnosis.
+    pub sha1_imprint: bool,
+    /// Name SHA-1 as the `SignerInfo` digest algorithm, which is also the
+    /// digest the `messageDigest` attribute and the bare `rsaEncryption`
+    /// signature are computed with.
+    pub sha1_signer_digest: bool,
 }
 
 impl TimestampSpec {
@@ -271,6 +288,8 @@ impl TimestampSpec {
             wrap_in_response: None,
             duplicate_token: false,
             undecodable_token: false,
+            sha1_imprint: false,
+            sha1_signer_digest: false,
         }
     }
 }
@@ -301,6 +320,9 @@ pub struct ContainerTimestampSpec {
     pub reference_info: bool,
     /// Digest something other than the included elements.
     pub wrong_imprint: bool,
+    /// Emit an `Include` in a namespace that is not XAdES, naming this URI.
+    /// It selects nothing, because only a recognised XAdES namespace does.
+    pub foreign_include: Option<String>,
 }
 
 impl ContainerTimestampSpec {
@@ -312,6 +334,7 @@ impl ContainerTimestampSpec {
             token: Some(token),
             reference_info: false,
             wrong_imprint: false,
+            foreign_include: None,
         }
     }
 
@@ -323,6 +346,7 @@ impl ContainerTimestampSpec {
             c14n: None,
             reference_info: false,
             wrong_imprint: false,
+            foreign_include: None,
         }
     }
 }
@@ -366,6 +390,10 @@ impl ExtraDocumentSpec {
 pub struct DossierSpec {
     pub namespace: String,
     pub payload: String,
+    /// How the signed document's payload `ds:Object` spells its identifier.
+    /// XMLDSig's schema is `Id`, but real dossiers also carry `ID` and `id`,
+    /// and the parser accepts all three.
+    pub payload_id_attribute: &'static str,
     pub document_signature: Option<SigSpec>,
     pub dossier_signature: Option<SigSpec>,
     /// An extra copy of the payload object, placed outside the signed document,
@@ -385,6 +413,7 @@ impl Default for DossierSpec {
         Self {
             namespace: ESZIGNO_NS.to_owned(),
             payload: BASE64.encode("hello"),
+            payload_id_attribute: "Id",
             document_signature: None,
             dossier_signature: None,
             decoy_object: None,
@@ -393,6 +422,14 @@ impl Default for DossierSpec {
             container_timestamps: Vec::new(),
         }
     }
+}
+
+/// The identifier of one element, under the three spellings the parser, the
+/// reference resolver and the coverage reader all accept.
+pub fn id_of<'a>(node: openszigno_core::roxmltree::Node<'a, '_>) -> Option<&'a str> {
+    node.attribute("Id")
+        .or_else(|| node.attribute("ID"))
+        .or_else(|| node.attribute("id"))
 }
 
 pub(super) fn render(spec: &DossierSpec) -> String {
@@ -419,8 +456,8 @@ pub(super) fn render(spec: &DossierSpec) -> String {
 </es:DocumentProfile>",
     );
     out.push_str(&format!(
-        "<ds:Object Id=\"obj0\">{}</ds:Object>",
-        spec.payload
+        "<ds:Object {}=\"obj0\">{}</ds:Object>",
+        spec.payload_id_attribute, spec.payload
     ));
     if let Some(signature) = &spec.document_signature {
         out.push_str(&render_signature(signature, namespace));
@@ -512,6 +549,11 @@ fn render_container_timestamp(spec: &ContainerTimestampSpec, index: usize) -> St
             "<xades:Include URI=\"{uri}\" referencedData=\"true\"/>"
         ));
     }
+    if let Some(uri) = &spec.foreign_include {
+        out.push_str(&format!(
+            "<foreign:Include xmlns:foreign=\"urn:example:not-xades\" URI=\"{uri}\" referencedData=\"true\"/>"
+        ));
+    }
     match &spec.token {
         Some(_) => out.push_str(&format!(
             "<xades:EncapsulatedTimeStamp>@@CONTAINER-TS-{index}@@</xades:EncapsulatedTimeStamp>"
@@ -537,10 +579,7 @@ pub fn canonical_includes(xml: &str, spec: &ContainerTimestampSpec) -> Vec<u8> {
     let mut octets = Vec::new();
     for uri in &spec.includes {
         let id = uri.trim_start_matches('#');
-        let Some(node) = tree
-            .descendants()
-            .find(|node| node.attribute("Id") == Some(id))
-        else {
+        let Some(node) = tree.descendants().find(|node| id_of(*node) == Some(id)) else {
             continue;
         };
         octets.extend_from_slice(
