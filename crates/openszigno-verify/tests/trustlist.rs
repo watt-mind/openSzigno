@@ -9,10 +9,10 @@
 mod common;
 
 use common::{
-    CertSpec, DossierSpec, STATUS_ACCREDITED, STATUS_GRANTED, STATUS_UNDER_SUPERVISION,
-    STATUS_WITHDRAWN, SVCTYPE_TSA_QTST, SigSpec, SigningCertificateSpec, TestKey, TlService,
-    TrustListSpec, build, build_trust_list, document_signature, issued_by, keys,
-    qc_statements_extension, rsa_key, self_signed,
+    CertSpec, DossierSpec, ECDSA_SHA512_URI, STATUS_ACCREDITED, STATUS_GRANTED,
+    STATUS_UNDER_SUPERVISION, STATUS_WITHDRAWN, SVCTYPE_TSA_QTST, SigSpec, SigningCertificateSpec,
+    TestKey, TlService, TrustListSpec, build, build_trust_list, document_signature, ecdsa_p521_key,
+    issued_by, issued_by_with_public_key, keys, qc_statements_extension, rsa_key, self_signed,
 };
 use openszigno_verify::certs::{CertificateSource, ParsedCertificate};
 use openszigno_verify::codes::{CheckCode, CheckStatus};
@@ -310,6 +310,49 @@ fn a_signature_referencing_the_list_by_id_covers_it() {
         CheckCode::TrustListSignatureOk,
         CheckStatus::Passed,
     );
+}
+
+/// TS 119 612 annex B.1.2 permits any ETSI TS 119 312 algorithm for a list's
+/// own signature, so a member state may sign a TLv6 list with ecdsa-sha512 over
+/// a P-521 key. Such a list must verify rather than be reported as naming a
+/// method outside the allowlist.
+#[test]
+fn a_list_signed_with_ecdsa_p521_verifies() {
+    let pki = pki((2019, 1, 1), &["0.4.0.1862.1.1"]);
+    let root_key = rsa_key(keys::ROOT_RSA2048);
+    let root = self_signed(
+        &CertSpec::ca(
+            "openSzigno Test Qualified CA",
+            BasicConstraints::Unconstrained,
+        ),
+        &root_key,
+    );
+    // The `ring` backend cannot sign with P-521, so the list signer's own
+    // certificate is issued by the RSA root; only its public key matters here.
+    let tl_signer_key = ecdsa_p521_key(23);
+    let tl_signer = issued_by_with_public_key(
+        &CertSpec::signer("openSzigno Test P-521 Trusted List Signer"),
+        &tl_signer_key.spki_der,
+        &root,
+        &root_key,
+    );
+
+    let mut spec = TrustListSpec::new(vec![TlService::ca_qc(
+        "openSzigno Test Qualified CA",
+        pki.root_der.clone(),
+    )]);
+    spec.signature_method = ECDSA_SHA512_URI.to_owned();
+    spec.signer = Some((tl_signer_key, tl_signer.der.clone()));
+    let list = build_trust_list(&spec);
+    let xml = dossier(signature(&pki), &pki.signer_key);
+    let report = run_with_list(&xml, &list, Some(&tl_signer.der), AT);
+
+    assert_check(
+        &report,
+        CheckCode::TrustListSignatureOk,
+        CheckStatus::Passed,
+    );
+    assert_check(&report, CheckCode::CertPathOk, CheckStatus::Passed);
 }
 
 /// Something that is not a trusted list is refused rather than half-read.

@@ -4,9 +4,10 @@
 mod common;
 
 use common::{
-    CertSpec, DossierSpec, ECDSA_SHA384_URI, RSA_PSS_SHA256_URI, RSA_SHA384_URI, RSA_SHA512_URI,
-    RefSpec, SHA384_URI, SHA512_URI, build, document_signature, ecdsa_p384_key, ed25519_key,
-    issued_by, keys, rsa_key, self_signed,
+    CertSpec, DossierSpec, ECDSA_SHA256_URI, ECDSA_SHA384_URI, ECDSA_SHA512_URI,
+    RSA_PSS_SHA256_URI, RSA_SHA384_URI, RSA_SHA512_URI, RefSpec, SHA384_URI, SHA512_URI, build,
+    document_signature, ecdsa_p384_key, ecdsa_p521_key, ed25519_key, issued_by,
+    issued_by_with_public_key, keys, rsa_key, self_signed,
 };
 use openszigno_verify::c14n::{C14nAlgorithm, C14nBackend, NodeSet, RoxmltreeC14n};
 use openszigno_verify::certs::{CertificateSource, ParsedCertificate, certificates_from_bytes};
@@ -109,6 +110,64 @@ fn ecdsa_p384_verifies() {
     let report = run(&xml, vec![root.der]);
     assert_check(&report, CheckCode::SignatureValueOk, CheckStatus::Passed);
     assert_check(&report, CheckCode::CertPathOk, CheckStatus::Passed);
+}
+
+/// ECDSA P-521 with SHA-512, which ETSI TS 119 312 permits and TS 119 612
+/// annex B.1.2 therefore admits for a trusted list. The signer certificate is
+/// issued by an RSA root, because the certificate side of the path is a
+/// separate question from the signature the P-521 key made.
+#[test]
+fn ecdsa_p521_verifies() {
+    let root_key = rsa_key(keys::ROOT_RSA2048);
+    let signer_key = ecdsa_p521_key(13);
+    let root = self_signed(
+        &CertSpec::ca("Root", BasicConstraints::Unconstrained),
+        &root_key,
+    );
+    let signer = issued_by_with_public_key(
+        &CertSpec::signer("P-521 Signer"),
+        &signer_key.spki_der,
+        &root,
+        &root_key,
+    );
+    let mut signature = document_signature(vec![signer.der]);
+    signature.signature_method = ECDSA_SHA512_URI.to_owned();
+    let spec = DossierSpec {
+        document_signature: Some(signature),
+        ..Default::default()
+    };
+    let xml = build(&spec, &[("doc", &signer_key)]);
+    let report = run(&xml, vec![root.der]);
+    assert_check(&report, CheckCode::SignatureValueOk, CheckStatus::Passed);
+    assert_check(&report, CheckCode::CertPathOk, CheckStatus::Passed);
+}
+
+/// Curve and digest stay strictly paired: a P-521 key under a SignatureMethod
+/// naming SHA-256 is an algorithm downgrade attempt, not a curve to guess at.
+#[test]
+fn a_p521_key_with_sha256_named_is_refused() {
+    let root_key = rsa_key(keys::ROOT_RSA2048);
+    let signer_key = ecdsa_p521_key(17);
+    let root = self_signed(
+        &CertSpec::ca("Root", BasicConstraints::Unconstrained),
+        &root_key,
+    );
+    let signer = issued_by_with_public_key(
+        &CertSpec::signer("P-521 Signer"),
+        &signer_key.spki_der,
+        &root,
+        &root_key,
+    );
+    let mut signature = document_signature(vec![signer.der]);
+    signature.signature_method = ECDSA_SHA256_URI.to_owned();
+    let spec = DossierSpec {
+        document_signature: Some(signature),
+        ..Default::default()
+    };
+    let xml = build(&spec, &[("doc", &signer_key)]);
+    let report = run(&xml, vec![root.der]);
+    assert_check(&report, CheckCode::AlgorithmRejected, CheckStatus::Failed);
+    assert_eq!(report.verdict, Verdict::Invalid);
 }
 
 /// A key type outside the policy is refused rather than guessed at.
@@ -249,6 +308,10 @@ fn the_policy_tables_are_stable() {
             "http://www.w3.org/2001/04/xmldsig-more#ecdsa-sha384",
             "ecdsa-sha384",
         ),
+        (
+            "http://www.w3.org/2001/04/xmldsig-more#ecdsa-sha512",
+            "ecdsa-sha512",
+        ),
     ] {
         let scheme = SignatureScheme::from_signature_uri(uri).expect("the URI is accepted");
         assert_eq!(scheme.as_str(), name);
@@ -271,7 +334,7 @@ fn the_policy_tables_are_stable() {
     for uri in [
         "http://www.w3.org/2000/09/xmldsig#dsa-sha1",
         "http://www.w3.org/2001/04/xmldsig-more#hmac-sha256",
-        "http://www.w3.org/2001/04/xmldsig-more#ecdsa-sha512",
+        "http://www.w3.org/2001/04/xmldsig-more#ecdsa-ripemd160",
         "",
     ] {
         assert!(SignatureScheme::from_signature_uri(uri).is_none(), "{uri}");

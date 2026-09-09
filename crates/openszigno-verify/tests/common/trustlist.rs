@@ -16,7 +16,7 @@ use sha2::{Digest as _, Sha256};
 
 use super::cms::sign_rsa_sha256;
 use super::dossier::{C14N_EXC, DS_NS, ENVELOPED_URI, RSA_SHA256_URI, SHA256_URI};
-use super::pki::TestKey;
+use super::pki::{SigningKey, TestKey};
 
 pub const TSL_NS: &str = "http://uri.etsi.org/02231/v2#";
 pub const SVCTYPE_CA_QC: &str = "http://uri.etsi.org/TrstSvc/Svctype/CA/QC";
@@ -99,6 +99,10 @@ pub struct TrustListSpec {
     /// Sign the list with this key and certificate, which a test then passes as
     /// `--trust-list-signer`.
     pub signer: Option<(TestKey, Vec<u8>)>,
+    /// The `ds:SignatureMethod` the list names. TS 119 612 annex B.1.2 permits
+    /// any TS 119 312 algorithm, so a list may be signed with ECDSA as well as
+    /// with RSA; the key in `signer` decides what is actually computed.
+    pub signature_method: String,
     /// Certificates to name in `PointersToOtherTSL`, which is how the EU list
     /// of trusted lists says who signs each national list.
     pub pointers: Vec<Vec<u8>>,
@@ -120,6 +124,7 @@ impl TrustListSpec {
             next_update: "2021-01-01T00:00:00Z".to_owned(),
             services,
             signer: None,
+            signature_method: RSA_SHA256_URI.to_owned(),
             pointers: Vec::new(),
             tamper: false,
             reference_list_by_id: false,
@@ -270,7 +275,8 @@ pub fn build_trust_list(spec: &TrustListSpec) -> String {
             "<ds:CanonicalizationMethod Algorithm=\"{C14N_EXC}\"/>"
         ));
         out.push_str(&format!(
-            "<ds:SignatureMethod Algorithm=\"{RSA_SHA256_URI}\"/>"
+            "<ds:SignatureMethod Algorithm=\"{}\"/>",
+            spec.signature_method
         ));
         let uri = if spec.reference_list_by_id {
             "#the-trusted-list"
@@ -350,5 +356,16 @@ fn trust_list_signature(xml: &str, key: &TestKey) -> String {
             &[],
         )
         .expect("canonicalizes");
-    BASE64.encode(sign_rsa_sha256(key, &canonical))
+    BASE64.encode(match &key.signing {
+        SigningKey::EcdsaP521(private) => {
+            // P-521 signing here is randomized: this build of `p521` offers
+            // no RFC 6979 deterministic signer, and the test only has to
+            // produce a signature that verifies.
+            use p521::ecdsa::signature::RandomizedSigner as _;
+            let signature: p521::ecdsa::Signature =
+                private.sign_with_rng(&mut rsa::rand_core::OsRng, &canonical);
+            signature.to_bytes().to_vec()
+        }
+        _ => sign_rsa_sha256(key, &canonical),
+    })
 }

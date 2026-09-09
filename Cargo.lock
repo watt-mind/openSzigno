@@ -824,6 +824,7 @@ dependencies = [
  "openszigno-verify",
  "p256",
  "p384",
+ "p521",
  "pkcs8",
  "rand_chacha",
  "rand_core",
