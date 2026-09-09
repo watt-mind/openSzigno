@@ -261,6 +261,11 @@ jobs:
           # action would otherwise read from the ref has to be given.
           tool: cargo-llvm-cov
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Self-test the coverage gate
+        # The gate's own diff parser decides which lines patch coverage is
+        # measured over, so a bug there weakens the gate silently. Its tests
+        # run before the measurement they guard.
+        run: python3 scripts/coverage_gate.py --self-test
       - name: Measure line coverage
         run: cargo llvm-cov --workspace --locked --lcov --output-path lcov.info
       - name: Report the coverage summary

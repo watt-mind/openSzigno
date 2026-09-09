@@ -133,11 +133,19 @@ cargo llvm-cov --workspace --lcov --output-path lcov.info
 python3 scripts/coverage_gate.py --lcov lcov.info --base origin/develop
 ```
 
-It reads `lcov.info` and checks three things: every crate (`crates/<name>`)
-is at or above 90% line coverage; lines added or modified since `--base`
+It reads `lcov.info` and checks four things: every crate directory under
+`crates/` appears in the report at all; every crate (`crates/<name>`) is at
+or above 90% line coverage, where a crate with no instrumented lines scores
+0 rather than 100; lines added or modified since `--base`
 under `crates/*/src/` are at or above 80% covered, when the change touches
 at least 20 instrumentable lines; and no crate has dropped more than 1.0
-point below the value recorded for it in `scripts/coverage-floors.txt`. The
+point below the value recorded for it in `scripts/coverage-floors.txt`.
+
+`python3 scripts/coverage_gate.py --self-test` runs the script's own unit
+tests for the `-U0` diff parser that patch coverage rests on — the part
+whose edge cases (an added line beginning with `++`, a removed one
+beginning with `--`, a hunk header without counts) a coverage report cannot
+show. The
 workspace's `--fail-under-lines 85` check in CI stays as a coarse backstop
 after this gate. See
 [CONTRIBUTING.md](../CONTRIBUTING.md#coverage-quality-gate) for the ratchet

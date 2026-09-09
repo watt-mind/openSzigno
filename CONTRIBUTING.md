@@ -177,8 +177,12 @@ Coverage is reported by CI; to reproduce it locally see
 `scripts/coverage_gate.py` reads the lcov report `cargo llvm-cov` produces
 and enforces, in the CI `coverage` job:
 
+- **Every crate is reported on.** A crate directory under `crates/` that
+  produces no coverage records at all fails the job. A crate absent from
+  the report is unmeasured, not fully covered, and used to leave the gate
+  silently.
 - **Per-crate floor.** Every crate (`crates/<name>`) must be at or above
-  90% line coverage.
+  90% line coverage. A crate with no instrumented lines scores 0, not 100.
 - **Patch coverage.** Lines added or modified by the pull request, under
   `crates/*/src/`, must be at or above 80% covered, whenever the change
   touches at least 20 instrumentable lines; smaller changes skip this
@@ -206,6 +210,14 @@ python3 scripts/coverage_gate.py --lcov lcov.info --update-floors
 
 Commit the updated `scripts/coverage-floors.txt` alongside the change that
 caused the shift. CI never rewrites this file itself.
+
+The script carries its own unit tests for the `-U0` diff parser behind
+patch coverage, where the edge cases live (an added source line beginning
+with `++` is not a `+++ b/path` file header). Run them with:
+
+```sh
+python3 scripts/coverage_gate.py --self-test
+```
 
 ### Mutation testing gate
 

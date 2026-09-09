@@ -128,6 +128,18 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
   an existing output file already got. `mkdir`'s `EEXIST` was mapped to
   `io_error` (exit 3), which told an operator their filesystem had failed when
   in fact the no-clobber rule had worked.
+- `scripts/coverage_gate.py` no longer lets a crate or a patch line leave the
+  gate quietly. A crate under `crates/` that produced no coverage records
+  vanished from the totals altogether, and `pct(covered, 0)` scored 100, so an
+  unmeasured crate read as a fully covered one; both are failures now. The
+  `-U0` diff behind patch coverage is parsed with a state machine keyed on
+  `diff --git` and `@@` rather than by line prefix, so an added source line
+  beginning with `++` is no longer read as a `+++ b/path` file header — which
+  silently repointed or dropped every line after it — and the diff is taken
+  with explicit `--src-prefix`/`--dst-prefix`, so a contributor's
+  `diff.noprefix` cannot change what the parser strips.
+  `--self-test` runs the parser's unit tests, and CI runs it before the
+  measurement it guards.
 
 ## [0.7.1] - 2026-09-09
 
