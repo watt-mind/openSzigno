@@ -310,10 +310,41 @@ pub fn is_covered(
     time: UnixTime,
     limits: &VerifyLimits,
 ) -> bool {
+    is_covered_at(
+        subject,
+        issuer,
+        candidates,
+        anchors,
+        crate::certs::AnchorStatus::none(),
+        data,
+        time,
+        limits,
+    )
+}
+
+/// [`is_covered`], told what the caller knows about each anchor.
+///
+/// `status` reaches only the RFC 6960 section 2.2 trusted-responder model,
+/// which validates a responder's own path to an anchor. Deciding what to fetch
+/// is planning rather than verification: whatever this answers, the same code
+/// runs again, with the same status, when the verdict is made.
+#[allow(clippy::too_many_arguments)]
+pub fn is_covered_at(
+    subject: &ParsedCertificate,
+    issuer: &ParsedCertificate,
+    candidates: &[ParsedCertificate],
+    anchors: &[ParsedCertificate],
+    status: crate::certs::AnchorStatus<'_>,
+    data: &RevocationData<'_>,
+    time: UnixTime,
+    limits: &VerifyLimits,
+) -> bool {
     matches!(
-        check_certificate(subject, issuer, candidates, anchors, data, time, limits)
-            .entry
-            .status,
+        check_certificate(
+            subject, issuer, candidates, anchors, status, data, time, limits
+        )
+        .entry
+        .status,
         RevocationStatus::Good | RevocationStatus::Revoked
     )
 }
@@ -325,6 +356,19 @@ pub fn is_covered(
 /// it roots can answer, and asking would invite a self-signed CRL to speak for
 /// itself.
 pub fn check_path(input: &PathRevocationInput<'_>) -> PathRevocation {
+    check_path_at(input, crate::certs::AnchorStatus::none())
+}
+
+/// [`check_path`], told what the caller knows about each anchor.
+///
+/// `status` reaches only the RFC 6960 section 2.2 trusted-responder model: a
+/// responder whose own path ends at a trusted-list service that was not
+/// granted at the response's `producedAt` authorises nothing, exactly as that
+/// anchor would not have ended any other path.
+pub fn check_path_at(
+    input: &PathRevocationInput<'_>,
+    status: crate::certs::AnchorStatus<'_>,
+) -> PathRevocation {
     let PathRevocationInput {
         path,
         candidates,
@@ -389,7 +433,7 @@ pub fn check_path(input: &PathRevocationInput<'_>) -> PathRevocation {
     let mut disagreements: Vec<String> = Vec::new();
     for window in path.windows(2) {
         let answer = check_certificate(
-            &window[0], &window[1], candidates, anchors, data, time, limits,
+            &window[0], &window[1], candidates, anchors, status, data, time, limits,
         );
         if let Some(sentence) = answer.disagreement {
             disagreements.push(sentence);
@@ -567,17 +611,20 @@ pub(crate) fn check_signer_chain(
             ),
         });
     } else {
-        let outcome = check_path(&PathRevocationInput {
-            anchors: &context.anchors,
-            path: &signer_path.path,
-            candidates: &signer_path.candidates,
-            data,
-            time: signature_time,
-            time_is_proven,
-            policy: context.revocation_policy,
-            role: ChainRole::Signer,
-            limits: &context.options.limits,
-        });
+        let outcome = check_path_at(
+            &PathRevocationInput {
+                anchors: &context.anchors,
+                path: &signer_path.path,
+                candidates: &signer_path.candidates,
+                data,
+                time: signature_time,
+                time_is_proven,
+                policy: context.revocation_policy,
+                role: ChainRole::Signer,
+                limits: &context.options.limits,
+            },
+            crate::certs::AnchorStatus::new(&context.anchor_provenance),
+        );
         for (entry, status) in chain.iter_mut().zip(outcome.per_certificate) {
             entry.revocation = Some(status);
         }

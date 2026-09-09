@@ -72,6 +72,7 @@ pub(super) fn ocsp_answer(
     issuer: &ParsedCertificate,
     candidates: &[ParsedCertificate],
     anchors: &[ParsedCertificate],
+    status: crate::certs::AnchorStatus<'_>,
     time: UnixTime,
     limits: &VerifyLimits,
 ) -> Answer {
@@ -116,6 +117,7 @@ pub(super) fn ocsp_answer(
         issuer,
         candidates,
         anchors,
+        status,
         produced_at,
         time,
         limits,
@@ -234,11 +236,13 @@ fn digest_by_oid(oid: ObjectIdentifier, bytes: &[u8]) -> Option<Vec<u8>> {
 /// admit a response the operator did not already choose to trust the signer
 /// of. It is tried last so that a CA's own word always wins over the caller's
 /// configuration where both are available.
+#[allow(clippy::too_many_arguments)]
 fn responder_authorised(
     basic: &BasicOcspResponse,
     issuer: &ParsedCertificate,
     candidates: &[ParsedCertificate],
     anchors: &[ParsedCertificate],
+    status: crate::certs::AnchorStatus<'_>,
     produced_at: UnixTime,
     time: UnixTime,
     limits: &VerifyLimits,
@@ -310,10 +314,11 @@ fn responder_authorised(
             .chain(candidates.iter())
             .cloned()
             .collect::<Vec<_>>();
-        let outcome = crate::certs::validate_path(
+        let outcome = crate::certs::validate_path_at(
             parsed,
             &crate::certs::dedup(pool),
             anchors,
+            status,
             produced_at,
             limits,
             crate::certs::PathPurpose::OcspSigning,

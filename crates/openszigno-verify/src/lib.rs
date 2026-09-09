@@ -70,7 +70,7 @@ pub use tsa::{TimestampKind, TimestampReport};
 use crate::certs::{CertificateSource, ParsedCertificate, dedup};
 use crate::report::{Counts, VerificationTime};
 use crate::trust::TimeSource;
-use crate::tsa::{TokenInput, verify_token};
+use crate::tsa::{TokenInput, verify_token_at};
 
 /// How one dossier is verified.
 pub struct VerifyOptions<'a> {
@@ -414,21 +414,24 @@ pub fn verify(bytes: &[u8], options: &VerifyOptions<'_>) -> Result<VerifyReport,
             });
             continue;
         }
-        let token = verify_token(&TokenInput {
-            kind: source.kind(),
-            document_index: source.document_index(),
-            token: source.token.clone(),
-            imprint_input: source.imprint_input.clone(),
-            anchors: &context.anchors,
-            extra_certificates: &container_candidates,
-            limits: &options.limits,
-            allow_legacy_algorithms: options.allow_legacy_algorithms,
-            revocation: container_revocation,
-            revocation_policy,
-            // A container timestamp is not attached to any claimed signing
-            // time, so there is no ordering claim to contradict.
-            claimed_signing_time: None,
-        });
+        let token = verify_token_at(
+            &TokenInput {
+                kind: source.kind(),
+                document_index: source.document_index(),
+                token: source.token.clone(),
+                imprint_input: source.imprint_input.clone(),
+                anchors: &context.anchors,
+                extra_certificates: &container_candidates,
+                limits: &options.limits,
+                allow_legacy_algorithms: options.allow_legacy_algorithms,
+                revocation: container_revocation,
+                revocation_policy,
+                // A container timestamp is not attached to any claimed signing
+                // time, so there is no ordering claim to contradict.
+                claimed_signing_time: None,
+            },
+            certs::AnchorStatus::new(&context.anchor_provenance),
+        );
         dossier_checks.push(estimestamp::summarise(
             source.scope,
             &token.report.checks,

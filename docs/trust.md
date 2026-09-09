@@ -160,7 +160,22 @@ carrying the service's status timeline: the current `ServiceStatus` with its
 A path that ends at such an anchor is trusted only if the service was granted
 **at the validation time**. That is what lets a signature made while a CA was
 supervised still verify after that CA was withdrawn, and stops a signature made
-after the withdrawal from doing so. The statuses treated as granted are:
+after the withdrawal from doing so: the path then reports
+`trust_list_service_not_granted` instead of `cert_path_ok`, and every other
+candidate path is tried before that is concluded. The check is `unknown`, not
+`failed` — trust you no longer have is not evidence against a signature — so
+the run is capped at `indeterminate` and is never `invalid` for this reason
+alone. A `--trust-store` anchor is unaffected.
+
+The kind of service has to match the use: a CA/QC service for a signing path
+(and for an OCSP responder's own path), a TSA/QTST service for a timestamping
+one. Where a list records a certificate only under some *other* kind of
+service, it has said nothing about that use, and the anchor is treated as a
+trust-store one would be — provided some service it does record was granted
+then. A certificate every one of whose listed services has been withdrawn
+anchors nothing.
+
+The statuses treated as granted are:
 
 - `.../Svcstatus/granted`
 - `.../Svcstatus/recognisedatnationallevel`

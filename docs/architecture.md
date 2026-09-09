@@ -1956,10 +1956,39 @@ timeline — the current `ServiceStatus` and `StatusStartingTime` plus every
 decides, which is what lets a signature made while a CA was supervised still
 verify after that CA was withdrawn.
 
-Only `granted` and `recognisedatnationallevel` count as granted. The pre-eIDAS
-statuses (`undersupervision`, `accredited`) and every terminal one
-(`withdrawn`, `supervisionceased`, the `deprecated*` family) do not: this build
-refuses to guess which historical status was equivalent to which.
+`granted` and `recognisedatnationallevel` count as granted at any time. The
+pre-eIDAS statuses `undersupervision` and `accredited` count only at a
+validation time before 2016-07-01, when eIDAS began to apply; every terminal
+status (`withdrawn`, `supervisionceased`, the `deprecated*` family) never does.
+See [Trusted lists](trust.md#what-is-read-and-what-is-not) for why the
+pre-eIDAS window is closed rather than open-ended.
+
+#### A path may only end at a service that was granted then
+
+When a built and validated path ends at a **trusted-list** anchor, that
+anchor's service record is consulted before the path is accepted:
+
+| The list records, for this certificate | Then |
+| --- | --- |
+| A service of the kind the path needs — CA/QC for a signing or OCSP-signing path, TSA/QTST for a timestamping one — granted at the validation time | The path ends here: `cert_path_ok`. |
+| A service of that kind that was **not** granted then | `trust_list_service_not_granted` (`unknown`). The search carries on to the other candidate paths first, because another anchor may still be entitled to end one. |
+| Only services of some *other* kind, at least one of them granted then | The list has said nothing about this use, so the anchor is treated as a trust-store one would be and the path ends here. A national list that names a root under its CA/QC services and nowhere else still vouches for that root when a timestamp authority beneath it is checked. |
+| Only services none of which was granted then | `trust_list_service_not_granted`. The list has stopped vouching for the certificate altogether. |
+
+A `--trust-store` anchor is unaffected: the operator put the file in the
+directory, and that is the whole of the statement. When the same certificate
+arrives both ways, the trust store's unconditional statement stands.
+
+`trust_list_service_not_granted` is **`unknown`, never `failed`**. Trust that
+is missing is not evidence against a signature: the same distinction
+`cert_path_unknown` draws. It blocks, so the verdict is capped at
+`indeterminate`, and it never makes a run `invalid`. The chain is still
+reported in full, and so is the qualified determination, because a reader
+needs to see *which* anchor was refused and under which service.
+
+For a timestamp the same check runs at the token's `genTime` against the
+TSA/QTST service type, and the code is reported in place of
+`timestamp_tsa_path_ok`, again as `unknown`.
 
 `--trust-list-signer CERT` supplies the certificate the list must have been
 signed with, obtained out of band — for the EU list of trusted lists, from the
@@ -2821,7 +2850,7 @@ verify), and `revocation_not_checked` (the caller switched revocation off).
 | `trust_list_unverified` | `unknown` | A trusted list was used without `--trust-list-signer`, so its own signature was not checked. Blocking. |
 | `trust_list_signature_ok` | `passed` | The list's enveloped XMLDSig signature verified against the supplied signer certificate and covers the whole document. |
 | `trust_list_signature_invalid` | `failed` | It did not verify, does not cover the whole list, uses an algorithm or transform outside the allowlist, or is absent while a signer was demanded. |
-| `trust_list_service_not_granted` | never emitted | Reserved in `CheckCode` and never produced by this build: a service that is not granted at the validation time is reported through `certificate_not_qualified` instead. Listed here because the code is part of the stable enumeration a consumer may see in a later release. |
+| `trust_list_service_not_granted` | `unknown` | A path was built and validated but ends at a trusted-list anchor the list does not record as granted at the validation time for the use the path was built for. Replaces `cert_path_ok` (and, for a timestamp, `timestamp_tsa_path_ok`); the other candidate paths are tried first. `unknown`, never `failed`: missing trust is not evidence against the signature, so it caps the verdict at `indeterminate` rather than making it `invalid`. See [A path may only end at a service that was granted then](#a-path-may-only-end-at-a-service-that-was-granted-then). |
 | `certificate_qualified` | `info` | The chain ends at a trusted-list CA/QC service granted at the validation time, and any post-eIDAS certificate asserts `QcCompliance`. |
 | `certificate_not_qualified` | `info` | The trusted list does not record the anchor's service as granted then, or a post-eIDAS certificate carries no `QcCompliance`. |
 | `certificate_qualified_unknown` | `info` | No trusted list covers the anchor, so qualified status is not determined. Distinct from `certificate_not_qualified`. |

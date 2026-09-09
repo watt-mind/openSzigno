@@ -400,11 +400,13 @@ fn disagreement(answers: &[Definite]) -> Option<String> {
 /// which one the report is built from. An unusable source is recorded as a
 /// refusal exactly as before, and is the fallback when nothing definite was
 /// found at all.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn check_certificate(
     subject: &ParsedCertificate,
     issuer: &ParsedCertificate,
     candidates: &[ParsedCertificate],
     anchors: &[ParsedCertificate],
+    status: crate::certs::AnchorStatus<'_>,
     data: &RevocationData<'_>,
     time: UnixTime,
     limits: &VerifyLimits,
@@ -449,9 +451,9 @@ pub(super) fn check_certificate(
             let answer = match origin {
                 RevocationOrigin::EmbeddedOcsp
                 | RevocationOrigin::StoreOcsp
-                | RevocationOrigin::OnlineOcsp => {
-                    ocsp_answer(item, subject, issuer, candidates, anchors, time, limits)
-                }
+                | RevocationOrigin::OnlineOcsp => ocsp_answer(
+                    item, subject, issuer, candidates, anchors, status, time, limits,
+                ),
                 RevocationOrigin::EmbeddedCrl
                 | RevocationOrigin::StoreCrl
                 | RevocationOrigin::OnlineCrl => {
