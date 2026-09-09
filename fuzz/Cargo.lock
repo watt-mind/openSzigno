@@ -463,6 +463,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "itoa"
+version = "1.0.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
+
+[[package]]
 name = "jobserver"
 version = "0.1.35"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -630,8 +636,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "openszigno-author"
+version = "0.7.1"
+dependencies = [
+ "aes",
+ "base64",
+ "cbc",
+ "cipher",
+ "cms",
+ "der",
+ "openszigno-core",
+ "openszigno-verify",
+ "p256",
+ "pem-rfc7468",
+ "pkcs8",
+ "rand_core",
+ "rsa",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror",
+ "unicode-normalization",
+ "x509-cert",
+ "zeroize",
+ "zip",
+]
+
+[[package]]
 name = "openszigno-core"
-version = "0.4.0"
+version = "0.7.1"
 dependencies = [
  "aes",
  "base64",
@@ -642,6 +675,7 @@ dependencies = [
  "der",
  "des",
  "encoding_rs",
+ "hmac",
  "pem-rfc7468",
  "pkcs8",
  "rand_core",
@@ -650,6 +684,7 @@ dependencies = [
  "serde",
  "sha1",
  "sha2",
+ "subtle",
  "thiserror",
  "x509-cert",
  "zeroize",
@@ -660,19 +695,22 @@ dependencies = [
 name = "openszigno-fuzz"
 version = "0.0.0"
 dependencies = [
+ "arbitrary",
  "base64",
  "libfuzzer-sys",
+ "openszigno-author",
  "openszigno-core",
  "openszigno-verify",
  "rand_chacha",
  "rand_core",
  "rcgen",
  "rsa",
+ "unicode-normalization",
 ]
 
 [[package]]
 name = "openszigno-verify"
-version = "0.4.0"
+version = "0.7.1"
 dependencies = [
  "base64",
  "cms",
@@ -1020,6 +1058,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "serde_json"
+version = "1.0.151"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c841b55ecdae098c80dcae9cf767f6f8a0c2cdb3416bbef72181df4d0fe73f14"
+dependencies = [
+ "itoa",
+ "memchr",
+ "serde",
+ "serde_core",
+ "zmij",
+]
+
+[[package]]
 name = "sha1"
 version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1187,6 +1238,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "tinyvec"
+version = "1.13.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4cf0ded5c4e56918d8f8a339e1bb67d038d3bc6d144ac407904015ba2e4cde9b"
+dependencies = [
+ "tinyvec_macros",
+]
+
+[[package]]
+name = "tinyvec_macros"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
+
+[[package]]
 name = "tls_codec"
 version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1224,6 +1290,15 @@ name = "unicode-ident"
 version = "1.0.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
+
+[[package]]
+name = "unicode-normalization"
+version = "0.1.25"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5fd4f6878c9cb28d874b009da9e8d183b5abc80117c40bbd187a1fde336be6e8"
+dependencies = [
+ "tinyvec",
+]
 
 [[package]]
 name = "untrusted"
@@ -1427,6 +1502,12 @@ name = "zlib-rs"
 version = "0.6.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "34b31d188d9d685a4f9c7b46d6e36631b07058d2cfe190267adce54dc230bf12"
+
+[[package]]
+name = "zmij"
+version = "1.0.23"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
 
 [[package]]
 name = "zopfli"

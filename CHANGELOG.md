@@ -20,6 +20,18 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
   `encoding` pseudo-attribute and reports the label together with the byte
   range holding it, so a writer restating the declaration agrees with the
   decoder byte for byte. Additive; `schema_version` stays `1`.
+- Two fuzz targets for code that had none. `extract_plan` drives the CLI's
+  extraction planner with arbitrary document titles and declared extensions
+  and asserts that no planned name is a path, that no two names in one
+  directory collide, and that planning is idempotent; `destination_url`
+  drives the `--online` destination policy and asserts that it never hands
+  the fetcher an address its own verdict refuses, that a non-HTTP scheme and
+  userinfo are refused whatever `--online-allow-private` says, and that a
+  relative redirect stays on the base URL's authority. Both include the
+  shipped module by `#[path]`, because the `openszigno` binary crate has no
+  library target to depend on, so what is fuzzed is the real source.
+  `decode_payload` now also drives the two `encrypt` chains with no
+  decryption key, through `decode_document_with`.
 
 ### Fixed
 

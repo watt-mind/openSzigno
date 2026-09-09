@@ -185,7 +185,7 @@ pub(super) fn loopback_only(vetted: &Vetted) -> bool {
 
 /// Split an authority into its host and optional port, understanding the
 /// bracketed form an IPv6 literal has to be written in.
-fn split_authority(authority: &str) -> Option<(&str, Option<u16>)> {
+pub(super) fn split_authority(authority: &str) -> Option<(&str, Option<u16>)> {
     if let Some(rest) = authority.strip_prefix('[') {
         let (inside, after) = rest.split_once(']')?;
         if inside.is_empty() {
@@ -206,13 +206,13 @@ fn split_authority(authority: &str) -> Option<(&str, Option<u16>)> {
 }
 
 /// The IP address a host names literally, if it names one at all.
-fn literal_address(host: &str) -> Option<IpAddr> {
+pub(super) fn literal_address(host: &str) -> Option<IpAddr> {
     host.parse::<IpAddr>().ok()
 }
 
 /// What the policy makes of one address.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum Verdict {
+pub(super) enum Verdict {
     Permitted,
     /// Refused by range.
     Restricted,
@@ -227,7 +227,11 @@ enum Verdict {
 /// itself, the operator's own network, the link-local range that carries cloud
 /// metadata services, the group addresses that reach more than one host, and
 /// the IPv6 equivalents of each.
-fn verdict(address: IpAddr) -> Verdict {
+///
+/// It is `pub(super)` so that the module's own invariant — every address
+/// [`permitted`] hands back is one this function permits — can be asserted
+/// from outside, which is what `fuzz/fuzz_targets/destination_url.rs` does.
+pub(super) fn verdict(address: IpAddr) -> Verdict {
     // An IPv4-mapped (`::ffff:a.b.c.d`) or IPv4-compatible (`::a.b.c.d`)
     // address is an IPv4 destination written the other way round, and neither
     // may be a way past the IPv4 rules. `Ipv6Addr::to_ipv4` covers both forms:
