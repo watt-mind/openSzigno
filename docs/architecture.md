@@ -668,6 +668,24 @@ Messages never contain input paths, document titles, or payload content. On
 failure `data` is `null`, `warnings` is empty, and `input.format` is `null`
 when the input could not be parsed as a dossier.
 
+**Every string in `data` that came out of the input is sanitised before the
+envelope is written.** A dossier chooses its title, its document titles, its
+MIME type halves, its object references, its transform names and its signature
+ids, and a `verify` report adds the common names of certificates it carried.
+Each of those has Unicode `Cc` and `Cf` characters dropped — the bidirectional
+overrides among them — and is bounded: 256 characters for a title, 128 for
+everything else, with a value that was cut short ending in `...` inside its
+cap. The pass runs once, over the finished `data`, and the human summary is
+rendered from that same value, so a consumer of either channel sees the same
+text. Warnings and errors are filtered the same way, to 512 characters.
+
+Two things this does not change. Field names, types and presence are exactly
+what they were: sanitising alters the *content* of a string, never the shape of
+the envelope, and `schema_version` stays `1`. And `extracted[].path` is left
+untouched, because it has to keep naming the file that was written; the
+extraction name rules ([Extraction policy](#extraction-policy)) already refuse
+a title carrying such a character before a filename is derived from it.
+
 Example, from `inspect --json` on `tests/fixtures/plain-base64.es3`. The tool
 writes one compact line; this is pretty-printed:
 

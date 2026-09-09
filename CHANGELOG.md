@@ -10,6 +10,30 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
 
 ## [Unreleased]
 
+### Fixed
+
+- Text a dossier chose no longer reaches a terminal or the JSON envelope
+  unfiltered. The dossier title, document titles, MIME type halves, the
+  declared extension and character set, object references, transform names and
+  signature ids were printed and serialised exactly as the input wrote them, so
+  a title of `OK<U+202E>txt.exe` displayed as `OKexe.txt` in a `list` and
+  `inspect --json` carried the override through to whatever read it, and a
+  `subtype` — which nothing in the format bounds — printed in full at any
+  length. The C0 and C1 controls were never reachable, because the bounded XML
+  parser refuses them; the Unicode `Cf` class and length were. Every command
+  that reads a dossier now runs one pass over its finished `data` value, and
+  the human summary is rendered from that same value, so both channels are
+  covered by the same filter: `Cc` and `Cf` characters are dropped, titles are
+  bounded to 256 characters and every other dossier-derived value to 128, each
+  cut short value ending in `...` inside its cap. Warnings and errors go
+  through the filter too, and `verify` reports a certificate's subject and
+  issuer common names the same way. Field names and types are unchanged,
+  `schema_version` stays `1`, and no golden file changed: no committed fixture
+  carries such a character or exceeds a bound. An extracted file's `path` is
+  deliberately untouched — the extraction name rules already refuse a control,
+  invisible or formatting character in a title and bound the result, and the
+  envelope has to keep naming the file that was written.
+
 ## [0.7.1] - 2026-09-09
 
 ### Added
