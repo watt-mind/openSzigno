@@ -70,6 +70,27 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
   dossier's own namespace. The lookup matched on the local name alone, so a
   `DocumentProfile` from a foreign namespace, placed first, decided what the
   reference pointed at.
+- A named pipe given where a regular file is expected is refused instead of
+  waited on. The bounded reader opened the path and only then asked whether it
+  was a regular file, and opening a FIFO for reading blocks inside `open(2)`
+  until somebody opens the writing end — which is whoever laid the pipe, not
+  this tool — so `inspect /path/to/fifo`, or a `--decrypt-key` pointing at one,
+  parked the process indefinitely before the check that would have refused it
+  could run. On Unix the open now passes `O_NONBLOCK` and the flag is cleared
+  on the descriptor once `fstat` has established it is a regular file; the
+  refusal is the `io_error` (exit 3) it always should have been. Windows keeps
+  the order it had.
+
+## [0.7.1] - 2026-09-09
+
+### Added
+
+- `openszigno_core::declared_encoding`, which reads the XML declaration's
+  `encoding` pseudo-attribute and reports the label together with the byte
+  range holding it, so a writer restating the declaration agrees with the
+  decoder byte for byte. Additive; `schema_version` stays `1`.
+
+### Fixed
 - `sign` no longer rewrites the dossier's own text when it fills a signature
   in. The digest, signature-value and timestamp placeholders were substituted
   over the whole document, so a document whose title or payload read like one

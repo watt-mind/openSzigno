@@ -548,6 +548,14 @@ names, and each entry of a `--trust-store` and a `--revocation-store`.
 - Reading stops one byte past the cap, and the file is refused at that point,
   so a reported length that is not the truth is bounded all the same. A file of
   exactly the cap is read; one byte more is not.
+- On Unix the open is non-blocking (`O_NONBLOCK`), and the flag is cleared on
+  the descriptor once the `fstat` above has established that it is a regular
+  file. Opening a FIFO for reading otherwise blocks inside `open(2)` until
+  somebody opens the writing end, which is the caller's choice and not this
+  tool's, so a dossier path or a `--decrypt-key` pointing at a named pipe would
+  wait indefinitely before the type check could refuse it. It now returns at
+  once and is refused as not a regular file. On Windows the order is unchanged:
+  the open, then the type check.
 
 The caps are `max_input_bytes` (64 MiB) for a dossier, 1 MiB for key material
 and the `--csc` configuration, 4 MiB for one trust-store entry or trusted list,
