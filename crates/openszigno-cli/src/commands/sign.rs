@@ -242,7 +242,14 @@ mod tests {
     #[test]
     fn an_existing_output_is_never_overwritten() {
         let temporary = tempfile::tempdir().expect("a temporary directory");
-        let path = temporary.path().join("signed.es3");
+        // macOS keeps its temporary directory under a symlinked `/var`, and
+        // the writer refuses a symlink anywhere in the output path, so the
+        // test resolves the base first, as the extract tests do.
+        let base = temporary
+            .path()
+            .canonicalize()
+            .expect("the temporary directory resolves");
+        let path = base.join("signed.es3");
         std::fs::write(&path, b"already here").expect("the file is written");
         let error = write_new_file(&path, b"new").expect_err("the file exists");
         assert_eq!(error.code, "output_exists");
