@@ -25,11 +25,11 @@ cbc.workspace = true
 cipher.workspace = true
 cms.workspace = true
 der.workspace = true
-openszigno-core = { version = "0.6.0", path = "../openszigno-core" }
+openszigno-core = { version = "0.7.0", path = "../openszigno-core" }
 # The signer canonicalizes through the verifier's own backend, over the tree
 # the shared core parser built. Two canonicalizers that had to agree about
 # namespace scope is exactly the gap a signature must not sit in.
-openszigno-verify = { version = "0.6.0", path = "../openszigno-verify" }
+openszigno-verify = { version = "0.7.0", path = "../openszigno-verify" }
 p256.workspace = true
 pem-rfc7468.workspace = true
 pkcs8.workspace = true
