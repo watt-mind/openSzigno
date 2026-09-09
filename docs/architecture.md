@@ -1260,6 +1260,18 @@ Two further rules follow from what real dossiers actually contain:
   the versioned forms are recognised, and a reference that declares one but
   resolves elsewhere is called out in the failure message, because that is the
   shape a wrapping attempt takes.
+- **Any `SignedProperties` the signature owns satisfies it, not the first
+  one.** The XMLDSig schema allows a signature any number of `ds:Object`
+  children with open content, and nothing obliges a reference to cover a given
+  one, so anyone able to append bytes to a dossier can add an
+  `xades:SignedProperties` the signer never signed. Requiring the *first* would
+  let one such decoy turn a sound signature into `reference_scope_incomplete`
+  — and its document into `documents_uncovered` — which is a
+  denial-of-verification, not a finding. The elements a countersignature nested
+  in this signature owns are still that signature's and satisfy nothing here.
+  [Stage C](#xades-signed-properties) reads the same covered element, so what
+  the scope rule requires and what the binding is evaluated against cannot
+  drift apart.
 
 Where the specification does not define the mandated set — a signature in a
 placement the format does not describe, or one inside a `Document` that carries
@@ -1525,6 +1537,35 @@ mandated reference set requires the signature to cover, so what they say is
 signed. `verify` therefore treats the certificate their `CertDigest` names as
 the certificate the signature claims, in every recognised XAdES namespace
 (1.1.1, 1.2.2, 1.3.2, 1.4.1).
+
+**Which properties, though, is itself decided by coverage.** A `ds:Object` is
+open content: the schema allows any number of them under a `ds:Signature` and
+nothing requires a reference to cover one, so an inserted decoy object can hold
+a whole `xades:QualifyingProperties` the signer never signed. The properties
+stage C reads are therefore the ones a reference of *this* signature actually
+digests — the `xades:SignedProperties` that lies inside one reference's
+[effective node set](#the-effective-node-set), and the
+`xades:QualifyingProperties` holding it — never simply the first such element
+in document order. The `Type` attribute
+`http://uri.etsi.org/01903#SignedProperties` is corroboration, exactly as it is
+in the scope rule, and never the rule itself. Three consequences:
+
+- when no reference of the signature covers any `SignedProperties`, nothing
+  there is signed: the signed properties are treated as absent and the binding
+  reports `xades_signing_certificate_absent` rather than believing an unsigned
+  property. Such a signature also fails `reference_scope_incomplete` whenever
+  the mandated set is defined;
+- when more than one `xades:QualifyingProperties` belongs to one signature,
+  covered or not, it is said once as `xades_extra_qualifying_properties`
+  (`info`) and the uncovered ones are ignored. Informational on purpose:
+  blocking would hand anyone who can append a `ds:Object` the power to cap a
+  sound signature at `indeterminate`, which is the same lever this rule closes;
+- a countersignature's qualifying properties belong to the countersignature.
+  The signature they are nested in never reads them, and they never satisfy its
+  requirements.
+
+A `Target` attribute that names another signature is reported as it always was
+and decides nothing: coverage is the rule.
 
 The rules:
 
@@ -2713,7 +2754,8 @@ verify), and `revocation_not_checked` (the caller switched revocation off).
 | `xades_not_validated` | `info` | Unsigned qualifying properties this build does not validate are present; the message and `xades.unvalidated_properties` name them. Informational: they live outside the signature and cannot change what it says, and the ones that carry evidence this build *does* use — `CertificateValues`, `RevocationValues`, `TimeStampValidationData` — are consumed and not counted here. Omitted entirely when nothing is left to name. |
 | `xades_signing_certificate_bound` | `passed` | The signing certificate matches the digest the signed `SigningCertificate` / `SigningCertificateV2` property names. |
 | `xades_signing_certificate_mismatch` | `failed` | It does not: no offered certificate answers to the digest, an issuer and serial contradict it, the declared digest algorithm is outside the allowlist, or the certificate whose key verified the signature is not the digested one. The certificate-substitution check. |
-| `xades_signing_certificate_absent` | `unknown` | The signature carries no such property, so nothing signed says which certificate signed it. |
+| `xades_signing_certificate_absent` | `unknown` | The signature carries no such property in the signed properties its own references cover, so nothing signed says which certificate signed it. |
+| `xades_extra_qualifying_properties` | `info` | More than one `xades:QualifyingProperties` belongs to this signature; the one its own references cover is read and the others are ignored. Informational: an unreferenced `ds:Object` is open content the schema allows, so an extra one says nothing about the signature and must not be able to block it. |
 | `xades_signature_policy_implied` | `info` | An implied signature policy is declared. Informational: a declared policy describes how the signature was made and says nothing about whether it is sound, so it does not block. No policy is processed. |
 | `xades_signature_policy_explicit` | `info` | An explicit signature policy is declared. Its identifier is reported; no policy document is fetched or applied. Informational for the same reason. |
 | `signing_certificate_available` | `passed` | A usable certificate was found in `ds:KeyInfo`. |
