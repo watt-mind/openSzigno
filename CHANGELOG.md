@@ -41,6 +41,20 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
   `docs/architecture.md` gains an "AVDH-authenticated documents" subsection,
   `docs/trust.md` records what could and could not be established about the
   seal's issuer, and `docs/references.md` cites the sources.
+- ECDSA over NIST P-521 with SHA-512
+  (`http://www.w3.org/2001/04/xmldsig-more#ecdsa-sha512`) is inside the pinned
+  algorithm policy, for a trusted list's own signature and for a dossier
+  signature alike, and the matching X.509 and CMS OID
+  (`1.2.840.10045.4.3.4`) is accepted where a certificate, CRL, OCSP response
+  or timestamp token is signed with it. ETSI TS 119 612 annex B.1.2 permits any
+  ETSI TS 119 312 algorithm for a list's signature, so a member state may sign
+  a TLv6 list with `ecdsa-sha512`; such a list was refused as
+  `trust_list_signature_invalid` for naming "a signature method outside the
+  allowlist". Curve and digest stay strictly paired: a P-521 key under a
+  method naming SHA-256 is still `algorithm_rejected`. `verify` only:
+  `sign --key` still takes an RSA or NIST P-256 key, and there is no
+  `--algorithm` value for P-384 or P-521. `policy.signature_algorithms` in the
+  JSON report gains `ecdsa-sha512`; additive, `schema_version` stays `1`.
 - Trusted lists are read in **both** published versions of ETSI TS 119 612.
   The EU cut over from TLv5 to TLv6 on 2026-04-29 with no transition period,
   so a verifier needs both: TLv6 for anything published from that date, TLv5

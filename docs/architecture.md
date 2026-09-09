@@ -1532,7 +1532,7 @@ only defence against an algorithm downgrade. It is not configurable.
 | Kind | Accepted | Refused |
 | --- | --- | --- |
 | Digest | SHA-256, SHA-384, SHA-512 | SHA-1 by default, MD5 always, and every other URI (`algorithm_rejected`) |
-| Signature | RSA PKCS#1 v1.5 and RSA-PSS with SHA-256/384/512 and a modulus of at least 2048 bits; ECDSA P-256 with SHA-256 and P-384 with SHA-384 | RSA-SHA1 by default; MD5 variants, DSA, every HMAC method, RSA below 2048 bits, and a curve that does not match the named digest always (`algorithm_rejected`) |
+| Signature | RSA PKCS#1 v1.5 and RSA-PSS with SHA-256/384/512 and a modulus of at least 2048 bits; ECDSA P-256 with SHA-256, P-384 with SHA-384, and P-521 with SHA-512 | RSA-SHA1 by default; MD5 variants, DSA, every HMAC method, RSA below 2048 bits, and a curve that does not match the named digest always (`algorithm_rejected`) |
 | Canonicalization | Canonical XML 1.0 and Exclusive XML Canonicalization 1.0, each with and without comments | Canonical XML 1.1 and anything else (`c14n_unsupported`) |
 | Transform | enveloped-signature, the four canonicalization algorithms above, and base64 | XSLT, XPath, XPath Filter 2.0, and anything else (`transform_not_allowed`) |
 
@@ -3683,6 +3683,14 @@ RSA PKCS#1 v1.5 with SHA-256 is the default rather than PSS because it is what
 Hungarian e-akta verifiers universally accept. All three are inside the pinned
 [algorithm policy](#algorithm-policy) `verify` enforces, and an ECDSA
 signature is written as the raw `r || s` pair XMLDSig prescribes.
+
+The policy `verify` enforces is wider than what `sign` writes: ECDSA over
+P-384 with SHA-384 and over P-521 with SHA-512 verify, but there is no
+`--algorithm` value for either and `--key` takes an RSA or NIST P-256 key
+only. They are verify-only, because the material that uses them is signed
+elsewhere: a member state may sign a trusted list with `ecdsa-sha512` over
+P-521, which ETSI TS 119 612 annex B.1.2 permits by referring to the
+ETSI TS 119 312 algorithm set.
 
 ### Timestamping
 
