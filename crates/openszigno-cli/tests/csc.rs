@@ -389,20 +389,20 @@ fn fixture_no_pin(mut mock: Mock) -> Fixture {
     fixture
 }
 
-/// An `oauth2`-mode credential cannot be authorised without a browser, so the
-/// run stops before the dossier is touched and says which flow to complete.
+/// Under `--no-interactive` an `oauth2`-mode credential cannot be authorised
+/// at all, so the run stops before the dossier is touched and says so.
 #[test]
-fn an_oauth2_credential_is_refused_with_the_flow_to_complete() {
+fn an_oauth2_credential_is_refused_under_no_interactive() {
     let mut mock = Mock::new(Flavour::Eudi);
     mock.auth_mode = "oauth2";
     let fixture = fixture(mock);
-    let output = sign(&fixture, &[]);
+    let output = sign(&fixture, &["--no-interactive"]);
     assert!(!output.status.success());
     let report = json(&output);
     assert_eq!(report["errors"][0]["code"], "csc_authorization_required");
     let message = report["errors"][0]["message"].as_str().expect("a message");
     assert!(message.contains("scope=credential"));
-    assert!(message.contains("csc login"));
+    assert!(message.contains("--no-interactive"));
     // Nothing was authorised and nothing was written.
     assert!(!fixture.service.paths().iter().any(|p| p.contains("sign")));
     assert!(!fixture.path("signed.es3").exists());
@@ -482,7 +482,7 @@ fn the_bearer_token_travels_in_a_header_and_appears_nowhere_else() {
     let mut mock = Mock::new(Flavour::Eudi);
     mock.auth_mode = "oauth2";
     let refused_fixture = fixture(mock);
-    assert!(!everything_printed(&sign(&refused_fixture, &[])).contains(TOKEN));
+    assert!(!everything_printed(&sign(&refused_fixture, &["--no-interactive"])).contains(TOKEN));
 }
 
 // ---------------------------------------------------------------------------
@@ -777,4 +777,488 @@ fn a_hostile_credential_identifier_is_sanitized_in_an_error_message() {
         !printed.contains('\u{202e}'),
         "an override reached the output"
     );
+}
+
+// ---------------------------------------------------------------------------
+// `csc login`, and the credential round it makes possible
+// ---------------------------------------------------------------------------
+
+/// Rewrite a fixture's configuration for a run that logs in: the token comes
+/// from a file nothing has written yet, because `csc login` is what writes it.
+fn login_config(fixture: &Fixture) {
+    let path = fixture.path("csc.toml");
+    let text = std::fs::read_to_string(&path).expect("the configuration is read");
+    let mut rewritten: Vec<String> = text
+        .lines()
+        .filter(|line| !line.starts_with("access_token"))
+        .map(str::to_owned)
+        .collect();
+    rewritten.push("access_token_file = \"token\"".to_owned());
+    std::fs::write(&path, format!("{}\n", rewritten.join("\n")))
+        .expect("the configuration is rewritten");
+}
+
+/// What the browser does with the authorization URL a run prints.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Browser {
+    /// Open it and deliver the redirect to the loopback listener, which is
+    /// what a person completing the consent screen does.
+    Follow,
+    /// Deliver the redirect with a `state` this run never issued, which is
+    /// what a stale tab or somebody else's code looks like.
+    WrongState,
+}
+
+/// Run the CLI with a browser standing in for the person at the keyboard.
+///
+/// The run prints an authorization URL on stderr and then waits on its
+/// loopback listener, so the two have to happen at once: stderr is read line
+/// by line, and every authorization URL that appears is fetched and its
+/// redirect delivered. stdout is drained on its own thread, because a full
+/// pipe would deadlock the child before it ever printed the URL.
+fn run_with_browser(arguments: &[&str], browser: Browser) -> Output {
+    use std::io::{BufRead as _, BufReader, Read as _};
+
+    let mut child = std::process::Command::new(csc_support::online_support::binary())
+        .args(arguments)
+        .env("HTTP_PROXY", "http://127.0.0.1:1/")
+        .env("http_proxy", "http://127.0.0.1:1/")
+        .env("ALL_PROXY", "http://127.0.0.1:1/")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("the CLI runs");
+    let mut out = child.stdout.take().expect("stdout is piped");
+    let draining = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let _ = out.read_to_end(&mut bytes);
+        bytes
+    });
+    let mut stderr = Vec::new();
+    {
+        let errors = child.stderr.take().expect("stderr is piped");
+        for line in BufReader::new(errors).lines() {
+            let Ok(line) = line else { break };
+            stderr.extend_from_slice(line.as_bytes());
+            stderr.push(b'\n');
+            if line.starts_with("http://") && line.contains("response_type=code") {
+                visit(&line, browser);
+            }
+        }
+    }
+    let status = child.wait().expect("the CLI exits");
+    Output {
+        status,
+        stdout: draining.join().expect("stdout was drained"),
+        stderr,
+    }
+}
+
+/// Open one authorization URL and hand the redirect to the loopback listener.
+fn visit(url: &str, browser: Browser) {
+    let answer = http_get(url);
+    let location = answer
+        .lines()
+        .find_map(|line| {
+            line.split_once(':')
+                .filter(|(name, _)| name.eq_ignore_ascii_case("location"))
+                .map(|(_, value)| value.trim().to_owned())
+        })
+        .unwrap_or_else(|| panic!("the authorization endpoint answered no redirect: {answer}"));
+    let location = match browser {
+        Browser::Follow => location,
+        Browser::WrongState => {
+            let (before, _) = location
+                .split_once("&state=")
+                .expect("the redirect carries the state back");
+            format!("{before}&state=a-state-this-run-never-issued")
+        }
+    };
+    http_get(&location);
+}
+
+/// One bare `GET`, as a browser would make it, returning the whole answer.
+fn http_get(url: &str) -> String {
+    use std::io::{Read as _, Write as _};
+
+    let rest = url.strip_prefix("http://").expect("a loopback URL");
+    let (authority, target) = rest.split_once('/').expect("a URL with a path");
+    let mut stream =
+        std::net::TcpStream::connect(authority).expect("the listener is accepting connections");
+    stream
+        .write_all(
+            format!("GET /{target} HTTP/1.1\r\nHost: {authority}\r\nConnection: close\r\n\r\n")
+                .as_bytes(),
+        )
+        .expect("the request is written");
+    let mut answer = Vec::new();
+    let _ = stream.read_to_end(&mut answer);
+    String::from_utf8_lossy(&answer).into_owned()
+}
+
+/// One `csc login` run against the fixture's mock service.
+fn login(fixture: &Fixture, browser: Browser, extra: &[&str]) -> Output {
+    let mut arguments = vec![
+        "csc".to_owned(),
+        "login".to_owned(),
+        fixture.text("csc.toml"),
+        "--online-allow-private".to_owned(),
+        "--json".to_owned(),
+    ];
+    arguments.extend(extra.iter().map(|value| (*value).to_owned()));
+    let borrowed: Vec<&str> = arguments.iter().map(String::as_str).collect();
+    run_with_browser(&borrowed, browser)
+}
+
+/// A login obtains the `scope=service` token, writes it where `sign --csc`
+/// reads it, and prints none of it.
+#[test]
+fn a_login_stores_the_token_and_its_record_and_prints_neither() {
+    let fixture = fixture(Mock::new(Flavour::Eudi));
+    login_config(&fixture);
+    let output = login(&fixture, Browser::Follow, &[]);
+    assert!(output.status.success(), "{output:?}");
+    let report = json(&output);
+    assert_eq!(report["ok"], true);
+    assert_eq!(report["command"], "csc-login");
+    assert_eq!(report["data"]["refresh_token_stored"], true);
+    assert_eq!(report["data"]["specs"], "2.2.0.0");
+    assert_eq!(report["data"]["supports_rar"], true);
+    assert!(
+        report["data"]["expires_at"].is_string(),
+        "the expiry the service stated is reported"
+    );
+
+    // The token is on disk and nowhere else.
+    let token = std::fs::read_to_string(fixture.path("token")).expect("the token is written");
+    assert!(token.starts_with("synthetic-service-token"), "{token}");
+    let printed = everything_printed(&output);
+    assert!(!printed.contains(&token), "the token was printed");
+    assert!(
+        !printed.contains("synthetic-refresh-token"),
+        "the refresh token was printed"
+    );
+
+    let record =
+        std::fs::read_to_string(fixture.path("token.record.json")).expect("the record is written");
+    assert!(record.contains("expires_at"));
+    assert!(record.contains("oauth2/token"));
+
+    // Both files hold a secret, so both are owner-only.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        for name in ["token", "token.record.json"] {
+            let mode = std::fs::metadata(fixture.path(name))
+                .expect("the file exists")
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o600, "{name}");
+        }
+    }
+}
+
+/// The authorization request carries PKCE `S256`, a state, and a loopback
+/// redirect on an ephemeral port; the token request carries the verifier and
+/// the code, and the service checks them.
+#[test]
+fn the_authorization_request_carries_pkce_and_a_state_the_service_verifies() {
+    let fixture = fixture(Mock::new(Flavour::Eudi));
+    login_config(&fixture);
+    assert!(login(&fixture, Browser::Follow, &[]).status.success());
+
+    let queries = fixture.service.authorize_queries();
+    assert_eq!(queries.len(), 1, "one authorization round");
+    let query = csc_support::form(&queries[0]);
+    assert_eq!(query["response_type"], "code");
+    assert_eq!(query["scope"], "service");
+    assert_eq!(query["code_challenge_method"], "S256");
+    assert_eq!(query["code_challenge"].len(), 43, "a 32-byte S256 digest");
+    assert!(query["state"].len() >= 22, "a state worth checking");
+    assert!(
+        query["redirect_uri"].starts_with("http://127.0.0.1:"),
+        "{}",
+        query["redirect_uri"]
+    );
+    assert!(!query["redirect_uri"].ends_with(":0/callback"));
+
+    let requests = fixture.service.token_requests();
+    assert_eq!(requests.len(), 1);
+    let form = csc_support::form(&requests[0]);
+    assert_eq!(form["grant_type"], "authorization_code");
+    assert_eq!(form["redirect_uri"], query["redirect_uri"]);
+    // The verifier is what the mock hashes back to the challenge; it having
+    // answered at all is the check.
+    assert_eq!(form["code_verifier"].len(), 43);
+    assert!(!form["code"].is_empty());
+}
+
+/// A redirect under a state this run never issued is refused, the code is not
+/// redeemed, and no token is written.
+#[test]
+fn a_redirect_under_another_state_is_refused_and_nothing_is_stored() {
+    let fixture = fixture(Mock::new(Flavour::Eudi));
+    login_config(&fixture);
+    let output = login(&fixture, Browser::WrongState, &[]);
+    assert!(!output.status.success());
+    let report = json(&output);
+    assert_eq!(report["errors"][0]["code"], "csc_state_mismatch");
+    assert_eq!(output.status.code(), Some(5));
+    assert!(fixture.service.token_requests().is_empty());
+    assert!(!fixture.path("token").exists());
+}
+
+/// A token endpoint that refuses the exchange, which is what a wrong PKCE
+/// verifier or a replayed code produces, stops the login with its own error.
+#[test]
+fn a_refused_token_exchange_stops_the_login_and_writes_nothing() {
+    let mut mock = Mock::new(Flavour::Eudi);
+    mock.reject_token = true;
+    let fixture = fixture(mock);
+    login_config(&fixture);
+    let output = login(&fixture, Browser::Follow, &[]);
+    assert!(!output.status.success());
+    let report = json(&output);
+    assert_eq!(report["errors"][0]["code"], "csc_login_failed");
+    let message = report["errors"][0]["message"].as_str().expect("a message");
+    assert!(message.contains("invalid_grant"), "{message}");
+    assert!(!fixture.path("token").exists());
+}
+
+/// With a credential named, the login says whether signing with it will need
+/// a second, interactive round.
+#[test]
+fn a_login_reports_whether_the_credential_needs_an_interactive_round() {
+    for (mode, interactive) in [("explicit", false), ("oauth2", true)] {
+        let mut mock = Mock::new(Flavour::Cleverbase);
+        mock.auth_mode = mode;
+        let fixture = fixture(mock);
+        login_config(&fixture);
+        let output = login(&fixture, Browser::Follow, &["--credential", CREDENTIAL]);
+        assert!(output.status.success(), "{mode}: {output:?}");
+        let report = json(&output);
+        assert_eq!(report["data"]["credential"]["credential_id"], CREDENTIAL);
+        assert_eq!(report["data"]["credential"]["auth_mode"], mode);
+        assert_eq!(
+            report["data"]["credential"]["interactive_signature_required"], interactive,
+            "{mode}"
+        );
+    }
+}
+
+/// Create, log in, sign an `oauth2`-mode credential through the credential
+/// round, timestamp it, and verify: `valid`.
+///
+/// The two personalities take the credential parameters in the two different
+/// forms, and the run has to use the one the service published rather than a
+/// vendor profile: `supportsRar` decides.
+#[test]
+fn an_oauth2_credential_is_signed_through_the_credential_round_and_verifies() {
+    for (flavour, rar) in [(Flavour::Eudi, true), (Flavour::Cleverbase, false)] {
+        let mut mock = Mock::new(flavour);
+        mock.auth_mode = "oauth2";
+        let fixture = fixture_with(mock, true);
+        login_config(&fixture);
+        assert!(
+            login(&fixture, Browser::Follow, &[]).status.success(),
+            "{flavour:?}: the login"
+        );
+
+        let tsa_certificate = fixture.path("tsa.crt");
+        std::fs::write(&tsa_certificate, &fixture.tsa_der).expect("the TSA certificate is written");
+        let url = fixture.tsa_url.clone().expect("the authority is running");
+        let output = run_with_browser(
+            &[
+                "sign",
+                &fixture.text("input.es3"),
+                "--output",
+                &fixture.text("signed.es3"),
+                "--csc",
+                &fixture.text("csc.toml"),
+                "--signing-time",
+                AT,
+                "--tsa",
+                &url,
+                "--tsa-cert",
+                tsa_certificate.to_str().expect("a UTF-8 path"),
+                "--online-allow-private",
+                "--json",
+            ],
+            Browser::Follow,
+        );
+        assert!(output.status.success(), "{flavour:?}: {output:?}");
+        let report = json(&output);
+        assert_eq!(report["data"]["signatures"][0]["signer"], "csc");
+        assert_eq!(report["data"]["signatures"][0]["timestamped"], true);
+
+        // The credential round asked for exactly this signature: the
+        // credential, one signature, and the hash that was signed, in the
+        // form the service said it takes.
+        let queries = fixture.service.authorize_queries();
+        assert_eq!(
+            queries.len(),
+            2,
+            "{flavour:?}: the service and credential rounds"
+        );
+        let credential_round = csc_support::form(&queries[1]);
+        assert_eq!(credential_round["scope"], "credential");
+        if rar {
+            let details: Value = serde_json::from_str(&credential_round["authorization_details"])
+                .expect("authorization_details is JSON");
+            assert_eq!(details[0]["type"], "credential");
+            assert_eq!(details[0]["credentialID"], CREDENTIAL);
+            assert!(
+                details[0]["documentDigests"][0]["hash"]
+                    .as_str()
+                    .is_some_and(|hash| !hash.is_empty())
+            );
+            assert_eq!(details[0]["hashAlgorithmOID"], "2.16.840.1.101.3.4.2.1");
+            assert!(!credential_round.contains_key("credentialID"));
+        } else {
+            assert_eq!(credential_round["credentialID"], CREDENTIAL);
+            assert_eq!(credential_round["numSignatures"], "1");
+            assert_eq!(
+                credential_round["hashAlgorithmOID"],
+                "2.16.840.1.101.3.4.2.1"
+            );
+            assert!(!credential_round["hashes"].is_empty());
+            assert!(!credential_round.contains_key("authorization_details"));
+        }
+
+        // Nothing the round handled is printed: not the token that stood in
+        // for the Signature Activation Data, not the one in the file.
+        let token = std::fs::read_to_string(fixture.path("token")).expect("the token is read");
+        let printed = everything_printed(&output);
+        assert!(
+            !printed.contains(&token),
+            "{flavour:?}: the token was printed"
+        );
+        let signed =
+            std::fs::read_to_string(fixture.path("signed.es3")).expect("the output is read");
+        assert!(!signed.contains(&token));
+
+        let store = revocation_store(&fixture);
+        let report = verify(&fixture, &["--revocation-store", &store]);
+        assert_eq!(
+            report["data"]["verdict"],
+            "valid",
+            "{flavour:?}: {:?}",
+            blocking(&report)
+        );
+    }
+}
+
+/// An expired stored token is renewed with its refresh token before anything
+/// is contacted, rather than surfacing as the service's own refusal.
+#[test]
+fn an_expired_token_is_refreshed_rather_than_rejected() {
+    let fixture = fixture(Mock::new(Flavour::Eudi));
+    login_config(&fixture);
+    assert!(login(&fixture, Browser::Follow, &[]).status.success());
+    let first = std::fs::read_to_string(fixture.path("token")).expect("the token is read");
+
+    // Age the record: the token expired an hour ago, and the refresh token
+    // beside it is what a run starting now has to use.
+    let path = fixture.path("token.record.json");
+    let mut record: Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).expect("the record is read"))
+            .expect("the record is JSON");
+    record["expires_at"] = serde_json::json!(1);
+    std::fs::write(&path, record.to_string()).expect("the record is rewritten");
+
+    let output = sign(&fixture, &[]);
+    assert!(output.status.success(), "{output:?}");
+    let report = json(&output);
+    let codes: Vec<&str> = report["warnings"]
+        .as_array()
+        .expect("warnings")
+        .iter()
+        .map(|warning| warning["code"].as_str().unwrap_or_default())
+        .collect();
+    assert!(codes.contains(&"csc_token_refreshed"), "{codes:?}");
+
+    // The renewed token replaced the old one, and the service saw it.
+    let renewed = std::fs::read_to_string(fixture.path("token")).expect("the token is read");
+    assert_ne!(renewed, first);
+    assert!(
+        fixture
+            .service
+            .authorizations()
+            .iter()
+            .any(|value| value == &format!("Bearer {renewed}"))
+    );
+    let form = csc_support::form(
+        fixture
+            .service
+            .token_requests()
+            .last()
+            .expect("a token request"),
+    );
+    assert_eq!(form["grant_type"], "refresh_token");
+    assert!(!everything_printed(&output).contains(&renewed));
+}
+
+/// An expired token with nothing to renew it is named as that, rather than
+/// left to fail as a service refusal.
+#[test]
+fn an_expired_token_with_no_refresh_token_says_to_log_in_again() {
+    let mut mock = Mock::new(Flavour::Eudi);
+    mock.issue_refresh_token = false;
+    let fixture = fixture(mock);
+    login_config(&fixture);
+    let report = json(&login(&fixture, Browser::Follow, &[]));
+    assert_eq!(report["data"]["refresh_token_stored"], false);
+    let codes: Vec<&str> = report["warnings"]
+        .as_array()
+        .expect("warnings")
+        .iter()
+        .map(|warning| warning["code"].as_str().unwrap_or_default())
+        .collect();
+    assert!(codes.contains(&"csc_no_refresh_token"), "{codes:?}");
+
+    let path = fixture.path("token.record.json");
+    let mut record: Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).expect("the record is read"))
+            .expect("the record is JSON");
+    record["expires_at"] = serde_json::json!(1);
+    std::fs::write(&path, record.to_string()).expect("the record is rewritten");
+
+    let output = sign(&fixture, &[]);
+    assert!(!output.status.success());
+    let report = json(&output);
+    assert_eq!(report["errors"][0]["code"], "csc_token_unusable");
+    assert!(
+        report["errors"][0]["message"]
+            .as_str()
+            .expect("a message")
+            .contains("csc login")
+    );
+    // The signing run stopped before it contacted the service at all: the
+    // last thing the service saw was the login.
+    assert!(
+        !fixture
+            .service
+            .paths()
+            .iter()
+            .any(|path| path.ends_with("signatures/signHash"))
+    );
+    assert!(!fixture.path("signed.es3").exists());
+}
+
+/// `csc login` needs somewhere to put what it obtains, and says so before it
+/// contacts anything.
+#[test]
+fn a_login_without_a_token_file_is_refused_before_anything_is_contacted() {
+    let fixture = fixture(Mock::new(Flavour::Eudi));
+    let output = login(&fixture, Browser::Follow, &[]);
+    assert!(!output.status.success());
+    let report = json(&output);
+    assert_eq!(report["errors"][0]["code"], "csc_config_invalid");
+    assert!(
+        report["errors"][0]["message"]
+            .as_str()
+            .expect("a message")
+            .contains("access_token_file")
+    );
+    assert!(fixture.service.paths().is_empty());
 }
