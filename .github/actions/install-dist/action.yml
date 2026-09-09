@@ -105,9 +105,24 @@ runs:
           exit 1
         fi
 
-        # bsdtar on macOS and Windows and GNU tar on Linux both read the
-        # archive format published for their own platform.
-        tar -xf "${workdir}/${archive}" -C "$workdir"
+        # The Linux and macOS archives are tarballs, which tar reads on both.
+        # The Windows archive is a zip, and the tar that git-bash puts on
+        # PATH there is GNU tar, which does not read zip, so that case goes
+        # through unzip when present and PowerShell's Expand-Archive
+        # otherwise; both ship on the hosted Windows runners.
+        case "$archive" in
+          *.zip)
+            if command -v unzip >/dev/null 2>&1; then
+              unzip -q "${workdir}/${archive}" -d "$workdir"
+            else
+              powershell -NoProfile -NonInteractive -Command \
+                "Expand-Archive -LiteralPath '$(cygpath -w "${workdir}/${archive}")' -DestinationPath '$(cygpath -w "$workdir")' -Force"
+            fi
+            ;;
+          *)
+            tar -xf "${workdir}/${archive}" -C "$workdir"
+            ;;
+        esac
         found=$(find "$workdir" -type f -name "$binary" -print | head -n 1)
         if [ -z "$found" ]; then
           echo "${binary} not found in ${archive}" >&2
