@@ -551,8 +551,9 @@ openszigno verify dossier.es3 --json \
   inside the address, which the IPv4 rules above would otherwise never see.
 
   An IPv4-mapped IPv6 address (`::ffff:127.0.0.1`) and the IPv4-compatible
-  form (`::127.0.0.1`) are both judged as the IPv4 address they carry. `--online-allow-private` waives these address rules, and
-  only these, for an internal CA that really does publish on your own network.
+  form (`::127.0.0.1`) are both judged as the IPv4 address they carry.
+  `--online-allow-private` waives these address rules, and only these, for an
+  internal CA that really does publish on your own network.
 - **The check is bound to the connection.** The addresses the policy approved
   are the only ones the request may be sent to: they are handed to the HTTP
   client as the resolution for that host and port, and a name that was not
