@@ -70,6 +70,12 @@ does that in memory. The CLI owns all
 filesystem policy and serialisation. This keeps the parser testable and makes
 future library use possible without weakening CLI safety.
 
+`openszigno-verify`'s reported vocabulary is open, not closed. `CheckCode`,
+`CheckStatus`, `Verdict`, `TrustAnchorOrigin`, and `RevocationPolicy` are
+`#[non_exhaustive]`, so a release may add a variant to any of them without a
+breaking change and a consumer must handle one it does not recognise. See
+[Consumers must handle unknown codes](#consumers-must-handle-unknown-codes).
+
 `openszigno-verify` is a separate crate, not a module, so that the crypto
 dependency tree stays out of anyone who only wants parsing, and so that the
 verification code can be audited as a unit. It performs no I/O of its own:
@@ -2237,6 +2243,16 @@ configured anchor authorises nothing. So this can never admit a response whose
 signer the operator had not already chosen to trust, and it is tried **last**,
 so a CA's own word always wins where both apply.
 
+"Configured trust" is not "a trust store". A trusted list terminates a path
+wherever it speaks, at a listed issuing CA as readily as at a self-signed root
+(see [Trusted lists](#trusted-lists)), so a run whose only trust is listed
+service identities has trust material even though it has no trust-store
+anchors at all. The responder's path is built with the same rules the signer's
+was, so a central responder running under a listed issuing CA reaches that CA
+and is authorised there. The model is skipped only when *nothing whatsoever*
+was configured — no store anchor and no listed service that supplies a
+certificate — because then a path search can reach nothing and is pure work.
+
 Both models that involve a responder certificate ask about it at
 **`producedAt`**, the instant the responder asserts it spoke: the trusted model
 validates the path at that instant, and the delegated model checks the
@@ -2260,6 +2276,17 @@ signed the response, so two certificates over one key — a responder re-issued
 with a new serial, say — ask it once. Without either bound, a response packed
 with re-issues of one responder certificate that no anchor vouches for drove
 one full path search per certificate.
+
+The bound cuts the response's certificates, never the run's own. Path building
+for the trusted model considers at most `max_certificates` candidates, so the
+pool it is handed puts the certificates the run already held — the signature's
+`ds:KeyInfo` and `xades:CertificateValues`, and the trust store — ahead of the
+certificates the response carried. The other order let a response padded up to
+the bound push the responder's own issuing CA out of path building, so a
+central responder the caller genuinely trusts came back unauthorised because
+an attacker-supplied list had filled the pool first. The response's
+certificates are the untrusted half of that pool, so they fill whatever room
+the run's material leaves.
 
 #### Which answer wins
 
@@ -2876,6 +2903,27 @@ Notes on the shape:
   evidence than the minimum, which is precisely backwards.
 - `info` is the only non-blocking status; everything else that is not `passed`
   keeps the verdict below `valid`.
+
+#### Consumers must handle unknown codes
+
+The set of check codes grows: a release that learns to check something new
+emits a new code for it, and the JSON envelope keeps `schema_version` at `1`
+when it does, because an added code is additive (see
+[Golden output contract](../CONTRIBUTING.md#golden-output-contract)). A
+consumer that treats the list of codes as closed therefore breaks on an
+ordinary release, not on a breaking one.
+
+- **JSON consumers** must accept a `code` string they do not recognise, and
+  must treat it as blocking unless its `status` is `passed`. The same holds
+  for `status` and for `verdict`: an unrecognised status is not a passing one,
+  and an unrecognised verdict is not `valid`.
+- **Rust consumers** of `openszigno-verify` see this in the type system.
+  `CheckCode`, `CheckStatus`, `Verdict`, `TrustAnchorOrigin`, and
+  `RevocationPolicy` are `#[non_exhaustive]`, so every `match` on one needs a
+  wildcard arm and adding a variant is no longer a semver-breaking change.
+  `CheckCode::ALL` lists every code the linked build knows, and
+  `CheckCode::as_str` gives the stable string; do not derive a closed set from
+  either and assume it will hold across versions.
 
 The three checks that are still `skipped`, and why each is a required check
 that was not performed: `xades_absent` (no signed statement of which

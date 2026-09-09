@@ -50,11 +50,15 @@ impl Clock for FixedClock {
 
 /// Where the caller's trust in one anchor came from.
 ///
+/// The enum is `#[non_exhaustive]`: match it with a wildcard arm, and treat an
+/// unrecognised origin as one that cannot make a signature qualified.
+///
 /// The distinction is reported, never inferred: an anchor a human dropped into
 /// a directory and an anchor an EU trusted list vouches for are both trusted,
 /// but only the second one can make a signature *qualified*.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum TrustAnchorOrigin {
     /// A file under `--trust-store DIR`.
     TrustStore,
@@ -235,7 +239,11 @@ impl TrustSource for MemoryTrustStore {
 }
 
 /// The revocation policy actually applied.
+///
+/// The enum is `#[non_exhaustive]`: match it with a wildcard arm, and treat an
+/// unrecognised policy as one that did not prove anything was unrevoked.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub enum RevocationPolicy {
     /// The caller switched revocation checking off with `--no-revocation`.
     /// Every verdict is then capped at `indeterminate`, because a signature

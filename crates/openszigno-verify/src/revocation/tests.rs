@@ -17,7 +17,7 @@ use der::{Decode, Encode};
 use crate::certs::{CertificateSource, ParsedCertificate};
 use crate::policy::VerifyLimits;
 
-use super::ocsp::{PATH_SEARCHES, ocsp_answer};
+use super::ocsp::{PATH_SEARCHES, ResponderModel, ocsp_answer};
 use super::tiers::Answer;
 
 const ID_KP_OCSP_SIGNING: &str = "1.3.6.1.5.5.7.3.9";
@@ -136,6 +136,11 @@ struct Central {
     root: ParsedCertificate,
     issuing: ParsedCertificate,
     signer: ParsedCertificate,
+    /// A second CA under the same trusted root, the shape a central responder
+    /// really has: a sibling of the issuing CA rather than the issuing CA
+    /// itself. It is never carried by the response, so a run only has it if
+    /// the caller supplied it.
+    sibling: ParsedCertificate,
     /// Re-issues of one responder certificate: the same public key and the
     /// same subject name every time, a different serial each time, so each is
     /// a distinct DER blob that names the same responder.
@@ -145,11 +150,21 @@ struct Central {
 }
 
 fn central(reissues: usize) -> Central {
+    central_under(reissues, false)
+}
+
+/// The same hierarchy, with the responder issued either by the untrusted
+/// foreign root (`trusted_sibling` false, so no anchor vouches for it) or by
+/// the sibling CA under the trusted root (`trusted_sibling` true, so the
+/// trusted-responder model succeeds — provided path building still sees the
+/// sibling CA).
+fn central_under(reissues: usize, trusted_sibling: bool) -> Central {
     let root_key = key(2);
     let foreign_root_key = key(3);
     let issuing_key = key(4);
     let responder_key = key(5);
     let signer_key = key(6);
+    let sibling_key = key(7);
 
     let root = self_signed(params("openSzigno Test Root", true, false), &root_key);
     let foreign_root = self_signed(
@@ -162,12 +177,23 @@ fn central(reissues: usize) -> Central {
         &root,
         &root_key,
     );
+    let sibling = issued_by(
+        params("openSzigno Responder CA", true, false),
+        &sibling_key,
+        &root,
+        &root_key,
+    );
     let signer = issued_by(
         params("openSzigno Test Signer", false, false),
         &signer_key,
         &issuing,
         &issuing_key,
     );
+    let (responder_issuer, responder_issuer_key) = if trusted_sibling {
+        (&sibling, &sibling_key)
+    } else {
+        (&foreign_root, &foreign_root_key)
+    };
     // A distinct serial each time. Without one `rcgen` derives the serial from
     // the public key, so every re-issue would be the same DER blob and the
     // deduplication alone would collapse them.
@@ -178,7 +204,7 @@ fn central(reissues: usize) -> Central {
                 0x11,
                 u8::try_from(index).expect("a small re-issue count"),
             ]));
-            issued_by(spec, &responder_key, &foreign_root, &foreign_root_key).der
+            issued_by(spec, &responder_key, responder_issuer, responder_issuer_key).der
         })
         .collect();
     let responder_name = x509_cert::Certificate::from_der(&responders[0])
@@ -190,6 +216,7 @@ fn central(reissues: usize) -> Central {
         root: parse(&root.der),
         issuing: parse(&issuing.der),
         signer: parse(&signer.der),
+        sibling: parse(&sibling.der),
         responders,
         responder_key: responder_key.signing,
         responder_name,
@@ -257,6 +284,11 @@ fn response(pki: &Central) -> Vec<u8> {
     .expect("the BasicOCSPResponse encodes")
 }
 
+/// `PATH_SEARCHES` counts across the whole process, so every test that reads
+/// it — and every test that runs a path search while another is reading it —
+/// takes this lock first.
+static COUNTER: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// 2020-05-15T00:00:00Z, inside every synthetic certificate's window.
 const PRODUCED_AT: u64 = 1_589_500_800;
 
@@ -270,6 +302,10 @@ fn limits() -> VerifyLimits {
 }
 
 fn answer(pki: &Central) -> Answer {
+    answer_with(pki, &[])
+}
+
+fn answer_with(pki: &Central, candidates: &[ParsedCertificate]) -> Answer {
     // The root is an ordinary trust-store anchor: the operator put the file in
     // the directory, and that is the whole statement about it.
     let anchor = crate::trust::TrustAnchor::from_store(pki.root.der.clone());
@@ -278,7 +314,7 @@ fn answer(pki: &Central) -> Answer {
         &response(pki),
         &pki.signer,
         &pki.issuing,
-        &[],
+        candidates,
         std::slice::from_ref(&pki.root),
         crate::certs::AnchorStatus::new(&provenance),
         PRODUCED_AT as crate::trust::UnixTime,
@@ -294,6 +330,9 @@ fn answer(pki: &Central) -> Answer {
 /// Both cases live in one test because the counter is process-wide.
 #[test]
 fn a_padded_certificate_list_does_not_multiply_the_path_search() {
+    let _counter = COUNTER
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let one = central(1);
     PATH_SEARCHES.store(0, Ordering::Relaxed);
     assert!(
@@ -322,5 +361,43 @@ fn a_padded_certificate_list_does_not_multiply_the_path_search() {
         PATH_SEARCHES.load(Ordering::Relaxed),
         baseline,
         "max_certificates + 8 responder certificates cost the same path searches as one"
+    );
+}
+
+/// A response padded up to `max_certificates` cannot displace the run's own
+/// candidates from path building.
+///
+/// `validate_path_at` considers only the first `max_certificates` entries of
+/// the pool it is given. The responder here is a central one, issued by a
+/// sibling CA under the caller's trusted root, and that sibling CA travels
+/// only in the run's own material — never in the response, exactly as a real
+/// deployment has it. With the response's certificates ahead of the run's, a
+/// response padded to the bound pushed the sibling CA out of the pool and the
+/// trusted-responder model failed on material the caller actually held; with
+/// the run's candidates first, it still resolves.
+#[test]
+fn a_padded_certificate_list_cannot_displace_the_runs_own_candidates() {
+    let _counter = COUNTER
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let pki = central_under(limits().max_certificates, true);
+    assert_eq!(
+        pki.responders.len(),
+        limits().max_certificates,
+        "the response alone fills the bound, so ordering is what decides"
+    );
+    assert!(
+        matches!(
+            answer_with(&pki, std::slice::from_ref(&pki.sibling)),
+            Answer::Good {
+                responder_model: Some(ResponderModel::Trusted),
+                ..
+            }
+        ),
+        "the responder's issuing CA is in the run's own pool, so the trusted-responder model holds"
+    );
+    assert!(
+        matches!(answer_with(&pki, &[]), Answer::Invalid(_)),
+        "without that CA anywhere, nothing vouches for the responder"
     );
 }

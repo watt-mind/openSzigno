@@ -10,6 +10,21 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
 
 ## [Unreleased]
 
+### Changed
+
+- `openszigno-verify`'s reported vocabulary is now open. `CheckCode`,
+  `CheckStatus`, `Verdict`, `TrustAnchorOrigin`, and `RevocationPolicy` are
+  `#[non_exhaustive]`, so a release that learns to check something new can add
+  a code without a semver-breaking change; adding `CheckCode::OcspResponderTrusted`
+  is what forced the 0.7.1 retarget to 0.8.0. `CheckCode::ALL` still lists
+  every code the linked build knows and the test pinning it is unchanged.
+  **This is itself a breaking change for downstream Rust code**: an existing
+  `match` on any of the five enums without a wildcard arm stops compiling, so
+  it needs a 0.9.0 release rather than a patch. Nothing in the JSON envelope
+  changes and `schema_version` stays `1`; the documented rule that a consumer
+  must treat an unrecognised code as blocking unless its status is `passed` is
+  now enforced by the type system as well as by the documentation.
+
 ### Fixed
 
 - `online_options_invalid` (an unusable `--online-proxy` value) now exits
@@ -19,6 +34,25 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
   about the caller's own invocation, not the dossier or the key material, so
   `3` ("input/output error") is the documented category. `docs/architecture.md`
   no longer lists this code as "3 or 4".
+- An OCSP response could evict the certificates a run already held from
+  trusted-responder path building. Path building considers at most
+  `max_certificates` candidates, and the pool put the response's own `certs`
+  ahead of the run's material, so a response padded up to that bound pushed the
+  responder's issuing CA out of the pool and a central responder the caller
+  genuinely trusts came back as one nothing vouched for
+  (`revocation_data_invalid`). The run's own candidates — `ds:KeyInfo`,
+  `xades:CertificateValues`, the trust store — now come first and the
+  response's certificates fill the remainder. The bound and the
+  per-public-key deduplication are unchanged, so the work one response can ask
+  for is bounded exactly as before.
+- RFC 6960 section 2.2's trusted-responder model was skipped whenever no
+  trust-store anchor was configured, so a run whose only trust is trusted-list
+  service identities that are not self-signed never used it. That is the shape
+  a national list has: the CA/QC entries name the issuing CAs, which are
+  intermediates, so a central responder running under one of them authorised
+  nothing and its answers came back `revocation_data_invalid`. The model now
+  consults listed identities as path terminators too, exactly as every other
+  path does, and is skipped only when nothing whatsoever was configured.
 
 ## [0.8.0] - 2026-09-09
 

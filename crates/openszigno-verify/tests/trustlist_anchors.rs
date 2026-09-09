@@ -15,10 +15,10 @@
 mod common;
 
 use common::{
-    CertSpec, DossierSpec, STATUS_GRANTED, STATUS_UNDER_SUPERVISION, SVCTYPE_TSA_QTST, SigSpec,
-    SigningCertificateSpec, TestKey, TimestampSpec, TlService, TrustListSpec, build,
-    document_signature, extended_key_usage_extension, issued_by, keys, qc_statements_extension,
-    rsa_key, self_signed,
+    CertSpec, DossierSpec, OcspSpec, STATUS_GRANTED, STATUS_UNDER_SUPERVISION, SVCTYPE_TSA_QTST,
+    SigSpec, SigningCertificateSpec, TestKey, TimestampSpec, TlService, TrustListSpec, build,
+    build_ocsp, document_signature, extended_key_usage_extension, issued_by, keys,
+    qc_statements_extension, rsa_key, self_signed,
 };
 use openszigno_verify::codes::{CheckCode, CheckStatus};
 use openszigno_verify::{
@@ -28,6 +28,7 @@ use openszigno_verify::{
 use rcgen::BasicConstraints;
 
 const ID_KP_TIME_STAMPING: &str = "1.3.6.1.5.5.7.3.8";
+const ID_KP_OCSP_SIGNING: &str = "1.3.6.1.5.5.7.3.9";
 const CA_NAME: &str = "Qualified openSzigno CA 2009";
 
 /// A root, the issuing CA the list names, a signer, and a timestamp authority
@@ -40,6 +41,12 @@ struct Pki {
     signer_der: Vec<u8>,
     signer_key: TestKey,
     tsa_der: Vec<u8>,
+    /// A second CA under the listed issuing CA, which runs the operator's one
+    /// central OCSP responder. The responder is therefore *not* the issuing CA
+    /// and was not issued by it, so only RFC 6960's trusted-responder model
+    /// can authorise its answers.
+    responder_ca_der: Vec<u8>,
+    responder_der: Vec<u8>,
 }
 
 fn pki() -> Pki {
@@ -51,7 +58,10 @@ fn pki() -> Pki {
     root_spec.not_before = (2003, 1, 1);
     let root = self_signed(&root_spec, &root_key);
 
-    let mut intermediate_spec = CertSpec::ca(CA_NAME, BasicConstraints::Constrained(0));
+    // `Constrained(1)`, not `Constrained(0)`: the operator runs its OCSP
+    // responder under a CA of its own beneath this one, which is the shape the
+    // trusted-responder case below needs and the shape a real hierarchy has.
+    let mut intermediate_spec = CertSpec::ca(CA_NAME, BasicConstraints::Constrained(1));
     intermediate_spec.not_before = (2003, 1, 1);
     let intermediate = issued_by(&intermediate_spec, &intermediate_key, &root, &root_key);
 
@@ -70,12 +80,39 @@ fn pki() -> Pki {
         &intermediate_key,
     );
 
+    let mut responder_ca_spec =
+        CertSpec::ca("openSzigno Responder CA", BasicConstraints::Constrained(0));
+    responder_ca_spec.not_before = (2003, 1, 1);
+    let responder_ca_key = rsa_key(keys::SECOND_RSA2048);
+    let responder_ca = issued_by(
+        &responder_ca_spec,
+        &responder_ca_key,
+        &intermediate,
+        &intermediate_key,
+    );
+
+    let mut responder_spec = CertSpec::signer("openSzigno Central OCSP Responder");
+    responder_spec.not_before = (2003, 1, 1);
+    responder_spec.custom_extensions =
+        vec![extended_key_usage_extension(&[ID_KP_OCSP_SIGNING], true)];
+    // The same committed key the TSA above uses. No test here puts both in
+    // one dossier, and the suite commits no key it does not already have.
+    let responder_key = rsa_key(keys::THIRD_RSA2048);
+    let responder = issued_by(
+        &responder_spec,
+        &responder_key,
+        &responder_ca,
+        &responder_ca_key,
+    );
+
     Pki {
         root_der: root.der,
         intermediate_der: intermediate.der,
         signer_der: signer.der,
         signer_key,
         tsa_der: tsa.der,
+        responder_ca_der: responder_ca.der,
+        responder_der: responder.der,
     }
 }
 
@@ -124,6 +161,10 @@ fn qtst_only_root_service(pki: &Pki) -> TlService {
 /// Verify against a trusted list and nothing else: no `--trust-store`, so the
 /// only trust in the run is what the list supplies.
 fn run(xml: &str, list: &str, time: &str) -> VerifyReport {
+    run_with_ocsp(xml, list, time, Vec::new())
+}
+
+fn run_with_ocsp(xml: &str, list: &str, time: &str, ocsp: Vec<Vec<u8>>) -> VerifyReport {
     let backend = RoxmltreeC14n;
     let loaded = openszigno_verify::trustlist::load(list.as_bytes(), &[], &backend)
         .expect("the synthetic trusted list loads");
@@ -134,7 +175,7 @@ fn run(xml: &str, list: &str, time: &str) -> VerifyReport {
     trust.extend_anchors(loaded.anchors);
     trust.extend_services(loaded.service_identities);
 
-    let revocation = MemoryRevocationStore::default();
+    let revocation = MemoryRevocationStore::new(Vec::new(), ocsp);
     let clock = FixedClock(parse_rfc3339(time).expect("the fixed time parses"));
     let mut options = VerifyOptions::new(&clock, &trust, &revocation, &backend);
     options.requested_time = Some(time.to_owned());
@@ -336,6 +377,57 @@ fn a_tsa_qtst_entry_that_had_not_started_refuses_the_timestamp_path() {
     );
     // The signer's own path is unaffected: the CA/QC entry decides that one.
     assert_check(&report, CheckCode::CertPathOk, CheckStatus::Passed);
+}
+
+// ---------------------------------------------------------------------------
+// A trusted responder under a listed issuing CA
+// ---------------------------------------------------------------------------
+
+/// The regression LAB-314 exists for. The run's only trust is a list naming
+/// one issuing CA, which is not self-signed, so it configures no trust-store
+/// anchor at all. RFC 6960 section 2.2's trusted-responder model was skipped
+/// outright whenever the anchor list was empty, so the operator's one central
+/// responder -- issued by a CA of its own under that same listed issuing CA,
+/// which is how a national operator actually runs one -- authorised nothing
+/// and its answer came back `revocation_data_invalid`.
+///
+/// The responder is neither the issuing CA nor a responder that CA delegated
+/// to, so the first two models cannot apply and only the third can. Its path
+/// ends at the listed issuing CA, exactly as the signer's own path does.
+#[test]
+fn a_central_responder_under_a_listed_issuing_ca_is_trusted() {
+    let pki = pki();
+    let list = build_list(vec![issuing_ca_service(&pki)]);
+
+    // The responder's own CA travels with the dossier, as an intermediate on
+    // no chain the signature itself needs; the responder certificate travels
+    // with the response, as a real one does.
+    let mut signature = signature(&pki);
+    signature
+        .certificate_values
+        .push(pki.responder_ca_der.clone());
+
+    let mut spec = OcspSpec::new(
+        pki.intermediate_der.clone(),
+        pki.signer_der.clone(),
+        rsa_key(keys::THIRD_RSA2048),
+    );
+    spec.responder_der = Some(pki.responder_der.clone());
+    spec.include_responder_certificate = true;
+
+    let report = run_with_ocsp(
+        &dossier(&pki, signature),
+        &list,
+        "2020-06-01T00:00:00Z",
+        vec![build_ocsp(&spec)],
+    );
+
+    assert_check(&report, CheckCode::CertPathOk, CheckStatus::Passed);
+    assert_check(&report, CheckCode::RevocationOk, CheckStatus::Passed);
+    assert_check(&report, CheckCode::OcspResponderTrusted, CheckStatus::Info);
+    assert_absent(&report, CheckCode::RevocationDataInvalid);
+    assert_absent(&report, CheckCode::RevocationStatusUnknown);
+    assert_anchored_at_the_issuing_ca(&report, &pki);
 }
 
 fn build_list(services: Vec<TlService>) -> String {
