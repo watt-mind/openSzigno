@@ -45,6 +45,14 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
   response's certificates fill the remainder. The bound and the
   per-public-key deduplication are unchanged, so the work one response can ask
   for is bounded exactly as before.
+- RFC 6960 section 2.2's trusted-responder model was skipped whenever no
+  trust-store anchor was configured, so a run whose only trust is trusted-list
+  service identities that are not self-signed never used it. That is the shape
+  a national list has: the CA/QC entries name the issuing CAs, which are
+  intermediates, so a central responder running under one of them authorised
+  nothing and its answers came back `revocation_data_invalid`. The model now
+  consults listed identities as path terminators too, exactly as every other
+  path does, and is skipped only when nothing whatsoever was configured.
 
 ## [0.8.0] - 2026-09-09
 

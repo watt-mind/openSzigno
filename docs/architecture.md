@@ -2243,6 +2243,16 @@ configured anchor authorises nothing. So this can never admit a response whose
 signer the operator had not already chosen to trust, and it is tried **last**,
 so a CA's own word always wins where both apply.
 
+"Configured trust" is not "a trust store". A trusted list terminates a path
+wherever it speaks, at a listed issuing CA as readily as at a self-signed root
+(see [Trusted lists](#trusted-lists)), so a run whose only trust is listed
+service identities has trust material even though it has no trust-store
+anchors at all. The responder's path is built with the same rules the signer's
+was, so a central responder running under a listed issuing CA reaches that CA
+and is authorised there. The model is skipped only when *nothing whatsoever*
+was configured — no store anchor and no listed service that supplies a
+certificate — because then a path search can reach nothing and is pure work.
+
 Both models that involve a responder certificate ask about it at
 **`producedAt`**, the instant the responder asserts it spoke: the trusted model
 validates the path at that instant, and the delegated model checks the

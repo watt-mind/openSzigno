@@ -325,7 +325,16 @@ fn responder_authorised(
     // had expired by then was not entitled to say anything, and one that
     // expired afterwards said it while it still was. `keyUsage` is enforced by
     // the same path validator that enforces it everywhere else.
-    if anchors.is_empty() {
+    //
+    // "Configured trust" is not "a trust store". A trusted list terminates a
+    // path wherever it speaks, at a listed issuing CA as readily as at a
+    // self-signed root, so a run whose only trust is listed service identities
+    // has trust material even with no anchors at all. Testing the anchor list
+    // alone skipped this model for exactly those runs, which is the shape a
+    // national list has. The guard is the one `validate_path_at` uses: bail
+    // out only when nothing whatsoever was configured, because then the path
+    // search can reach nothing and is pure work.
+    if anchors.is_empty() && !status.has_listed() {
         return None;
     }
     // The run's own candidates first, then the certificates the response

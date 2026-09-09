@@ -408,6 +408,12 @@ tool implemented only the first two models and refused every one of those
 responses as unauthorised; supplying the operator's root as an anchor now
 covers the responder as well as the CAs.
 
+A `--trust-list` on its own is enough. A list ends a path wherever it speaks,
+at a listed issuing CA as readily as at a self-signed root, so a run with a
+list and no `--trust-store` still has trust material for the responder's path
+to reach. The third model is skipped only when nothing at all was configured:
+no store anchor, and no listed service that supplies a certificate.
+
 The report says which model applied, in
 `chain[].revocation.responder_model` (`issuer`, `delegated`, `trusted`), and
 emits `ocsp_responder_trusted` (`info`) when the third one was used. Nothing
