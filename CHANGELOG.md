@@ -33,6 +33,49 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
   deliberately untouched — the extraction name rules already refuse a control,
   invisible or formatting character in a title and bound the result, and the
   envelope has to keep naming the file that was written.
+- `sign` refuses, with `document_already_signed`, to write a signature into an
+  element an existing signature already covers. Only a `URI=""` reference and
+  dossier-level cover were detected, so an existing signature whose reference
+  resolved to an ancestor-or-self of the insertion point, such as an
+  `es:Document` carrying an `Id` of its own referenced by `URI="#doc0"`, was
+  broken by a run that reported success. Every existing `ds:Reference` is now
+  resolved in the same-document `#id` form, for both scopes, and a reference
+  this tool cannot resolve counts as covering.
+- `sign` can add a second signature to a document it has already signed. Every
+  identifier was derived from the document index, so the second run collided
+  with its own first signature and reported `sign_failed` (exit 5) while the
+  documentation said co-signing was supported. A base identifier already in
+  the dossier is now disambiguated (`sig-doc0-2`, `signed-props-sig-doc0-2`,
+  and the rest), and the first signature is left exactly as it was. See
+  [Signing a dossier that is already signed](docs/architecture.md#signing-a-dossier-that-is-already-signed).
+- `create --zip` names the ZIP member with the trimmed NFC title it writes to
+  `es:Title`, not with the raw title. A decomposed or padded spelling put one
+  string in the archive and another in the profile, and `extract` names the
+  file it writes from the archive member.
+- `sign --tsa` treats a negative RFC 3161 `PKIStatus` as a refusal. The
+  comparison was `status > 1`, so a negative status read as granted and
+  whatever the answer carried was embedded.
+- A signature's mandated `es:DocumentProfile` reference is resolved in the
+  dossier's own namespace. The lookup matched on the local name alone, so a
+  `DocumentProfile` from a foreign namespace, placed first, decided what the
+  reference pointed at.
+
+### Security
+
+- `sign` no longer lets the dossier being signed choose what the operator's
+  key signs. The `OBJREF` and `Id` attributes a reference points at, the
+  declared media type an `xades:DataObjectFormat` carries and the root
+  namespace the signature profile object declares were interpolated into the
+  signature XML unescaped, and every digest is computed after the values are
+  already in the document, so a hostile dossier could write an
+  attacker-supplied `ds:Reference` with no transforms or a forged
+  `xades:CommitmentTypeIndication` into what was signed, and `verify` would
+  then accept all of it. Both halves are fixed: an `Id` or `OBJREF` that is
+  not an XML NCName, a media type outside the characters a media type may
+  use, and a namespace URI holding a markup delimiter, a quote character or a
+  control character are all refused with `document_not_signable`; and every
+  remaining interpolation goes through the writer's attribute and text
+  escapers, so no dossier-derived string reaches signature XML unescaped.
 
 ## [0.7.1] - 2026-09-09
 
