@@ -28,7 +28,9 @@ use crate::certs::ParsedCertificate;
 use crate::codes::{Check, CheckCode};
 use crate::dsig::{XADES_NAMESPACES, direct_child, direct_children, text_of};
 use crate::policy::Digest;
+use crate::references::ReferenceScope;
 use crate::report::XadesReport;
+use crate::scope::owning_signature;
 
 /// `IssuerSerialV2` (EN 319 132-1): the DER encoding of the `IssuerSerial`
 /// type of RFC 5035, carried Base64 inside the XML.
@@ -89,6 +91,12 @@ pub struct XadesProperties<'a, 'input> {
     pub archive_timestamps: usize,
     /// Names of qualifying properties this build does not process.
     pub unprocessed_properties: Vec<String>,
+    /// More than one `xades:QualifyingProperties` belongs to this signature.
+    ///
+    /// Reported once, because only the covered one is read: a `ds:Object` is
+    /// open content that no reference has to cover, so an extra one says
+    /// nothing and must change nothing.
+    pub extra_qualifying_properties: bool,
 }
 
 /// The bounded number of `xades:Cert` entries considered, since the property is
@@ -118,15 +126,74 @@ const PROCESSED_PROPERTIES: &[&str] = &[
 /// and each entry costs a signature verification per certificate in the path.
 const MAX_REVOCATION_VALUES: usize = 64;
 
-/// Read the qualifying properties of one `ds:Signature`.
+/// Read the qualifying properties of one `ds:Signature`, with no information
+/// about what its references cover.
+///
+/// Used only where no reference was ever resolved — a signature whose
+/// structure did not parse — and where the signing-certificate binding is
+/// therefore never evaluated. Everywhere else, [`parse_covered`] decides which
+/// properties the signature is actually evaluated against.
 pub fn parse<'a, 'input>(signature: Node<'a, 'input>) -> XadesProperties<'a, 'input> {
+    parse_properties(signature, None)
+}
+
+/// Read the qualifying properties one `ds:Signature` is evaluated against,
+/// selected by what that signature's own references cover.
+///
+/// `scopes` is the effective node set of each of this signature's references,
+/// in reference order.
+///
+/// A `ds:Object` is open content: the XMLDSig schema allows any number of them
+/// under a `ds:Signature` and nothing requires a reference to cover any given
+/// one. Taking the *first* `xades:QualifyingProperties` under the signature
+/// therefore let one inserted, unreferenced `ds:Object` decide what stage C
+/// read without touching a single signed byte. So the properties this build
+/// reads are the ones a reference of this signature actually digests: the
+/// `xades:SignedProperties` that lies inside one reference's effective node
+/// set, and the `xades:QualifyingProperties` holding it. The
+/// `Type="http://uri.etsi.org/01903#SignedProperties"` attribute is
+/// corroboration only — an attacker writes it — and never the rule.
+///
+/// When no reference covers any `SignedProperties` of this signature, none of
+/// them is signed: the signed properties are treated as absent, so the
+/// `SigningCertificate` binding reports
+/// `xades_signing_certificate_absent` rather than believing an unsigned
+/// property. The qualifying-properties element itself is still reported as
+/// present, and its unsigned properties — which no reference ever covers —
+/// are still read, from the covered one when there is one and from the first
+/// otherwise.
+pub fn parse_covered<'a, 'input>(
+    signature: Node<'a, 'input>,
+    scopes: &[ReferenceScope],
+) -> XadesProperties<'a, 'input> {
+    parse_properties(signature, Some(scopes))
+}
+
+fn parse_properties<'a, 'input>(
+    signature: Node<'a, 'input>,
+    scopes: Option<&[ReferenceScope]>,
+) -> XadesProperties<'a, 'input> {
     let mut properties = XadesProperties::default();
-    let Some(qualifying) = xades_descendant(signature, "QualifyingProperties") else {
+    let candidates = qualifying_properties_of(signature);
+    properties.extra_qualifying_properties = candidates.len() > 1;
+    let covered = scopes.and_then(|scopes| covered_signed_properties(&candidates, scopes));
+    let Some(qualifying) = covered
+        .map(|(node, _)| node)
+        .or_else(|| candidates.first().copied())
+    else {
         return properties;
     };
     properties.qualifying_properties = Some(qualifying);
 
-    let signed_properties = xades_child(qualifying, "SignedProperties");
+    let signed_properties = match (covered, scopes) {
+        // The signed properties one of this signature's references digests.
+        (Some((_, signed)), _) => Some(signed),
+        // Nothing this signature signed says anything, so nothing here does.
+        (None, Some(_)) => None,
+        // No reference was resolved, so coverage is not a question that has
+        // been asked yet; the binding is not evaluated on this path either.
+        (None, None) => xades_child(qualifying, "SignedProperties"),
+    };
     properties.signed_properties = signed_properties;
     let signed_signature_properties =
         signed_properties.and_then(|node| xades_child(node, "SignedSignatureProperties"));
@@ -465,17 +532,39 @@ pub fn xades_children<'a, 'input>(
     })
 }
 
-fn xades_descendant<'a, 'input>(
-    node: Node<'a, 'input>,
-    name: &'static str,
-) -> Option<Node<'a, 'input>> {
-    node.descendants().find(|child| {
-        child.is_element()
-            && child.tag_name().name() == name
-            && child
-                .tag_name()
-                .namespace()
-                .is_some_and(|namespace| XADES_NAMESPACES.contains(&namespace))
+/// Every `xades:QualifyingProperties` that belongs to this signature, in
+/// document order.
+///
+/// A countersignature nested in this signature's unsigned properties carries
+/// qualifying properties of its own; they are that signature's, and reading
+/// them here would let a nested element speak for the signature it was dropped
+/// into.
+fn qualifying_properties_of<'a, 'input>(signature: Node<'a, 'input>) -> Vec<Node<'a, 'input>> {
+    signature
+        .descendants()
+        .filter(|child| {
+            child.is_element()
+                && child.tag_name().name() == "QualifyingProperties"
+                && child
+                    .tag_name()
+                    .namespace()
+                    .is_some_and(|namespace| XADES_NAMESPACES.contains(&namespace))
+                && owning_signature(*child) == Some(signature)
+        })
+        .collect()
+}
+
+/// The first `xades:QualifyingProperties` of this signature holding a
+/// `xades:SignedProperties` that lies inside some reference's effective node
+/// set, with that element.
+fn covered_signed_properties<'a, 'input>(
+    candidates: &[Node<'a, 'input>],
+    scopes: &[ReferenceScope],
+) -> Option<(Node<'a, 'input>, Node<'a, 'input>)> {
+    candidates.iter().find_map(|qualifying| {
+        xades_children(*qualifying, "SignedProperties")
+            .find(|signed| scopes.iter().any(|scope| scope.covers(*signed)))
+            .map(|signed| (*qualifying, signed))
     })
 }
 
@@ -533,6 +622,19 @@ pub(crate) fn stage_c_presence(properties: &XadesProperties<'_, '_>) -> StageC {
         checks.push(Check::skipped(
             CheckCode::XadesAbsent,
             "no XAdES qualifying properties were found for this signature, so nothing signed says which certificate signed it",
+        ));
+    }
+
+    // Informational, and said once. An extra `xades:QualifyingProperties` is
+    // an unreferenced `ds:Object` away, and open content the schema allows
+    // says nothing about the signature: the properties read are the ones a
+    // reference covers, and the rest are ignored. Blocking on this would let
+    // anyone who can append a `ds:Object` cap a sound signature at
+    // `indeterminate`, which is the same lever this reporting exists to close.
+    if properties.extra_qualifying_properties {
+        checks.push(Check::info(
+            CheckCode::XadesExtraQualifyingProperties,
+            "more than one xades:QualifyingProperties belongs to this signature; the one its own references cover is read and the others are ignored",
         ));
     }
 

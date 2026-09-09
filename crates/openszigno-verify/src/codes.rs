@@ -145,6 +145,7 @@ check_codes! {
     XadesPresent => "xades_present",
     XadesAbsent => "xades_absent",
     XadesNotValidated => "xades_not_validated",
+    XadesExtraQualifyingProperties => "xades_extra_qualifying_properties",
     XadesSigningCertificateBound => "xades_signing_certificate_bound",
     XadesSigningCertificateMismatch => "xades_signing_certificate_mismatch",
     XadesSigningCertificateAbsent => "xades_signing_certificate_absent",
