@@ -38,11 +38,11 @@ checked.
 
 Authoring is no longer a non-goal: `create` writes a new, unsigned dossier
 and encrypts its documents for a recipient, `sign` writes a signed copy of
-one, and `sign --csc` signs through a remote service that holds the key.
-What is still planned in [roadmap.md](roadmap.md) is a container
-`es:TimeStamp`, timestamping a dossier without signing it, and the
-interactive `openszigno csc login` an `oauth2`-mode credential needs; none of
-the three exists yet. Nothing below is softened by any of it: `sign` produces
+one, `sign --csc` signs through a remote service that holds the key, and
+`timestamp` writes a container `es:TimeStamp` without signing anything.
+What is still planned in [roadmap.md](roadmap.md) is the interactive
+`openszigno csc login` an `oauth2`-mode credential needs, which does not
+exist yet. Nothing below is softened by any of it: `sign` produces
 a signature and checks none of it, and even `--csc`, which keeps the key out
 of this process entirely, asserts nothing about what it wrote (see
 [remote-signing.md](remote-signing.md)).
@@ -114,7 +114,7 @@ crates/openszigno-cli/src/
   response.rs         # the JSON envelope, CliError, and its exit statuses
   render/             # writing the envelope (json.rs) and the summary (human.rs)
   commands/           # one module per command: inspect, list, validate,
-                      #   extract, verify, create, sign, skill
+                      #   extract, verify, create, sign, timestamp, skill
   key_material.rs     # where a key, a certificate and a passphrase may come
                       #   from, shared by `extract --decrypt-key` and `sign`
   csc/                # `sign --csc`: the remote signing backend
@@ -182,6 +182,7 @@ crates/openszigno-author/src/
               #   octets each reference digests), xades.rs (the qualifying
               #   properties), signer.rs (the Signer seam and SoftwareSigner),
               #   tsa.rs (RFC 3161 requests and responses, bytes in and out),
+              #   stamp.rs (the container es:TimeStamp behind `timestamp`),
               #   csc.rs (CSC API v2 request bodies, response readers and the
               #     algorithm mapping; no I/O),
               #   error.rs (the codes a refused signing run reports)
@@ -463,6 +464,7 @@ configurable on the command line; see [roadmap.md](roadmap.md).
 | `verify FILE` | Verify every `ds:Signature`: canonicalization, reference digests, the signature value, the e-dossier reference-scope rules, the XAdES signed `SigningCertificate` binding, RFC 3161 signature timestamps, the certificate path, and revocation. Reports a per-signature verdict of `valid`, `invalid`, or `indeterminate`. | No |
 | `create --output FILE --title TITLE` | Build one new, unsigned dossier from files on disk, without overwriting anything. The only command that writes a dossier. See [The create command](#the-create-command). | No: it reads its inputs only |
 | `sign FILE --output FILE --key KEY` | Write a signed copy of a dossier: one enveloped XMLDSig/XAdES signature per selected document, or one over the dossier. It verifies nothing. See [The sign command](#the-sign-command). | No: it reads its input only |
+| `timestamp FILE --output FILE --tsa URL` | Write a copy of a dossier carrying a container `es:TimeStamp`: an RFC 3161 token over the elements the format says a timestamp at that placement protects, and no signature. It verifies nothing. See [The timestamp command](#the-timestamp-command). | No: it reads its input only |
 | `skill` | Write the agent skill the binary embeds (`crates/openszigno-cli/skills/openszigno/SKILL.md`) to stdout, byte for byte and with nothing added. Reads no dossier and emits no envelope. | No |
 
 In every command except `create` and `skill` `FILE` is either a path to a
@@ -532,6 +534,18 @@ These flags apply to every command that reads a dossier:
 | `--online-allow-private` | Permit `--tsa` and `--csc` to contact loopback, private, link-local and unique-local addresses, and permit a plain `http` CSC service. Requires `--tsa` or `--csc`. |
 | `--online-proxy <URL>` | Route the `--tsa` and `--csc` requests through this proxy. Requires `--tsa` or `--csc`. |
 
+`timestamp` takes a `FILE` and accepts:
+
+| Flag | Meaning |
+| --- | --- |
+| `-o`, `--output <FILE>` | The timestamped dossier to write. Required. An existing file is never overwritten. |
+| `--tsa <URL>` | The RFC 3161 timestamp authority to ask for a token. Required, and the only thing that makes `timestamp` open a socket. |
+| `--scope <dossier\|document>` | What the timestamp covers. `dossier` (the default) writes one `es:TimeStamp` on the dossier; `document` writes one inside each selected document. |
+| `--document <SELECTOR>` | Timestamp only the named documents, by `object_ref` or as `#<index>`. Repeatable. Without it every document is timestamped. Meaningless for the default dossier scope. See [Selecting documents](#selecting-documents). |
+| `--tsa-cert <FILE>` | A certificate for the timestamp's own `xades:CertificateValues`, so the authority's issuing CAs travel with the dossier. Repeatable; a PEM bundle may hold several. |
+| `--online-allow-private` | Permit `--tsa` to contact loopback, private, link-local and unique-local addresses. |
+| `--online-proxy <URL>` | Route the `--tsa` request through this proxy. |
+
 In JSON mode, stdout contains exactly one JSON object and diagnostics go to
 stderr. Document ordering is the source XML order. No command writes XML
 payload bytes to stdout except `extract --stdout`, which writes the selected
@@ -541,8 +555,9 @@ document's payload and nothing else.
 
 Every file the CLI reads because a caller named it goes through one helper,
 `input::read_bounded_file`: the dossier, `--decrypt-key` and `--key` with their
-certificates and passphrase files, the `--csc` configuration and the secrets it
-names, and each entry of a `--trust-store` and a `--revocation-store`.
+certificates and passphrase files, every `--chain` and `--tsa-cert`
+certificate, the `--csc` configuration and the secrets it names, and each
+entry of a `--trust-store` and a `--revocation-store`.
 
 - The path is opened once. The type and the size come from an `fstat` on that
   descriptor, and the bytes are read through it, so replacing or growing the
@@ -684,7 +699,7 @@ The envelope fields are always present:
 | --- | --- | --- |
 | `schema_version` | number | Currently `1`. |
 | `ok` | boolean | `false` on any failure. |
-| `command` | string | `inspect`, `list`, `extract`, `validate-structure`, `verify`, `create`, `sign`, or `usage`. `skill` never appears: it emits no envelope. |
+| `command` | string | `inspect`, `list`, `extract`, `validate-structure`, `verify`, `create`, `sign`, `timestamp`, or `usage`. `skill` never appears: it emits no envelope. |
 | `input` | object | `format` is `"microsec-es3"` or `null`; `bytes` is the input size, or `null` when it is not known, which includes an input that is not a regular file and a stream that was not read to its end. |
 | `data` | object or null | Command-specific; `null` on failure. |
 | `warnings` | array | Objects with stable `code` and human `message`. |
@@ -973,12 +988,13 @@ I/O and extraction policy.
 | `no_recipients` | author | 4 | Encryption was asked for with no recipient certificate. Unreachable through the CLI, which only builds an encryption request from `--encrypt-for`. |
 | `encrypt_failed` | author | 4 | The CMS `EnvelopedData` could not be built. Not reachable through any input this tool accepts: every value in it is built by this tool and within every bound the DER encoders check. |
 | `invalid_signing_key` | author | 4 | `--key` is not an RSA or NIST P-256 private key in PKCS#8 DER or PEM form, its passphrase is missing or wrong, or `--algorithm` names a scheme that key cannot produce. "Wrong passphrase" is deliberately not told apart from "not a PKCS#8 file". |
-| `invalid_signing_certificate` | author | 4 | `--cert`, `--chain`, `--tsa-cert`, or the certificate inside the key file is not a readable X.509 certificate. |
+| `invalid_signing_certificate` | author | 4 | `--cert`, `--chain`, `--tsa-cert` (of `sign` or of `timestamp`), or the certificate inside the key file is not a readable X.509 certificate. |
 | `signing_certificate_required` | author | 4 | `--key` was given with no `--cert` and the key file carries none, so nothing would bind the signature to a certificate. |
 | `signing_key_mismatch` | author | 4 | The certificate's public key is not the signing key's public key. |
-| `document_not_signable` | author | 4 | A selected document has no payload `ds:Object` or no `es:DocumentProfile` with an `Id`, so the mandated reference set cannot be written for it; or the dossier holds a value a signature would have to quote and cannot: an `Id`/`OBJREF` that is not an XML NCName, a media type outside the token characters, or a namespace URI holding markup, a quote character or a control character. See [Nothing the dossier says decides what is signed](#nothing-the-dossier-says-decides-what-is-signed). |
-| `document_already_signed` | author | 4 | Adding this signature would invalidate one the dossier already carries. See [Signing a dossier that is already signed](#signing-a-dossier-that-is-already-signed). |
-| `tsa_failed` | author, CLI | 5 | The `--tsa` request could not be made, was refused by the destination policy, or the answer was not a granted RFC 3161 response carrying a token over the requested imprint. The message names the reason. |
+| `document_not_signable` | author | 4 | A selected document has no payload `ds:Object` or no `es:DocumentProfile` with an `Id` (`timestamp` reports it for the same two gaps), so the mandated reference set cannot be written for it; or the dossier holds a value a signature would have to quote and cannot: an `Id`/`OBJREF` that is not an XML NCName, a media type outside the token characters, or a namespace URI holding markup, a quote character or a control character. See [Nothing the dossier says decides what is signed](#nothing-the-dossier-says-decides-what-is-signed). |
+| `document_already_signed` | author | 4 | Adding this signature, or this container timestamp, would invalidate something the dossier already carries. See [Signing a dossier that is already signed](#signing-a-dossier-that-is-already-signed). |
+| `timestamp_exists` | author | 4 | `timestamp` was asked to write an `es:TimeStamp` at a placement that already carries one, or every identifier one there could be given is taken. See [The timestamp command](#the-timestamp-command). |
+| `tsa_failed` | author, CLI | 5 | The `--tsa` request could not be made, was refused by the destination policy, or the answer was not a granted RFC 3161 response carrying a token over the requested imprint. The message names the reason. Reported the same way by `sign --tsa` and by `timestamp`. |
 | `csc_config_invalid` | CLI, author | 4 | The `--csc` configuration file cannot be used (a missing or empty key, an unknown key, a value outside the accepted TOML subset, a `redirect_uri` that is not a loopback URI, or a plain `http` `base_url` without `--online-allow-private`), or the service it names does not report a CSC API v2 `specs` version or will not sign a data-to-be-signed representation. Nothing is contacted and nothing is written. |
 | `csc_unreachable` | CLI | 5 | A CSC operation could not be carried out at all. The message names the operation and the transport's own failure class (`timeout`, `destination_refused: …`, `http status …`, `too large`, `redirect`, `invalid`, `transport`). |
 | `csc_rejected` | CLI, author | 5 | The service answered and what it answered cannot be used. The message carries the operation, the HTTP status and the service's own `error` string, bounded and stripped of control characters. `error_description` is never quoted, and neither is the bearer token. |
@@ -986,19 +1002,19 @@ I/O and extraction policy.
 | `csc_credential_unusable` | author | 4 | The named credential cannot produce a signature this build writes: its key or certificate is not enabled or valid, it published no certificate or no algorithm, its certificate is unreadable, or its `key/algo` list offers nothing this build writes, including RSASSA-PSS with no `signAlgoParams`, which would mean guessing the salt length. |
 | `csc_authorization_required` | author | 4 | The credential's authorisation mode is `oauth2`, which needs a second OAuth 2.0 round with `scope=credential` and therefore a browser. This build is non-interactive; see [Signing through a CSC service](#signing-through-a-csc-service). |
 | `csc_signature_invalid` | author | 5 | The signature the service returned does not verify against the certificate it published. Nothing is written. A hash-only service signs a digest it never sees the document behind, so this is the one check that tells a right signature from a well-formed wrong one. |
-| `sign_failed` | author | 5 | Signing could not be completed: an identifier the signature needs is already used in the dossier, an element could not be canonicalized, or the key refused to sign. |
-| `invalid_output_path` | CLI | 4 | The `create --output` or `sign --output` path does not name a file. |
+| `sign_failed` | author | 5 | Signing or timestamping could not be completed: an identifier the element needs is already used in the dossier, an element could not be canonicalized, or the key refused to sign. |
+| `invalid_output_path` | CLI | 4 | The `create --output`, `sign --output` or `timestamp --output` path does not name a file. |
 | `unsafe_output_name` | CLI | 5 | A document title or declared extension cannot be used as a filename, or the derived `<file>.d` directory name would be too long. |
 | `output_name_collision` | CLI | 5 | Residual: two outputs still map to the same name in one directory after all 64 deduplicated candidates were taken. |
 | `output_exists` | CLI | 5 | A destination file already exists or cannot be created safely. |
-| `document_not_found` | CLI, author | 4 | A `--document` selector matches no document, is not a decimal index after `#`, or names a document inside an embedded dossier. `sign` reports it for its own selectors. |
+| `document_not_found` | CLI, author | 4 | A `--document` selector matches no document, is not a decimal index after `#`, or names a document inside an embedded dossier. `sign` and `timestamp` report it for their own selectors. |
 | `document_ambiguous` | CLI | 4 | A `--document` `object_ref` selector matches more than one document. Unreachable through a parsed dossier, whose XML IDs are unique. |
 | `stdout_requires_single_document` | CLI | 4 | `--stdout` did not resolve to exactly one document, or the one it resolved to embeds a dossier while recursion is on. |
 | `document_not_extractable` | CLI | 5 | The document `--stdout` selected is encrypted or uses an unsupported transform chain. |
 | `trust_store_invalid` | CLI | 3 | `--trust-store` does not name a readable directory, holds more files than the loader will read, holds a file larger than 4 MiB or more than 64 MiB in total, holds a file that is not PEM or DER certificate data, or holds no trust anchor. A partially loaded store would silently change what "trusted" means, so the run fails instead. |
 | `trust_list_invalid` | CLI | 3 | A `--trust-list`, `--lotl`, or `--trust-list-signer` file could not be read or parsed. A trusted list that loaded only in part would silently change what "trusted" means, so the run fails instead. |
 | `revocation_store_invalid` | CLI | 3 | `--revocation-store` does not name a readable directory, holds more files than the loader will read, holds a file larger than `MAX_REVOCATION_ITEM_BYTES` or more than 256 MiB in total, or holds a file that is neither a CRL nor an OCSP response. |
-| `online_options_invalid` | CLI | 3 | The network transport could not be built, which today means `--online-proxy` is not a usable proxy URL. Reported the same way by `verify --online`, `sign --tsa`, and `sign --csc`: an unusable option, not a fault in the dossier or key material. |
+| `online_options_invalid` | CLI | 3 | The network transport could not be built, which today means `--online-proxy` is not a usable proxy URL. Reported the same way by `verify --online`, `sign --tsa`, `sign --csc`, and `timestamp`: an unusable option, not a fault in the dossier or key material. |
 | `online_cache_invalid` | CLI | 3 | The `--online-cache` directory could not be opened safely, or a cache file could not be written. A name inside it that already holds something else is not this error; that is one `online_fetch_failed` with the class `cache_collision`, and the run continues. |
 | `unsafe_output_directory` | CLI | 5 | The output path contains a symlink or reparse point, or is not a real directory. |
 | `total_size_limit` | CLI, author | 4 or 5 | Aggregate decoded size exceeds `max_total_decoded_bytes` (4 when `create` refuses to write, 5 during extraction). |
@@ -1025,6 +1041,7 @@ Warning codes. Warnings never change the exit status by themselves:
 | `recipient_certificate_expired` | `create` | An `--encrypt-for` certificate has already expired; the document was encrypted for it anyway, because decryption never consults a recipient certificate's validity. The message names the recipient by its position on the command line. |
 | `created_dossier_unsigned` | `create` | The dossier that was written carries no signature and no timestamp. Every successful `create` reports it, last. |
 | `signed_dossier_unverified` | `sign` | A signature was produced and nothing was checked. Every successful `sign` reports it. |
+| `timestamped_dossier_unverified` | `timestamp` | A timestamp token was obtained and embedded, and nothing was checked. Every successful `timestamp` reports it. |
 | `csc_config_permissive` | `sign --csc` | The `--csc` configuration file is readable by other users on this machine and may hold a bearer token. The mode is never enforced, only reported. Unix only. |
 | `csc_key_unused` | `sign --csc` | The configuration names `redirect_uri`, `client_secret` or `client_secret_file`, which belong to the interactive `csc login` flow and are not used by this run. |
 | `nested_dossier_invalid` | `extract` | An embedded dossier could not be parsed; the raw payload was kept and the run continued. |
@@ -3818,6 +3835,164 @@ passphrase, and anything derived from either never appear in a message, a
 warning, or the JSON envelope, and "wrong passphrase" is deliberately not told
 apart from "not a PKCS#8 file". A certificate that does not belong to the key
 is `signing_key_mismatch` and is refused before anything is signed.
+
+## The timestamp command
+
+`timestamp` writes a copy of a dossier carrying a container `es:TimeStamp`:
+one RFC 3161 token over the elements the e-dossier format says a timestamp at
+that placement protects, and no signature at all. It is the only thing this
+tool produces without a key, and it is not the command that judges one. Every
+successful run warns `timestamped_dossier_unverified`.
+
+```sh
+openszigno timestamp FILE.es3 --output OUT.es3 --tsa URL \
+  [--scope dossier|document] [--document SELECTOR]... [--tsa-cert CERT]... \
+  [--online-allow-private] [--online-proxy URL] [--json]
+```
+
+The element and its imprint live in `openszigno-author`
+(`sign/stamp.rs`), which reads no file and opens no socket; the CLI reads the
+dossier, carries the RFC 3161 request to the authority, and writes the output.
+The request, the response reader and the imprint check are the ones
+`sign --tsa` uses, and so are the destination policy, the pinned resolution,
+the timeouts and the 64 KiB response cap; see
+[Online revocation fetching](#online-revocation-fetching) for the transport
+those rules belong to.
+
+### What it writes
+
+One `es:TimeStamp` per placement, written as the last child of the element it
+belongs to. Nothing else in the dossier is touched, and no existing signature
+or timestamp is read, rewritten or removed.
+
+```xml
+<es:TimeStamp xmlns:es="https://www.microsec.hu/ds/e-szigno30#"
+              xmlns:ds="http://www.w3.org/2000/09/xmldsig#"
+              xmlns:xades="http://uri.etsi.org/01903/v1.3.2#" Id="ts-dossier">
+  <ds:CanonicalizationMethod Algorithm="http://www.w3.org/2001/10/xml-exc-c14n#"/>
+  <xades:Include URI="#dossier"/>
+  <xades:Include URI="#documents"/>
+  <xades:EncapsulatedTimeStamp>MIIJzAYJKoZ...</xades:EncapsulatedTimeStamp>
+</es:TimeStamp>
+```
+
+The tool writes it on one line; the example is broken up to be read. The three
+namespaces are declared on the element itself, so what is written does not
+depend on which prefixes the dossier happens to use.
+
+Every choice in it is a rule from
+[Container timestamps](#container-timestamps) read backwards, because the
+verifier that has to recompute the imprint is the one in this repository:
+
+| What is written | The rule it satisfies |
+| --- | --- |
+| The element is a direct child of `es:Dossier` (`--scope dossier`) or of one `es:Document` (`--scope document`). | Those are the two placements the format describes. Anywhere else nothing would be digested. |
+| `xades:Include` names the `es:DossierProfile` and the `es:Documents`, or the document's `es:DocumentProfile` and its payload `ds:Object`, in that order. | The reference-scope rule for container timestamps: both mandated elements must be covered. Their order is the order the canonical octets are concatenated in. |
+| `ds:CanonicalizationMethod` names exclusive C14N 1.0 without comments. | Each included element is canonicalized on its own with the algorithm the element names, and XAdES 7.1.4.3.1 makes inclusive C14N 1.0 the default when it names none. Naming the algorithm removes the question of what "the default" was. |
+| The imprint is the SHA-256 digest of those canonical octets concatenated in `Include` order. | What the verifier recomputes. Reordering the `Include` elements changes the imprint, which is the point. |
+| One `xades:EncapsulatedTimeStamp`, Base64, holding the DER `TimeStampToken`. | More than one token is a shape the verifier declines to process. |
+| `--tsa-cert` certificates go in a `xades:CertificateValues` beside the token. | Only what an `Include` names is digested, so evidence added beside the token cannot change what the token attests to. |
+
+`--tsa-cert` is evidence that travels with the file, not something this run
+relies on: a token obtained here already carries the authority's own
+certificate, because the request sets `certReq`, and `verify` builds the
+authority's path from the token's certificates, the trust store, and the
+certificates the dossier's signatures carry. Certificates written here are
+read by `verify --online` when it works out what revocation data is missing.
+
+### Identifiers and determinism
+
+The `Id` is `ts-dossier` for a dossier timestamp and `ts-doc<index>` for a
+document one, so the same request against the same dossier writes the same
+name. An identifier already taken in the dossier is disambiguated
+(`ts-dossier-2`), never reused; after 64 attempts the run is refused with
+`timestamp_exists`. Everything else in the element is fixed text or comes
+from the token, so two runs differ only where the authority's answer does.
+
+### When it refuses
+
+The placement rules are `sign`'s, applied by the same code, because adding an
+`es:TimeStamp` changes the canonical form of the element it goes into exactly
+as adding a `ds:Signature` does:
+
+| Situation | Code |
+| --- | --- |
+| The placement already carries an `es:TimeStamp`. | `timestamp_exists` (exit 4) |
+| An existing signature references the whole document (`URI=""`), or references the element the timestamp would be written into or anything containing it. | `document_already_signed` (exit 4) |
+| `--scope document` while a dossier-level signature or `es:TimeStamp` already covers `es:Documents`. | `document_already_signed` (exit 4) |
+| A `--document` selector matches nothing. | `document_not_found` (exit 4) |
+| A selected document has no payload `ds:Object`, or no `es:DocumentProfile` with an `Id`. | `document_not_signable` (exit 4) |
+| The authority could not be used, refused the request, or answered with something that is not a token over the requested imprint. | `tsa_failed` (exit 5) |
+
+Every one of those except `tsa_failed` is decided before a socket is opened,
+and no output file is created for a refused run. Two timestamps at one
+placement are two statements about the same container with nothing to say
+which was meant to be added to which, so the honest answer is to refuse rather
+than to write a file whose second timestamp quietly changes how the first one
+reads.
+
+### The JSON shape
+
+```json
+{
+  "schema_version": 1,
+  "ok": true,
+  "command": "timestamp",
+  "input": { "format": "microsec-es3", "bytes": 1017 },
+  "data": {
+    "output": "stamped.es3",
+    "bytes": 4761,
+    "timestamps": [
+      {
+        "id": "ts-dossier",
+        "scope": "dossier",
+        "document_index": null,
+        "gen_time": "2020-06-02T00:00:10Z"
+      }
+    ]
+  },
+  "warnings": [
+    {
+      "code": "timestamped_dossier_unverified",
+      "message": "this run embedded a timestamp token and verified nothing; run verify with your own trust material to judge it"
+    }
+  ],
+  "errors": []
+}
+```
+
+| `data` field | Type | Meaning |
+| --- | --- | --- |
+| `output` | string | The output path exactly as the caller gave it. It is never resolved or made absolute. |
+| `bytes` | number | The size of the file written. |
+| `timestamps` | array | One entry per `es:TimeStamp` written, in the order written. |
+
+| `timestamps[]` field | Type | Meaning |
+| --- | --- | --- |
+| `id` | string | The `Id` of the `es:TimeStamp` element. |
+| `scope` | string | `dossier` or `document`. |
+| `document_index` | number or null | The index of the document the timestamp sits in; `null` for dossier scope. |
+| `gen_time` | string or null | The `genTime` the token claims, RFC 3339 UTC seconds, read back out of the token that was embedded. `null` when it could not be read. It says what the authority claims, never that the claim was checked. |
+
+### Writing the output
+
+The output file is created with `O_EXCL` through the same
+descriptor-relative machinery `create`, `sign` and `extract` write through, so
+the same rules hold: an existing destination is `output_exists`, a path
+component that is a symlink or is not a directory is
+`unsafe_output_directory`, and a failed write removes what this run created
+rather than leaving a half-written file that looks like a timestamped dossier.
+
+### What a timestamp written here is worth
+
+Nothing this command does is a check. It obtains a token from an authority the
+caller named and embeds it; whether that authority is anybody, whether its
+certificate chains anywhere, and whether the token still says anything at the
+time someone asks are questions only `openszigno verify` answers, against
+trust material the caller supplies, and it reports the answer as
+`dossier_timestamp_verified` or `document_timestamp_verified`. See
+[Container timestamps](#container-timestamps) and
+[Verification boundary](#verification-boundary).
 
 ## Extraction policy
 

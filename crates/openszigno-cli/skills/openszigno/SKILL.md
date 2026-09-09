@@ -1,8 +1,8 @@
 ---
 name: openszigno
 description: >-
-  Inspect, list, extract, decrypt, verify, create and sign Microsec e-Szigno
-  dossiers
+  Inspect, list, extract, decrypt, verify, create, sign and timestamp
+  Microsec e-Szigno dossiers
   (.es3, .dosszie, "e-akta") with the openszigno CLI. Use whenever a task
   involves an .es3 file, a Hungarian court or company-registry e-akta, a
   signed or encrypted e-Szigno dossier, XAdES signature or timestamp
@@ -48,7 +48,7 @@ to, never overwrites a file, and never takes key material from argv.
 ## The boundary, stated once
 
 `verify` is the only command that checks anything cryptographic. Every other
-command, `create` and `sign` included, verifies nothing.
+command, `create`, `sign` and `timestamp` included, verifies nothing.
 
 - **A `valid` verdict** means every check passed at the stated validation
   time against the trust material *you* supplied. Report it in those words.
@@ -58,10 +58,12 @@ command, `create` and `sign` included, verifies nothing.
   data.** Without a `--tsa` token a signature is capped at `indeterminate`
   by `signature_timestamp_absent`, and without `--revocation-store` or
   `--online` by `revocation_status_unknown`. Correct, not a failure.
-- **Creating and signing assert nothing.** `create` writes an unsigned
-  dossier and warns `created_dossier_unsigned`; `sign` writes a signature
-  and checks none of it, warning `signed_dossier_unverified`. Only `verify`
-  on the result says whether it holds.
+- **Creating, signing and timestamping assert nothing.** `create` writes an
+  unsigned dossier and warns `created_dossier_unsigned`; `sign` writes a
+  signature and checks none of it, warning `signed_dossier_unverified`;
+  `timestamp` embeds a token and checks none of it, warning
+  `timestamped_dossier_unverified`. Only `verify` on the result says whether
+  any of it holds.
 - **Nothing here produces a qualified electronic signature.** That needs a
   key on a qualified signature creation device (QSCD), which this process
   cannot hold; even `sign --csc` leaves that claim to the provider. Read
@@ -305,6 +307,29 @@ the canonicalised `ds:SignedInfo` leaves the machine.
 - Such a signature reports `"signer": "csc"` in `data.signatures[]`, with
   `credential_id` and `csc_specs`.
 
+### 7. Timestamp a dossier
+
+Only when the user asks for a dossier to be *timestamped*. No key, no
+certificate and no passphrase are involved: a container timestamp is one RFC
+3161 token over the container, and `--tsa URL` is required.
+
+- `--scope dossier` (the default) writes one `es:TimeStamp` over the whole
+  dossier; `--scope document` writes one inside each document `--document`
+  selects. Order matters when both are wanted: a dossier-level timestamp
+  covers `es:Documents`, so once one exists nothing may be added inside a
+  document. Write the document timestamps first.
+- Refusals, all before a socket is opened and with nothing written:
+  `timestamp_exists` (exit 4) when that placement already carries one,
+  `document_already_signed` (exit 4) when something already in the file
+  covers the insertion point, `document_not_found` (exit 4) for a selector
+  that matches nothing. A request the authority would not answer is
+  `tsa_failed` (exit 5).
+- `data.timestamps[]` reports `id`, `scope`, `document_index` and `gen_time`,
+  the time the token claims. Nothing in the run checked it: verify the result
+  with the user's own trust material and report what `verify` says, which is
+  `dossier_timestamp_verified` or `document_timestamp_verified` when the
+  token checks out, `dossier_timestamp_invalid` when it contradicts the file.
+
 ## Reporting to the user
 
 State, in plain words and in this order: what the file is (title, document
@@ -341,6 +366,9 @@ openszigno sign IN.es3 --output OUT.es3 --key K [--cert C] \
   [--algorithm NAME] --json
 openszigno sign IN.es3 --output OUT.es3 --csc csc.toml [--csc-credential ID] \
   [--tsa URL --tsa-cert CA] [--online-allow-private] [--online-proxy URL] --json
+openszigno timestamp IN.es3 --output OUT.es3 --tsa URL \
+  [--scope dossier|document] [--document SELECTOR] [--tsa-cert CA] \
+  [--online-allow-private] [--online-proxy URL] --json
 openszigno skill
 ```
 

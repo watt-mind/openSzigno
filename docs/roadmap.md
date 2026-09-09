@@ -30,10 +30,10 @@ with the code-level detail, is
   DES-EDE3-CBC. Such a document is named and skipped.
 - Configurable limits: they are compile-time defaults today. See
   [Engineering items](#engineering-items).
-- Encrypting a dossier, and writing a container `es:TimeStamp`. `create`
-  writes an unsigned dossier and `sign` signs one, optionally with a
-  `xades:SignatureTimeStamp`; the container timestamp is LAB-298 under
-  [M5](#m5-authoring-done).
+- Encrypting a whole dossier. Its documents can be encrypted for a recipient
+  (`create --encrypt-for`), and `timestamp` writes a container
+  `es:TimeStamp` (LAB-298 under [M5](#m5-authoring-done)), but the container
+  itself is never encrypted as a unit.
 - A qualified electronic signature. `sign --key` holds a software key, which
   cannot produce one; `sign --csc` signs through a service that holds the key
   instead, but whether the result is qualified is the provider's statement and
@@ -479,7 +479,7 @@ dependency tree of a caller who only reads stays as it is, and so that
 | LAB-292 | An e-Szignó interop check: everything this milestone writes is opened by the Microsec reference tool, and every difference is recorded rather than assumed away. | Waiting on the maintainer |
 | LAB-293 | Release 0.7.0 with the authoring commands and the updated agent skill, after a documentation audit of the four pull requests. | Done |
 | LAB-296 | `openszigno csc login`: the OAuth 2.0 authorization-code rounds `--csc` cannot run: a loopback redirect listener, PKCE, `scope=service` and `scope=credential`, and RFC 9396 `authorization_details` where `supportsRar` is true. It is what makes an `oauth2`-mode credential usable, and it is the one thing LAB-291 deliberately left out. | Planned |
-| LAB-298 | Timestamping without signing: a container `es:TimeStamp` over a dossier or a document, the half of timestamping that `sign --tsa` (a `xades:SignatureTimeStamp`) did not cover. | Planned |
+| LAB-298 | Timestamping without signing: a container `es:TimeStamp` over a dossier or a document, the half of timestamping that `sign --tsa` (a `xades:SignatureTimeStamp`) did not cover. `openszigno timestamp` writes the element `verify`'s `estimestamp` already checked, through the transport and destination policy `sign --tsa` uses. | Done |
 
 Open questions this milestone must answer rather than assume:
 

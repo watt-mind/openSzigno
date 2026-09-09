@@ -39,6 +39,9 @@ pub(crate) enum Command {
     Create(CreateArgs),
     /// Write a signed copy of a dossier. It verifies nothing.
     Sign(SignArgs),
+    /// Write a copy of a dossier carrying a container timestamp. It verifies
+    /// nothing.
+    Timestamp(TimestampArgs),
     /// Print the agent skill (SKILL.md) that teaches an AI agent this CLI.
     Skill,
 }
@@ -339,6 +342,63 @@ pub(crate) struct SignArgs {
 }
 
 impl SignArgs {
+    pub(crate) fn parse_options(&self) -> ParseOptions {
+        parse_options(&self.allow_namespace)
+    }
+
+    pub(crate) fn scope_is_dossier(&self) -> bool {
+        self.scope == Scope::Dossier
+    }
+}
+
+#[derive(Clone, Debug, Args)]
+pub(crate) struct TimestampArgs {
+    /// Input .es3 dossier, or `-` to read it from standard input.
+    pub(crate) file: PathBuf,
+    /// The timestamped dossier to write. An existing file is never
+    /// overwritten.
+    #[arg(short, long, value_name = "FILE")]
+    pub(crate) output: PathBuf,
+    /// Ask this RFC 3161 timestamp authority for a token over the elements
+    /// the es:TimeStamp includes. This is the only thing that makes
+    /// `timestamp` touch the network, and the destination rules, timeouts and
+    /// size caps are the ones `verify --online` uses.
+    #[arg(long, value_name = "URL")]
+    pub(crate) tsa: String,
+    /// What the timestamp covers: the whole dossier, or one selected document
+    /// each.
+    #[arg(long, value_enum, default_value_t = Scope::Dossier)]
+    pub(crate) scope: Scope,
+    /// Timestamp only this document, named by its object_ref (the ds:Object Id
+    /// its DocumentProfile OBJREF points at) or as `#<index>` in source order.
+    /// Repeatable. Without it every document is timestamped. Meaningless for
+    /// the default dossier scope.
+    #[arg(long = "document", value_name = "SELECTOR")]
+    pub(crate) document: Vec<String>,
+    /// A timestamp authority certificate to write nowhere: it is read only so
+    /// this run can refuse a token it could not later be given a path for.
+    /// Repeatable.
+    #[arg(long = "tsa-cert", value_name = "FILE")]
+    pub(crate) tsa_cert: Vec<PathBuf>,
+    /// Permit `--tsa` to contact loopback, private (RFC 1918), link-local and
+    /// unique-local addresses, and the host name `localhost`. Refused by
+    /// default, exactly as it is for `verify --online`.
+    #[arg(long = "online-allow-private")]
+    pub(crate) online_allow_private: bool,
+    /// Route the `--tsa` request through this proxy. Without it no proxy is
+    /// used at all, and none is taken from the environment.
+    #[arg(long = "online-proxy", value_name = "URL")]
+    pub(crate) online_proxy: Option<String>,
+    /// Emit one stable JSON object on stdout.
+    #[arg(long)]
+    pub(crate) json: bool,
+    /// Also accept a dossier whose root Dossier element is in this namespace,
+    /// in addition to the known-compatible ones. Repeatable.
+    #[arg(long = "allow-namespace", value_name = "URI")]
+    pub(crate) allow_namespace: Vec<String>,
+}
+
+impl TimestampArgs {
     pub(crate) fn parse_options(&self) -> ParseOptions {
         parse_options(&self.allow_namespace)
     }

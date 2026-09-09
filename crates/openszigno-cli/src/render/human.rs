@@ -393,6 +393,38 @@ pub(crate) fn write_human_success(command: &str, response: &Response) -> io::Res
                 "Signing verified nothing. Run `openszigno verify` with your own trust material to judge these signatures."
             )?;
         }
+        "timestamp" => {
+            let timestamps = response.data["timestamps"]
+                .as_array()
+                .map_or(&[][..], |items| items);
+            writeln!(
+                out,
+                "Timestamped {} ({} B, {} timestamp(s)).",
+                display_json_string(&response.data["output"]),
+                response.data["bytes"],
+                timestamps.len()
+            )?;
+            for timestamp in timestamps {
+                let mut line = format!(
+                    "{} | scope={}",
+                    display_json_string(&timestamp["id"]),
+                    display_json_string(&timestamp["scope"])
+                );
+                if let Some(index) = timestamp["document_index"].as_u64() {
+                    line.push_str(&format!(" | document={index}"));
+                }
+                // The authority's own claim about when it saw the imprint.
+                // Nothing in this run checked it.
+                if let Some(gen_time) = timestamp["gen_time"].as_str() {
+                    line.push_str(&format!(" | genTime={gen_time}"));
+                }
+                writeln!(out, "{line}")?;
+            }
+            writeln!(
+                out,
+                "Timestamping verified nothing. Run `openszigno verify` with your own trust material to judge this timestamp."
+            )?;
+        }
         "validate-structure" => {
             writeln!(
                 out,
