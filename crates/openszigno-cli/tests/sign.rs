@@ -741,3 +741,145 @@ fn a_title_that_reads_like_a_placeholder_is_signed_and_listed_unchanged() {
         .collect();
     assert_eq!(listed, titles);
 }
+
+// ---------------------------------------------------------------------------
+// 9. A dossier never chooses what the operator's key signs
+// ---------------------------------------------------------------------------
+
+/// The default e-dossier namespace, as `create` writes it.
+const ESZIGNO_NAMESPACE: &str = "https://www.microsec.hu/ds/e-szigno30#";
+
+/// Rewrite the unsigned dossier in place, so a test can plant a value a
+/// well-behaved `create` run would never write.
+fn patch_input(fixture: &Fixture, replacements: &[(String, String)]) {
+    let input = fixture.path("input.es3");
+    let mut text = String::from_utf8(std::fs::read(&input).expect("the dossier is read"))
+        .expect("it is UTF-8");
+    for (from, to) in replacements {
+        assert!(text.contains(from.as_str()), "the fixture holds {from}");
+        text = text.replace(from.as_str(), to.as_str());
+    }
+    std::fs::write(&input, text).expect("the patched dossier is written");
+}
+
+/// A dossier that writes markup into the values a signature has to quote is
+/// refused, one value at a time.
+///
+/// The digests are computed after the values are in the document, so a value
+/// that reached the XML unescaped would let the dossier write the reference
+/// set and the signed properties instead of describing them: an
+/// attacker-chosen `ds:Reference` with no transforms, or a forged
+/// `xades:CommitmentTypeIndication`, both under the operator's own key and
+/// both of which `verify` would then accept.
+#[test]
+fn markup_in_a_dossier_never_reaches_the_signature_it_would_shape() {
+    // Each of these parses to a value holding `"`, `<`, `>` and `&`.
+    const HOSTILE: &str = "a&quot;b&lt;c&gt;d&amp;e";
+    let hostile_namespace = format!("urn:openszigno:test:{HOSTILE}");
+    let pki = pki();
+    let cases: Vec<(&str, Vec<(String, String)>, Vec<String>)> = vec![
+        (
+            "the payload OBJREF and the object it names",
+            vec![
+                (
+                    "OBJREF=\"obj0\"".to_owned(),
+                    format!("OBJREF=\"{HOSTILE}\""),
+                ),
+                (
+                    "<ds:Object Id=\"obj0\">".to_owned(),
+                    format!("<ds:Object Id=\"{HOSTILE}\">"),
+                ),
+            ],
+            Vec::new(),
+        ),
+        (
+            "the document profile Id",
+            vec![("Id=\"profile0\"".to_owned(), format!("Id=\"{HOSTILE}\""))],
+            Vec::new(),
+        ),
+        (
+            "the declared media type",
+            vec![("type=\"text\"".to_owned(), format!("type=\"{HOSTILE}\""))],
+            Vec::new(),
+        ),
+        (
+            "the declared subtype",
+            vec![(
+                "subtype=\"plain\"".to_owned(),
+                format!("subtype=\"{HOSTILE}\""),
+            )],
+            Vec::new(),
+        ),
+        (
+            "the dossier namespace",
+            vec![(
+                format!("xmlns:es=\"{ESZIGNO_NAMESPACE}\""),
+                format!("xmlns:es=\"{hostile_namespace}\""),
+            )],
+            vec![
+                "--allow-namespace".to_owned(),
+                "urn:openszigno:test:a\"b<c>d&e".to_owned(),
+            ],
+        ),
+    ];
+    for (what, replacements, extra) in cases {
+        let fixture = fixture(&pki, 1);
+        patch_input(&fixture, &replacements);
+        let borrowed: Vec<&str> = extra.iter().map(String::as_str).collect();
+        let output = sign_output(&fixture, &borrowed);
+        let report = json(&output);
+        assert_eq!(
+            report["errors"][0]["code"], "document_not_signable",
+            "{what}: {report}"
+        );
+        assert_eq!(output.status.code(), Some(4), "{what}");
+        assert!(
+            !fixture.path("signed.es3").exists(),
+            "{what}: nothing may be written"
+        );
+    }
+}
+
+/// Unusual is not hostile. A dossier whose identifiers and media type are odd
+/// but legal signs, and the signature has exactly the shape the format
+/// mandates: four references, and one `xades:DataObjectFormat`.
+#[test]
+fn a_dossier_with_unusual_but_valid_values_signs_to_the_mandated_shape() {
+    let pki = pki();
+    let fixture = fixture(&pki, 1);
+    patch_input(
+        &fixture,
+        &[
+            (
+                "OBJREF=\"obj0\"".to_owned(),
+                "OBJREF=\"_\u{e9}rt.\u{e9}s-0\"".to_owned(),
+            ),
+            (
+                "<ds:Object Id=\"obj0\">".to_owned(),
+                "<ds:Object Id=\"_\u{e9}rt.\u{e9}s-0\">".to_owned(),
+            ),
+            (
+                "Id=\"profile0\"".to_owned(),
+                "Id=\"prof.\u{ed}l-0_x\"".to_owned(),
+            ),
+            (
+                "subtype=\"plain\"".to_owned(),
+                "subtype=\"x.unusual+test-1\"".to_owned(),
+            ),
+        ],
+    );
+
+    let signed = sign(&fixture, &[]);
+    assert_eq!(signed["ok"], Value::Bool(true));
+    let text = String::from_utf8(std::fs::read(fixture.path("signed.es3")).expect("it is read"))
+        .expect("it is UTF-8");
+    assert_eq!(text.matches("<ds:Reference ").count(), 4, "{text}");
+    assert_eq!(text.matches("<xades:DataObjectFormat").count(), 1);
+    assert!(text.contains("<xades:MimeType>text/x.unusual+test-1</xades:MimeType>"));
+    assert!(text.contains("URI=\"#_\u{e9}rt.\u{e9}s-0\""));
+
+    let report = json(&verify(&fixture, &[]));
+    assert_check(&report, "reference_digest_ok", "passed");
+    assert_check(&report, "signature_value_ok", "passed");
+    assert_check(&report, "reference_scope_complete", "passed");
+}

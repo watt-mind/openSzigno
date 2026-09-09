@@ -22,6 +22,7 @@ use openszigno_verify::{C14nAlgorithm, C14nBackend, NodeSet, RoxmltreeC14n};
 use sha2::{Digest as _, Sha256};
 
 use super::error::SignError;
+use super::names::attribute;
 use super::signer::SignatureAlgorithm;
 
 /// Exclusive XML Canonicalization 1.0, without comments.
@@ -104,13 +105,17 @@ pub(crate) fn render_signed_info(
             .reference_type
             .map(|value| format!(" Type=\"{value}\""))
             .unwrap_or_default();
+        // Every interpolated value is escaped, the reference URI included:
+        // it is built from an `Id` the dossier chose, and a value that
+        // reached the attribute unescaped would let the dossier write the
+        // reference set rather than describe it.
         out.push_str(&format!(
             "<ds:Reference Id=\"{}\" URI=\"{}\"{declared}>\
 <ds:Transforms><ds:Transform Algorithm=\"{C14N_EXCLUSIVE}\"/></ds:Transforms>\
 <ds:DigestMethod Algorithm=\"{SHA256_URI}\"/>\
 <ds:DigestValue>{}</ds:DigestValue></ds:Reference>",
-            reference.id,
-            reference.uri,
+            attribute(&reference.id),
+            attribute(&reference.uri),
             digest_placeholder(&reference.id)
         ));
     }

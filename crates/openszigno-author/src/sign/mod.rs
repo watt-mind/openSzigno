@@ -23,6 +23,7 @@
 //! | `dsig` | `ds:SignedInfo`, its references, and the canonicalized octets each one digests. |
 //! | `xades` | `xades:QualifyingProperties`: the signed properties, and the evidence in the unsigned half. |
 //! | `signer` | The [`Signer`] trait and [`SoftwareSigner`], the local-key implementation. |
+//! | `names` | What a dossier may contribute to signature XML: the checks, and the escapers every interpolation goes through. |
 //! | `csc` | Cloud Signature Consortium API v2 request bodies and response readers, for a hash-only remote backend. Pure: the sockets are the CLI's. |
 //! | `tsa` | RFC 3161 requests and responses, as bytes in and bytes out. |
 //!
@@ -53,6 +54,7 @@
 pub mod csc;
 mod dsig;
 mod error;
+mod names;
 mod signer;
 mod tsa;
 mod xades;
@@ -321,11 +323,16 @@ fn plan_signatures(
     timestamped: bool,
 ) -> Result<Vec<Plan>, SignError> {
     let namespace = dossier.namespace.as_str();
+    // Everything below this line that ends up in signature XML came out of
+    // the dossier, and the dossier is untrusted input.
+    names::check_namespace(namespace)?;
     let mut plans = Vec::new();
     match request.scope {
         SignScope::Dossier => {
             let profile = lookup.dossier_child_id(namespace, "DossierProfile")?;
             let documents = lookup.dossier_child_id(namespace, "Documents")?;
+            names::check_id("Id", &profile)?;
+            names::check_id("Id", &documents)?;
             plans.push(build_plan(
                 lookup,
                 PlanSpec {
@@ -347,6 +354,9 @@ fn plan_signatures(
         SignScope::Document => {
             for document in targets {
                 let id = format!("sig-doc{}", document.index);
+                names::check_id("OBJREF", &document.object_ref)?;
+                let mime_type = document.mime_type.essence();
+                names::check_mime_essence(&mime_type)?;
                 let node = lookup.by_id(&document.object_ref).ok_or_else(|| {
                     SignError::new(
                         SignErrorCode::DocumentNotSignable,
@@ -374,6 +384,7 @@ fn plan_signatures(
                         ),
                     )
                 })?;
+                names::check_id("Id", &profile)?;
                 plans.push(build_plan(
                     lookup,
                     PlanSpec {
@@ -382,11 +393,7 @@ fn plan_signatures(
                         document_index: Some(document.index),
                         insert_at: lookup.insert_offset(container)?,
                         covered: vec![
-                            (
-                                "object",
-                                document.object_ref.clone(),
-                                Some(document.mime_type.essence()),
-                            ),
+                            ("object", document.object_ref.clone(), Some(mime_type)),
                             ("document-profile", profile, None),
                         ],
                         timestamped,
@@ -463,8 +470,9 @@ fn build_plan(
     ));
 
     let mut element = format!(
-        "<ds:Signature xmlns:ds=\"{}\" Id=\"{id}\">",
-        dsig::XMLDSIG_NS
+        "<ds:Signature xmlns:ds=\"{}\" Id=\"{}\">",
+        dsig::XMLDSIG_NS,
+        names::attribute(&id)
     );
     element.push_str(&dsig::render_signed_info(
         &id,
