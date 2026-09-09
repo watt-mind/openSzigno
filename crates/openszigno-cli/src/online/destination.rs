@@ -64,6 +64,14 @@ const REFUSED_LITERAL: &str = "the host is a loopback, private, link-local, uniq
 const REFUSED_RESOLVED: &str = "the host resolves to a loopback, private, link-local, unique-local, unspecified or multicast address; pass --online-allow-private to permit it";
 const REFUSED_METADATA_LITERAL: &str = "the host is a cloud instance metadata address, which no certificate legitimately publishes; pass --online-allow-private to permit it";
 const REFUSED_METADATA_RESOLVED: &str = "the host resolves to a cloud instance metadata address, which no certificate legitimately publishes; pass --online-allow-private to permit it";
+/// The redirect rule: a hop that leaves `https` for `http` on the same host.
+/// It is refused for every request kind, because a redirect is the peer's
+/// choice and "keep talking, but in the clear" is not a choice a peer gets to
+/// make for this tool.
+pub(super) const REFUSED_REDIRECT_DOWNGRADE: &str = "redirect_downgrade: the redirect leaves https for http, and a peer does not get to move this request into the clear";
+/// The credential rule: a request that carries a bearer token or a body the
+/// caller flagged as sensitive, aimed at a URL that is not `https`.
+pub(super) const REFUSED_PLAINTEXT_CREDENTIALS: &str = "credentials_require_https: the request carries credentials and the URL is not https; pass --online-allow-private to permit a loopback service";
 
 /// The IPv4 link-local address every major cloud answers instance metadata on,
 /// credentials included. It is inside `169.254.0.0/16` and so already refused;
@@ -148,6 +156,25 @@ pub(super) fn permitted(url: &str, allow_private: bool) -> Result<Vetted, Refusa
         port,
         addresses,
     })
+}
+
+/// Whether every address the policy approved for this endpoint is a loopback
+/// address.
+///
+/// It is asked of the *vetted* addresses rather than of the host text, so a
+/// name that resolves to `127.0.0.1` counts and a name that resolves to one
+/// loopback address and one public one does not. `--online-allow-private` plus
+/// loopback is the one place this build sends credentials without TLS, and it
+/// exists for the test servers in `crates/openszigno-cli/tests`, which are
+/// plain HTTP on `127.0.0.1`.
+pub(super) fn loopback_only(vetted: &Vetted) -> bool {
+    !vetted.addresses.is_empty()
+        && vetted.addresses.iter().all(|address| match address.ip() {
+            IpAddr::V4(v4) => v4.is_loopback(),
+            IpAddr::V6(v6) => v6
+                .to_ipv4_mapped()
+                .map_or_else(|| v6.is_loopback(), |mapped| mapped.is_loopback()),
+        })
 }
 
 /// Split an authority into its host and optional port, understanding the
