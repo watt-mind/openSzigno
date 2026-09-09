@@ -131,6 +131,9 @@ impl SignatureScheme {
             "http://www.w3.org/2001/04/xmldsig-more#ecdsa-sha384" => {
                 Some(Self::Ecdsa(Digest::Sha384))
             }
+            "http://www.w3.org/2001/04/xmldsig-more#ecdsa-sha512" => {
+                Some(Self::Ecdsa(Digest::Sha512))
+            }
             _ => None,
         }
     }
@@ -254,6 +257,7 @@ impl PolicyReport {
             "rsa-pss-sha512",
             "ecdsa-sha256",
             "ecdsa-sha384",
+            "ecdsa-sha512",
         ];
         if legacy_algorithms_allowed {
             // Reported so the machine output shows the policy that was

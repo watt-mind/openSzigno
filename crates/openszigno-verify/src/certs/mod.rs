@@ -47,12 +47,14 @@ const OID_RSA_ENCRYPTION: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.8
 const OID_EC_PUBLIC_KEY: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.10045.2.1");
 const OID_PRIME256V1: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.10045.3.1.7");
 const OID_SECP384R1: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.3.132.0.34");
+const OID_SECP521R1: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.3.132.0.35");
 
 const OID_SHA256_RSA: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.113549.1.1.11");
 const OID_SHA384_RSA: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.113549.1.1.12");
 const OID_SHA512_RSA: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.113549.1.1.13");
 const OID_ECDSA_SHA256: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.10045.4.3.2");
 const OID_ECDSA_SHA384: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.10045.4.3.3");
+const OID_ECDSA_SHA512: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.10045.4.3.4");
 
 /// The public summary of a certificate.
 ///
@@ -433,6 +435,7 @@ pub fn signature_scheme_of(oid: ObjectIdentifier) -> Option<SignatureScheme> {
         OID_SHA512_RSA => Some(SignatureScheme::RsaPkcs1(PolicyDigest::Sha512)),
         OID_ECDSA_SHA256 => Some(SignatureScheme::Ecdsa(PolicyDigest::Sha256)),
         OID_ECDSA_SHA384 => Some(SignatureScheme::Ecdsa(PolicyDigest::Sha384)),
+        OID_ECDSA_SHA512 => Some(SignatureScheme::Ecdsa(PolicyDigest::Sha512)),
         _ => None,
     }
 }
@@ -643,6 +646,19 @@ pub fn verify_with_spki(
                     key.verify(message, &signature)
                         .map_err(|_| VerifyError::BadSignature)
                 }
+                (OID_SECP521R1, PolicyDigest::Sha512) => {
+                    use p521::ecdsa::signature::Verifier;
+                    let key = p521::ecdsa::VerifyingKey::from_sec1_bytes(key_bytes)
+                        .map_err(|_| VerifyError::Malformed)?;
+                    let signature = if der_ecdsa {
+                        p521::ecdsa::Signature::from_der(signature)
+                    } else {
+                        p521::ecdsa::Signature::from_slice(signature)
+                    }
+                    .map_err(|_| VerifyError::Malformed)?;
+                    key.verify(message, &signature)
+                        .map_err(|_| VerifyError::BadSignature)
+                }
                 // A curve and digest that do not match is an algorithm
                 // downgrade attempt, not a curve to guess at.
                 _ => Err(VerifyError::UnsupportedKey),
@@ -676,6 +692,7 @@ pub fn key_algorithm(certificate: &Certificate) -> (Option<&'static str>, Option
                 .and_then(|curve| match curve {
                     OID_PRIME256V1 => Some(256),
                     OID_SECP384R1 => Some(384),
+                    OID_SECP521R1 => Some(521),
                     _ => None,
                 });
             (Some("ec"), bits)
