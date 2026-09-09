@@ -5,14 +5,52 @@ use super::*;
 
 /// A `GET` of `target` against the listener, answered on another thread so
 /// the listener and the client are not the same one.
+///
+/// The listener accepts on a poll loop and stops as soon as it has served the
+/// redirect, so both ends of this exchange are racing a socket that is about
+/// to close. The connect is retried, every read is bounded by a timeout rather
+/// than by the peer's goodwill, and the answer is read to EOF: a read that
+/// ends in a reset after the answer arrived is still an answer, and one that
+/// ends in nothing is retried rather than asserted on.
 fn request(address: std::net::SocketAddr, target: &str) -> String {
-    let mut stream = TcpStream::connect(address).expect("the listener is up");
+    for attempt in 0..5_u32 {
+        if let Some(answer) = exchange(address, target)
+            && !answer.is_empty()
+        {
+            return answer;
+        }
+        std::thread::sleep(Duration::from_millis(50 * u64::from(attempt + 1)));
+    }
+    panic!("the loopback listener never answered {target}")
+}
+
+/// One attempt: connect, send the request head, half-close, read to EOF.
+///
+/// The write side is shut down before reading. It tells the listener the
+/// request is complete without waiting for it to parse one, and it leaves no
+/// unread inbound data behind for the close at the other end to turn into a
+/// reset.
+fn exchange(address: std::net::SocketAddr, target: &str) -> Option<String> {
+    let mut stream = TcpStream::connect_timeout(&address, Duration::from_secs(5)).ok()?;
+    stream.set_read_timeout(Some(Duration::from_secs(5))).ok()?;
+    stream
+        .set_write_timeout(Some(Duration::from_secs(5)))
+        .ok()?;
     stream
         .write_all(format!("GET {target} HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n").as_bytes())
-        .expect("the request is written");
-    let mut answer = String::new();
-    let _ = stream.read_to_string(&mut answer);
-    answer
+        .ok()?;
+    stream.flush().ok()?;
+    stream.shutdown(Shutdown::Write).ok()?;
+    let mut answer = Vec::new();
+    let _ = stream.read_to_end(&mut answer);
+    Some(String::from_utf8_lossy(&answer).into_owned())
+}
+
+/// The status line of an answer, which is what these tests judge. `contains`
+/// would also match a three-digit number that happened to appear in a body or
+/// a header, and would read a truncated answer as a missing one.
+fn status(answer: &str) -> &str {
+    answer.lines().next().unwrap_or_default()
 }
 
 #[test]
@@ -156,8 +194,14 @@ fn the_code_arrives_only_under_the_state_this_run_issued() {
         let listener = listener;
         listener.wait("the-state", Duration::from_secs(20))
     });
-    assert!(request(address, "/favicon.ico").contains("404"));
-    assert!(request(address, "/callback?code=c0de&state=the-state").contains("200 OK"));
+    assert_eq!(
+        status(&request(address, "/favicon.ico")),
+        "HTTP/1.1 404 Not Found"
+    );
+    assert_eq!(
+        status(&request(address, "/callback?code=c0de&state=the-state")),
+        "HTTP/1.1 200 OK"
+    );
     let code = waiting
         .join()
         .expect("the listener thread finished")
@@ -171,7 +215,7 @@ fn a_state_that_was_never_issued_discards_the_code() {
     let address = listener.listener.local_addr().expect("the port is known");
     let waiting = std::thread::spawn(move || listener.wait("mine", Duration::from_secs(20)));
     let answer = request(address, "/callback?code=somebody-elses&state=theirs");
-    assert!(answer.contains("400"));
+    assert_eq!(status(&answer), "HTTP/1.1 400 Bad Request");
     let error = waiting
         .join()
         .expect("the listener thread finished")
@@ -187,7 +231,10 @@ fn an_authorization_error_stops_the_round_with_the_servers_own_identifier() {
     let listener = Listener::bind(None).expect("a port is available");
     let address = listener.listener.local_addr().expect("the port is known");
     let waiting = std::thread::spawn(move || listener.wait("s", Duration::from_secs(20)));
-    assert!(request(address, "/callback?error=access_denied&state=s").contains("400"));
+    assert_eq!(
+        status(&request(address, "/callback?error=access_denied&state=s")),
+        "HTTP/1.1 400 Bad Request"
+    );
     let error = waiting
         .join()
         .expect("the listener thread finished")
@@ -201,7 +248,10 @@ fn a_redirect_without_a_code_is_a_failure_and_not_an_empty_code() {
     let listener = Listener::bind(None).expect("a port is available");
     let address = listener.listener.local_addr().expect("the port is known");
     let waiting = std::thread::spawn(move || listener.wait("s", Duration::from_secs(20)));
-    assert!(request(address, "/callback?state=s&code=").contains("400"));
+    assert_eq!(
+        status(&request(address, "/callback?state=s&code=")),
+        "HTTP/1.1 400 Bad Request"
+    );
     let error = waiting
         .join()
         .expect("the listener thread finished")
