@@ -16,10 +16,6 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
   `encoding` pseudo-attribute and reports the label together with the byte
   range holding it, so a writer restating the declaration agrees with the
   decoder byte for byte. Additive; `schema_version` stays `1`.
-- `openszigno_core::declared_encoding`, which reads the XML declaration's
-  `encoding` pseudo-attribute and reports the label together with the byte
-  range holding it, so a writer restating the declaration agrees with the
-  decoder byte for byte. Additive; `schema_version` stays `1`.
 - Two fuzz targets for code that had none. `extract_plan` drives the CLI's
   extraction planner with arbitrary document titles and declared extensions
   and asserts that no planned name is a path, that no two names in one
@@ -49,6 +45,58 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
 
 ### Fixed
 
+- A delegated OCSP responder's certificate is checked for validity at the
+  response's `producedAt` rather than at the validation time, matching the
+  trusted-responder model beside it and the documented rule. Asking at the
+  validation time discarded every archived response whose responder
+  certificate has since expired — the certificate was in force when the
+  responder spoke, which is what RFC 6960's delegation is about — and it
+  admitted one that was not yet in force then. `schema_version` stays `1`.
+- A container `es:TimeStamp` selects its data only through an `xades:Include`
+  in a recognised XAdES namespace. The element was matched on its local name
+  alone, so an element another vocabulary happens to call `Include` added its
+  target to the imprint and changed what the timestamp was taken to cover.
+  Every other XAdES element in the crate was already read this way.
+  `schema_version` stays `1`.
+- An OCSP `unknown` status is no longer reported as stale revocation data.
+  RFC 6960 section 2.2 gives it its own meaning — the responder does not know
+  about this certificate — and calling that staleness told an operator to
+  fetch something newer when the responder they asked does not serve the
+  certificate at all. It now reports the new check code
+  `revocation_status_unknown_by_responder` (`unknown`), which blocks exactly as
+  `revocation_data_stale` did. Additive: a new code keeps `schema_version` at
+  `1`, and no committed fixture emits it, so no golden file changed.
+- A certificate whose outer `signatureAlgorithm` differs from
+  `tbsCertificate.signature` is refused with `cert_malformed`. RFC 5280
+  section 4.1.1.2 requires the two to be the same algorithm identifier, and
+  only the inner one is covered by the CA's signature, so a reader that
+  consults the outer field was verifying under an algorithm the CA never
+  attested to. An absent `parameters` field and an explicit `NULL` still count
+  as agreeing, which is the difference real CAs actually emit.
+  `schema_version` stays `1`.
+- `--allow-legacy-algorithms` no longer lets an RFC 3161 timestamp token
+  report itself as verified on SHA-1. A SHA-1 `messageImprint` emitted
+  `timestamp_imprint_ok` (`passed`) and a SHA-1 `SignerInfo` digest emitted
+  `timestamp_signature_ok` (`passed`), so the token reached `verified: true`
+  and its `genTime` became the validation time — under a flag that exists for
+  diagnosis and everywhere else caps the verdict. Both now emit
+  `algorithm_legacy_allowed` (`unknown`) instead, so the token stays
+  unverified and the verdict stays `indeterminate`. Without the flag both are
+  refused exactly as before. `schema_version` stays `1`.
+- Document coverage finds the payload `ds:Object` whatever the dossier spells
+  its identifier attribute. The parser, the reference resolver and the XAdES
+  reader accept `Id`, `ID` and `id`; coverage read only `Id`, so a document
+  whose payload object used one of the other two spellings was reported
+  `uncovered` by the very signature that digests it, and the dossier's verdict
+  was capped at `indeterminate`. `schema_version` stays `1`.
+- An OCSP response can no longer make `verify` do unbounded work. The `certs`
+  field of a `BasicOCSPResponse` is attacker-supplied and was read in full, and
+  every certificate in it naming the responder drove a signature verification
+  and, under the trusted-responder model, a whole certification-path search.
+  At most `max_certificates` certificates are now read from a response, the
+  list is deduplicated by DER, and the path search runs at most once per
+  distinct responder public key. No verdict changes: the same responses are
+  authorised by the same models, and `schema_version` stays `1`.
 - Text a dossier chose no longer reaches a terminal or the JSON envelope
   unfiltered. The dossier title, document titles, MIME type halves, the
   declared extension and character set, object references, transform names and

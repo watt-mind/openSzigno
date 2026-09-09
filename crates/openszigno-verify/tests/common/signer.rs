@@ -531,7 +531,7 @@ fn reference_digest(xml: &str, signature: &SigSpec, reference: &RefSpec) -> Opti
     } else {
         let id = reference.uri.trim_start_matches('#');
         tree.descendants()
-            .find(|node| node.attribute("Id") == Some(id))?
+            .find(|node| super::dossier::id_of(*node) == Some(id))?
     };
     // A same-document reference dereferences to a comment-free node set
     // (XMLDSig 4.4.3.3), so the signer must drop comments too.

@@ -186,6 +186,7 @@ pub(super) fn summarise(
     for code in [
         CheckCode::RevocationDataInvalid,
         CheckCode::RevocationDataStale,
+        CheckCode::RevocationStatusUnknownByResponder,
         CheckCode::RevocationStatusUnknown,
     ] {
         if let Some((index, entry)) = entries
@@ -258,6 +259,10 @@ fn message_for(
             "in {chain}, the revocation data for {what} had expired before the validation time{}",
             crl_hint(&path[index])
         ),
+        CheckCode::RevocationStatusUnknownByResponder => format!(
+            "in {chain}, an authorised OCSP responder answered about {what} with the status unknown: it does not know about this certificate, so it neither confirms nor denies a revocation{}",
+            crl_hint(&path[index])
+        ),
         _ => {
             let source = if input.data.is_empty() {
                 "the signature embeds none and no --revocation-store was given"
@@ -303,6 +308,10 @@ pub(super) enum Answer {
     /// The data is well formed and authorised but says nothing about this
     /// certificate, or has expired.
     Stale,
+    /// An OCSP responder authorised to answer replied `unknown`: it does not
+    /// know about this certificate. Well formed, authorised, current, and no
+    /// answer — which is not the same as data that has gone out of date.
+    UnknownToResponder,
     /// The data could not be used at all, and why. The reason is reported,
     /// because "unusable" without a cause is exactly the message an operator
     /// cannot act on.
@@ -473,6 +482,22 @@ pub(super) fn check_certificate(
                     entry.source = Some(origin);
                     // Stale beats invalid as the reported reason: it names the
                     // fixable problem.
+                    fallback = Some(entry);
+                }
+                Answer::UnknownToResponder => {
+                    let mut entry = CertificateRevocation::plain(
+                        RevocationStatus::Unknown,
+                        CheckCode::RevocationStatusUnknownByResponder,
+                    );
+                    entry.source = Some(origin);
+                    entry.detail = Some(format!(
+                        "{} reported the status unknown, so it does not know about this certificate",
+                        origin.describe()
+                    ));
+                    // Like staleness, this names the specific thing that
+                    // happened rather than leaving a bare "nothing was found",
+                    // so it becomes the reported reason when nothing definite
+                    // turns up.
                     fallback = Some(entry);
                 }
                 Answer::Good {

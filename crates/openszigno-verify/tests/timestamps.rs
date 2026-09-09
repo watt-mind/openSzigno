@@ -743,3 +743,101 @@ fn an_unknown_der_shape_names_the_tag_it_saw() {
     );
     assert_eq!(report.verdict, Verdict::Indeterminate);
 }
+
+// ---------------------------------------------------------------------------
+// Legacy algorithms inside a token
+// ---------------------------------------------------------------------------
+
+/// `--allow-legacy-algorithms`, which is what a diagnosis run passes.
+fn run_legacy_at(xml: &str, anchors: Vec<Vec<u8>>, time: &str) -> VerifyReport {
+    let trust = MemoryTrustStore::new(anchors, Vec::new());
+    let revocation = NoRevocation;
+    let backend = RoxmltreeC14n;
+    let clock = FixedClock(parse_rfc3339(time).expect("the fixed time parses"));
+    let mut options = VerifyOptions::new(&clock, &trust, &revocation, &backend);
+    options.requested_time = Some(time.to_owned());
+    options.allow_legacy_algorithms = true;
+    verify(xml.as_bytes(), &options).expect("the dossier parses structurally")
+}
+
+const AT: &str = "2020-06-02T00:00:00Z";
+
+/// A SHA-1 message imprint is refused outright by default, and under
+/// `--allow-legacy-algorithms` it is recomputed and reported — but as
+/// `algorithm_legacy_allowed` (`unknown`), never as `timestamp_imprint_ok`.
+/// Recomputing a SHA-1 imprint is diagnosis, not proof: a second preimage
+/// would let the same token be claimed over other data, so the token stays
+/// unverified and the verdict stays capped.
+#[test]
+fn a_sha1_message_imprint_is_diagnosed_rather_than_verified() {
+    let pki = good_pki();
+    let xml = dossier(
+        signature_with_timestamp(&pki, |timestamp| timestamp.sha1_imprint = true),
+        &pki.signer_key,
+    );
+
+    let strict = run_at(&xml, vec![pki.root_der.clone()], AT);
+    assert_check(
+        &strict,
+        CheckCode::TimestampImprintMismatch,
+        CheckStatus::Failed,
+    );
+    assert!(!strict.signatures[0].timestamps[0].verified);
+
+    let legacy = run_legacy_at(&xml, vec![pki.root_der.clone()], AT);
+    assert_check(
+        &legacy,
+        CheckCode::AlgorithmLegacyAllowed,
+        CheckStatus::Unknown,
+    );
+    let seen = codes(&legacy);
+    assert!(
+        !seen
+            .iter()
+            .any(|entry| entry.starts_with("timestamp_imprint_ok=")),
+        "a SHA-1 imprint never passes: {seen:?}"
+    );
+    let timestamp = &legacy.signatures[0].timestamps[0];
+    assert_eq!(timestamp.imprint_algorithm, Some("sha1"));
+    assert!(
+        !timestamp.verified,
+        "an imprint this build will not vouch for cannot verify a token"
+    );
+    assert_eq!(legacy.verdict, Verdict::Indeterminate);
+}
+
+/// The same rule for the `SignerInfo` digest, which is both what the
+/// `messageDigest` attribute is computed with and, under a bare
+/// `rsaEncryption`, what the signature itself is computed with.
+#[test]
+fn a_sha1_signer_info_digest_is_diagnosed_rather_than_verified() {
+    let pki = good_pki();
+    let xml = dossier(
+        signature_with_timestamp(&pki, |timestamp| timestamp.sha1_signer_digest = true),
+        &pki.signer_key,
+    );
+
+    let strict = run_at(&xml, vec![pki.root_der.clone()], AT);
+    assert_check(
+        &strict,
+        CheckCode::TimestampSignatureInvalid,
+        CheckStatus::Failed,
+    );
+    assert!(!strict.signatures[0].timestamps[0].verified);
+
+    let legacy = run_legacy_at(&xml, vec![pki.root_der.clone()], AT);
+    assert_check(
+        &legacy,
+        CheckCode::AlgorithmLegacyAllowed,
+        CheckStatus::Unknown,
+    );
+    let seen = codes(&legacy);
+    assert!(
+        !seen
+            .iter()
+            .any(|entry| entry.starts_with("timestamp_signature_ok=")),
+        "a SHA-1 SignerInfo digest never passes: {seen:?}"
+    );
+    assert!(!legacy.signatures[0].timestamps[0].verified);
+    assert_eq!(legacy.verdict, Verdict::Indeterminate);
+}

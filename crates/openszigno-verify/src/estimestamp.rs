@@ -206,9 +206,12 @@ fn prepare<'a, 'input>(
     }
 
     // --- The included elements, in document order --------------------------
-    let includes: Vec<Node<'a, 'input>> = node
-        .children()
-        .filter(|child| child.is_element() && child.tag_name().name() == "Include")
+    // Only an `Include` in a recognised XAdES namespace selects data, which is
+    // the rule every other XAdES element in this crate is read under. Matching
+    // on the local name alone let an element some other vocabulary happens to
+    // call `Include` add its target to the imprint, and so change what a
+    // container timestamp is taken to cover.
+    let includes: Vec<Node<'a, 'input>> = xades::xades_children(node, "Include")
         .take(MAX_INCLUDES)
         .collect();
     if includes.is_empty() {

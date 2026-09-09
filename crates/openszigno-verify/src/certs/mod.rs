@@ -464,6 +464,22 @@ fn verify_certificate_signature(
     subject: &ParsedCertificate,
     issuer: &ParsedCertificate,
 ) -> Result<(), (CheckCode, String)> {
+    // RFC 5280 section 4.1.1.2: the outer `signatureAlgorithm` MUST contain
+    // the same algorithm identifier as `tbsCertificate.signature`. Only the
+    // inner one is signed, so a certificate on which the two disagree lets a
+    // reader that consults the outer field verify under one algorithm what the
+    // CA attested under another. Nothing legitimate emits it, and the
+    // certificate is malformed rather than badly signed.
+    if !algorithm_identifiers_agree(
+        &subject.certificate.signature_algorithm,
+        &subject.certificate.tbs_certificate.signature,
+    ) {
+        return Err((
+            CheckCode::CertMalformed,
+            "a certificate's outer signatureAlgorithm does not match its tbsCertificate.signature"
+                .to_owned(),
+        ));
+    }
     let Some(scheme) = signature_scheme_of(subject.certificate.signature_algorithm.oid) else {
         return Err((
             CheckCode::CertAlgorithmRejected,
@@ -496,6 +512,27 @@ fn verify_certificate_signature(
             CheckCode::CertSignatureInvalid,
             "a certificate in the path is not correctly signed by its issuer".to_owned(),
         )),
+    }
+}
+
+/// Whether two `AlgorithmIdentifier` values state the same algorithm.
+///
+/// The OIDs must be equal. For the parameters, an absent field and an explicit
+/// `NULL` say the same thing for every algorithm this build admits — RFC 4055
+/// section 2.1 requires `NULL` for the RSA family, RFC 5758 requires absence
+/// for the ECDSA one, and real CAs have emitted both spellings — so the two are
+/// treated as equal and anything else has to match byte for byte.
+fn algorithm_identifiers_agree(
+    outer: &x509_cert::spki::AlgorithmIdentifierOwned,
+    inner: &x509_cert::spki::AlgorithmIdentifierOwned,
+) -> bool {
+    if outer.oid != inner.oid {
+        return false;
+    }
+    match (&outer.parameters, &inner.parameters) {
+        (None, None) => true,
+        (None, Some(value)) | (Some(value), None) => der::Tagged::tag(value) == der::Tag::Null,
+        (Some(left), Some(right)) => left == right,
     }
 }
 

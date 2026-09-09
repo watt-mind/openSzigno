@@ -265,9 +265,13 @@ pub fn verify_token_at(
                 econtent.as_bytes(),
                 input.allow_legacy_algorithms,
             ) {
-                Ok(()) => checks.push(Check::passed(
+                Ok(false) => checks.push(Check::passed(
                     CheckCode::TimestampSignatureOk,
                     "the timestamp authority's signature over the signed attributes verified",
+                )),
+                Ok(true) => checks.push(Check::unknown(
+                    CheckCode::AlgorithmLegacyAllowed,
+                    "the timestamp authority's signature over the signed attributes verified under a SHA-1 SignerInfo digest, admitted only because legacy algorithms were allowed; its strength is not vouched for",
                 )),
                 Err(message) => {
                     checks.push(Check::failed(CheckCode::TimestampSignatureInvalid, message));

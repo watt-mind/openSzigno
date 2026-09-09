@@ -1327,6 +1327,12 @@ set](#the-effective-node-set) of one of the signature's references, which is
 exactly the rule — and the same code — the scope check applies. A
 document-level signature covers only the document it is placed in.
 
+The payload `ds:Object` an `OBJREF` names is found under the three spellings
+of the identifier attribute the rest of the tool accepts, `Id`, `ID` and `id`,
+the same three the parser resolves an `OBJREF` with and a `URI="#..."`
+reference is resolved by. A dossier that spells it `id` therefore reports the
+same coverage as one that spells it `Id`.
+
 The states, per document:
 
 | State | Meaning |
@@ -1502,6 +1508,20 @@ below 2048 bits stay refused whatever it is set to. It does not loosen
 certificate-path validation either — a SHA-1-signed certificate is still
 `cert_algorithm_rejected`.
 
+The same rule holds **inside an RFC 3161 timestamp token**, in both places a
+token can name SHA-1: the `messageImprint` digest algorithm, and the
+`SignerInfo` digest — which is what the signed `messageDigest` attribute is
+computed with and, under a bare `rsaEncryption` signature algorithm, what the
+signature itself is computed with. Without the flag both are refused, as
+`timestamp_imprint_mismatch` and `timestamp_signature_invalid` respectively.
+With it the imprint is recomputed and the signature is checked, and what is
+emitted is `algorithm_legacy_allowed` (`unknown`) instead of
+`timestamp_imprint_ok`/`timestamp_signature_ok` (`passed`). The token therefore
+stays `verified: false`, does not become the validation time, and the verdict
+stays capped at `indeterminate`: recomputing a SHA-1 imprint is diagnosis, not
+proof, because a second preimage would let the same token be claimed over other
+data.
+
 Canonicalization is implemented in-tree, over the same `roxmltree` tree the
 structural parser built, rather than delegated. The candidate library named in
 the design (`bergshamra-c14n`) canonicalizes its own parser's tree and selects
@@ -1519,7 +1539,7 @@ Reported verbatim under `data.limits` in `verify --json`.
 | `max_signatures` | 64 | `ds:Signature` elements examined per dossier. |
 | `max_references_per_signature` | 32 | `ds:Reference` elements per signature. |
 | `max_transforms_per_reference` | 8 | Transforms in one reference's chain. |
-| `max_certificates` | 64 | Certificates admitted into path building. |
+| `max_certificates` | 64 | Certificates admitted into path building, and the largest `certs` list read from one OCSP response. |
 | `max_timestamps_per_signature` | 8 | `xades:SignatureTimeStamp` elements processed per signature. |
 | `max_chain_length` | 8 | Certificates in one candidate path, inclusive: a path of exactly this many certificates that ends at an anchor is accepted. |
 | `max_paths` | 32 | Completed candidate paths explored. |
@@ -1704,7 +1724,7 @@ what M3 added.
 | Step | What is required |
 | --- | --- |
 | Placement | A direct `es:TimeStamp` child of `es:Dossier` is a **dossier timestamp**; a direct child of `es:Document` is a **document timestamp**. Anywhere else, the format does not say what the element protects and nothing is digested. |
-| Resolution | Every `xades:Include/@URI` is `#id` and must resolve, through the ID space `openszigno-core` validated, to exactly one element. Nothing is ever dereferenced off the document. |
+| Resolution | Only an `Include` in a recognised XAdES namespace selects data; an element another vocabulary happens to call `Include` is ignored, exactly as everywhere else this crate reads XAdES. Every `xades:Include/@URI` is `#id` and must resolve, through the ID space `openszigno-core` validated, to exactly one element. Nothing is ever dereferenced off the document. |
 | Scope | A dossier timestamp must cover `/es:Dossier/es:DossierProfile` **and** `/es:Dossier/es:Documents`. A document timestamp must cover its `es:DocumentProfile` **and** the document's payload `ds:Object`. An element is covered when an `Include` resolves to it or to an ancestor of it. |
 | Imprint | Each included element is canonicalized on its own with the algorithm the timestamp's `ds:CanonicalizationMethod` names — inclusive C14N 1.0 when it names none, as XAdES 7.1.4.3.1 prescribes — and the results are concatenated **in `Include` document order**. Reordering the `Include` elements changes the imprint, which is the point. |
 | Token | Verified by exactly the machinery a signature timestamp uses: the CMS parse, the imprint, the `SignerInfo` signature, the critical `id-kp-timeStamping` requirement, and a TSA path validated at `genTime`. |
@@ -1918,6 +1938,17 @@ or for a TSA certificate.
 says they should is `cert_malformed` (failed). Treating a decoding failure as
 absence would make a corrupt `keyUsage` or `nameConstraints` silently vanish,
 which is the wrong direction for every one of them.
+
+**The two algorithm identifiers must agree.** RFC 5280 section 4.1.1.2
+requires a certificate's outer `signatureAlgorithm` to repeat
+`tbsCertificate.signature`, and one on which they differ is `cert_malformed`
+(failed). Only the inner field is covered by the CA's signature, so a reader
+that verifies under the outer one would be verifying under an algorithm the CA
+never attested to. The comparison is on the OID, with an absent `parameters`
+field and an explicit `NULL` treated as the same statement: RFC 4055 requires
+`NULL` for the RSA family and RFC 5758 requires absence for the ECDSA one, and
+real CAs have emitted both spellings, so anything else must match byte for
+byte.
 
 Not implemented: authority/subject key identifier matching as a path
 hint, certificate policies and `policyConstraints`, `inhibitAnyPolicy`,
@@ -2153,7 +2184,7 @@ is reported in `chain[].revocation.responder_model`.
 | Model | What it requires | Where the authority comes from |
 | --- | --- | --- |
 | `issuer` | The CA that issued the queried certificate signed the response itself. | The CA. |
-| `delegated` | A certificate that same CA issued, naming itself in the `ResponderID`, carrying `id-kp-OCSPSigning` and valid at the validation time, signed it. | The CA's signature over the responder certificate *is* the delegation, so no trust store is needed. |
+| `delegated` | A certificate that same CA issued, naming itself in the `ResponderID`, carrying `id-kp-OCSPSigning` and valid at the response's `producedAt`, signed it. | The CA's signature over the responder certificate *is* the delegation, so no trust store is needed. |
 | `trusted` | The responder carries `id-kp-OCSPSigning` and its own path validates to a **configured trust anchor** — trust store or trusted list — at the response's `producedAt`, under the same path rules and `keyUsage` checks every other chain gets. | The caller's own trust material. |
 
 The third model is not a relaxation of the first two; it is the third thing
@@ -2169,14 +2200,31 @@ vouched for by the caller's own store, through a full path validation with
 `id-kp-OCSPSigning` required on the leaf; a responder that reaches no
 configured anchor authorises nothing. So this can never admit a response whose
 signer the operator had not already chosen to trust, and it is tried **last**,
-so a CA's own word always wins where both apply. The path is validated at
-`producedAt`, the instant the responder asserts it spoke: a certificate that
-had expired by then was not entitled to say anything, and one that expired
-afterwards said it while it still was.
+so a CA's own word always wins where both apply.
+
+Both models that involve a responder certificate ask about it at
+**`producedAt`**, the instant the responder asserts it spoke: the trusted model
+validates the path at that instant, and the delegated model checks the
+responder certificate's own validity there. A certificate that had expired by
+then, or was not yet in force, was not entitled to say anything; one that
+expired afterwards said it while it still was. Asking at the validation time
+instead would discard every archived response whose responder certificate has
+since expired, which is most of them.
 
 `ocsp_responder_trusted` (`info`) is emitted when the third model was used, so
 a reader can tell an answer that rests on the issuing CA from one that rests on
 their own trust store. It reports rather than decides, so it never blocks.
+
+The work one response can ask for is bounded, because the response is an
+untrusted input. A `BasicOCSPResponse` carries an unbounded `certs` field, so
+at most `max_certificates` of them are read and the list is deduplicated by DER
+before anything is verified. The trusted-responder path search is then run at
+most **once per distinct responder public key**: the question that search
+answers is whether the caller's anchors vouch for whoever holds the key that
+signed the response, so two certificates over one key — a responder re-issued
+with a new serial, say — ask it once. Without either bound, a response packed
+with re-issues of one responder certificate that no anchor vouches for drove
+one full path search per certificate.
 
 #### Which answer wins
 
@@ -2273,7 +2321,17 @@ data stated. The path-level summary is one check: `revocation_ok` when every
 non-anchor certificate has fresh, verified, non-revoked status; `cert_revoked`
 when any was revoked at or before the validation time; and otherwise the worst
 of `cert_revoked_after_validation_time`, `revocation_data_invalid`,
-`revocation_data_stale`, and `revocation_status_unknown`.
+`revocation_data_stale`, `revocation_status_unknown_by_responder`, and
+`revocation_status_unknown`.
+
+**An OCSP `unknown` is not stale data.** RFC 6960 section 2.2 gives `unknown`
+its own meaning: the responder does not know about this certificate. That is a
+well-formed, authorised, current answer that happens to answer nothing, so it
+is reported as `revocation_status_unknown_by_responder` (`unknown`) rather than
+as `revocation_data_stale`. The distinction is what a reader has to act on:
+staleness is fixed by fetching something newer, while a responder that does not
+serve this certificate will say the same thing however often it is asked. It
+blocks like every other `unknown`.
 
 **Naming what is missing.** The summary message names *which* certificate is
 the problem — by role (`the end-entity certificate`, `the intermediate CA
@@ -2812,7 +2870,7 @@ verify), and `revocation_not_checked` (the caller switched revocation off).
 | `signature_algorithm_allowed` | `passed` | `ds:SignatureMethod` is inside the allowlist. |
 | `digest_algorithm_allowed` | `passed` | Every `ds:DigestMethod` is inside the allowlist. |
 | `algorithm_rejected` | `failed` | A signature method, a digest method, or a signing key is outside the pinned policy. May appear more than once. |
-| `algorithm_legacy_allowed` | `unknown` | SHA-1 was admitted because `--allow-legacy-algorithms` was given. Blocking: caps the verdict at `indeterminate`. May appear twice, once for the signature method and once for the digests. |
+| `algorithm_legacy_allowed` | `unknown` | SHA-1 was admitted because `--allow-legacy-algorithms` was given. Blocking: caps the verdict at `indeterminate`. May appear more than once: for the signature method, for the reference digests, and inside a timestamp token for its message imprint and its `SignerInfo` digest. |
 | `transforms_allowed` | `passed` | Every transform is inside the allowlist. |
 | `transform_not_allowed` | `failed` | A transform is outside it; XSLT and XPath always are. |
 | `references_same_document` | `passed` | Every `ds:Reference/@URI` is `""` or `#id`. |
@@ -2840,7 +2898,7 @@ verify), and `revocation_not_checked` (the caller switched revocation off).
 | `signing_certificate_available` | `passed` | A usable certificate was found in `ds:KeyInfo`. |
 | `signing_certificate_missing` | `failed` | None was. |
 | `signing_time_present` | `info` | Reports whether a claimed `xades:SigningTime` was read. Informational: the claim is unauthenticated whether it is there or not, so its presence decides nothing. |
-| `cert_malformed` | `failed` | A certificate in the path could not be re-encoded or its signature is not a whole number of bytes. |
+| `cert_malformed` | `failed` | A certificate in the path could not be re-encoded, its signature is not a whole number of bytes, an extension's bytes do not decode as its OID says they should, or its outer `signatureAlgorithm` differs from `tbsCertificate.signature` (RFC 5280 4.1.1.2). |
 | `cert_path_ok` | `passed` | A path to a configured anchor was built and every rule above holds. |
 | `cert_path_unknown` | `unknown` | No trust anchors were configured. |
 | `cert_path_untrusted` | `failed` | No path to a configured anchor exists. The message says how many candidates were considered and names the issuer CN of the highest certificate reached, which is the public CA name a caller needs to add to the store. |
@@ -2861,7 +2919,8 @@ verify), and `revocation_not_checked` (the caller switched revocation off).
 | `cert_revoked` | `failed` | A certificate in the path was revoked at or before the validation time. `certificateHold` counts. |
 | `cert_revoked_after_validation_time` | `info` / `unknown` | A certificate was revoked *after* the instant being validated, so that revocation did not apply then. `info` when the validation time was **proven** by a fully verified signature timestamp, `unknown` when it was merely asserted by `--at` or the clock. Never `passed`: the certificate really was revoked, and the message gives the time and reason. |
 | `revocation_status_unknown` | `unknown` | No usable revocation data covers a certificate in the path, or no path was built to ask about. Blocking. A failed `--online` fetch reaches a verdict through this check and not on its own; see `online_fetch_failed`. |
-| `revocation_data_stale` | `unknown` | The data's `nextUpdate` had passed at the validation time, or it carries none and its `thisUpdate` precedes it. Also the OCSP `unknown` status. |
+| `revocation_data_stale` | `unknown` | The data's `nextUpdate` had passed at the validation time, or it carries none and its `thisUpdate` precedes it. |
+| `revocation_status_unknown_by_responder` | `unknown` | An authorised OCSP responder answered with the RFC 6960 `unknown` status: it does not know about this certificate, so it neither confirms nor denies a revocation. Distinct from `revocation_data_stale`, because fetching newer data from the same responder would not help. Blocking. |
 | `revocation_data_invalid` | `unknown` | Every source that covered a certificate was found but could not be used: signed by someone unauthorised, a delta or indirect CRL, an unimplemented `issuingDistributionPoint` form, a critical CRL extension this build does not implement, an OCSP response whose status is not `successful`, or an item larger than `MAX_REVOCATION_ITEM_BYTES`, whose size and limit the message names. The message names the cause. Emitted only after every tier has been tried. `unknown`, not `failed`: unusable data means the tool could not answer. |
 | `online_fetch_failed` | `info` | Under `--online`, one fetch did not produce a usable artefact. The message names the URL and the failure class: `timeout`, `http status <code>`, `too large` with the limit, `redirect`, `invalid`, `transport`, `destination_refused` with the rule that refused the destination before any socket was opened (`redirect_downgrade` for a redirect that would leave `https` for `http`, `credentials_require_https` for a request carrying credentials over a scheme that is not `https`, and the address and scheme rules), or `cache_collision` when `--online-cache` already held a different file under an artefact's name and nothing was overwritten. Informational: whether the missing data mattered is answered by the chain that needed it, through `revocation_status_unknown`, which blocks. |
 | `revocation_sources_disagree` | `info` | The usable revocation sources for one certificate did not say the same thing: one recorded a revocation and another reported it as not revoked. The message names both sides and which chain it is about. Reports rather than decides — the disagreement is already settled by [Which answer wins](#which-answer-wins), where a revocation beats a `good` from any other source — so it never blocks. |

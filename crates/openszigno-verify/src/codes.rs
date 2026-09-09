@@ -179,6 +179,7 @@ check_codes! {
     CertRevoked => "cert_revoked",
     CertRevokedAfterValidationTime => "cert_revoked_after_validation_time",
     RevocationStatusUnknown => "revocation_status_unknown",
+    RevocationStatusUnknownByResponder => "revocation_status_unknown_by_responder",
     RevocationDataStale => "revocation_data_stale",
     RevocationDataInvalid => "revocation_data_invalid",
     OcspResponderTrusted => "ocsp_responder_trusted",
@@ -285,6 +286,7 @@ impl CheckCode {
                 | Self::CertRevoked
                 | Self::CertRevokedAfterValidationTime
                 | Self::RevocationStatusUnknown
+                | Self::RevocationStatusUnknownByResponder
                 | Self::RevocationDataStale
                 | Self::RevocationDataInvalid
                 | Self::OcspResponderTrusted
