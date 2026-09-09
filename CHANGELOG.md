@@ -40,7 +40,10 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
   `FILE_FLAG_OPEN_REPARSE_POINT` on Windows, its type and size come from an
   `fstat` on that descriptor, and the bytes are read through a cap that stops
   one byte past the limit. Every code, message and cap is what it was; a file
-  of exactly the cap is still read. See
+  of exactly the cap is still read. An input that is not a regular file is
+  still `io_error` (exit 3), and now reports `input.bytes` as `null` on every
+  operating system rather than a directory's own length, which meant different
+  things on different platforms and was never a payload size. See
   [Bounded file reads](docs/architecture.md#bounded-file-reads).
 - Strings a remote Cloud Signature Consortium service chose are sanitised
   before they reach human output, an error message or the JSON envelope:

@@ -555,6 +555,12 @@ and `MAX_REVOCATION_ITEM_BYTES` (16 MiB) for one CRL or OCSP response. Each
 caller words its own refusal, with the code that path already used, and no
 message names the file, because the path may be private.
 
+An input that is not a regular file, a directory most often, is `io_error`
+(exit 3) with `input.bytes` reported as `null` on every operating system. A
+directory has a length of its own on some filesystems and none on others, and
+it is a byte count of nothing the caller asked for either way, so the envelope
+says it does not know rather than repeating it.
+
 ### Reading from stdin
 
 `FILE` may be `-`, which reads the dossier from standard input instead of from
@@ -653,7 +659,7 @@ The envelope fields are always present:
 | `schema_version` | number | Currently `1`. |
 | `ok` | boolean | `false` on any failure. |
 | `command` | string | `inspect`, `list`, `extract`, `validate-structure`, `verify`, `create`, `sign`, or `usage`. `skill` never appears: it emits no envelope. |
-| `input` | object | `format` is `"microsec-es3"` or `null`; `bytes` is the input size or `null`. |
+| `input` | object | `format` is `"microsec-es3"` or `null`; `bytes` is the input size, or `null` when it is not known, which includes an input that is not a regular file and a stream that was not read to its end. |
 | `data` | object or null | Command-specific; `null` on failure. |
 | `warnings` | array | Objects with stable `code` and human `message`. |
 | `errors` | array | Objects with stable `code` and human `message`. |

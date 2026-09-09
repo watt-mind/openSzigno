@@ -95,7 +95,7 @@ fn read_directory(
         }
         let bytes = match read_bounded_file(&path, MAX_FILE_BYTES) {
             Ok(bytes) => bytes,
-            Err(BoundedReadError::NotRegular { .. }) => continue,
+            Err(BoundedReadError::NotRegular) => continue,
             Err(BoundedReadError::TooLarge { declared }) => return Err(too_large(declared)),
             Err(BoundedReadError::Inspect) => {
                 return Err("a revocation store file could not be inspected".to_owned());

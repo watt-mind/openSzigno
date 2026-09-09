@@ -95,7 +95,7 @@ fn read_directory(directory: &Path) -> Result<Vec<Vec<u8>>, String> {
         }
         let bytes = match read_bounded_file(&path, MAX_FILE_BYTES) {
             Ok(bytes) => bytes,
-            Err(BoundedReadError::NotRegular { .. }) => continue,
+            Err(BoundedReadError::NotRegular) => continue,
             Err(BoundedReadError::TooLarge { .. }) => {
                 return Err("a trust store file is too large".to_owned());
             }
@@ -166,7 +166,7 @@ fn read_bounded(path: &Path, limit: u64) -> Result<Vec<u8>, String> {
     read_bounded_file(path, limit).map_err(|error| {
         match error {
             BoundedReadError::Inspect => "a trust material file could not be inspected",
-            BoundedReadError::NotRegular { .. } => "a trust material path is not a regular file",
+            BoundedReadError::NotRegular => "a trust material path is not a regular file",
             BoundedReadError::TooLarge { .. } => "a trust material file is too large",
             BoundedReadError::Read => "a trust material file could not be read",
         }

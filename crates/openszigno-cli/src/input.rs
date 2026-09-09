@@ -36,13 +36,9 @@ fn read_input(path: &Path, limits: &Limits) -> Result<Vec<u8>, Failure> {
                 BoundedReadError::Inspect => {
                     failure(unknown(), CliError::io("could not inspect the input file"))
                 }
-                BoundedReadError::NotRegular { declared } => failure(
-                    InputInfo {
-                        format: None,
-                        bytes: declared,
-                    },
-                    CliError::io("input is not a regular file"),
-                ),
+                BoundedReadError::NotRegular => {
+                    failure(unknown(), CliError::io("input is not a regular file"))
+                }
                 BoundedReadError::TooLarge { declared } => failure(
                     InputInfo {
                         format: None,
@@ -80,10 +76,10 @@ pub(crate) enum BoundedReadError {
     /// The path could not be opened or its type could not be established.
     Inspect,
     /// The open descriptor is not a regular file: a directory, a device, or a
-    /// symlink, which is refused rather than followed. `declared` is the size
-    /// the descriptor reported, and `None` when the open itself refused the
-    /// path and there was never a descriptor to ask.
-    NotRegular { declared: Option<u64> },
+    /// symlink, which is refused rather than followed. No size is carried:
+    /// a directory's own length is not a byte count of anything a caller
+    /// asked for, and what it would report differs between platforms.
+    NotRegular,
     /// More bytes than the cap allows. `declared` is the size the open
     /// descriptor reported when that is what refused it, and `None` when the
     /// file grew past the cap while it was being read, where the true size is
@@ -126,9 +122,7 @@ pub(crate) fn read_bounded_file_following_links(
 fn read_bounded(mut file: File, limit: u64) -> Result<Vec<u8>, BoundedReadError> {
     let metadata = file.metadata().map_err(|_| BoundedReadError::Inspect)?;
     if !metadata.is_file() {
-        return Err(BoundedReadError::NotRegular {
-            declared: Some(metadata.len()),
-        });
+        return Err(BoundedReadError::NotRegular);
     }
     let declared = metadata.len();
     if declared > limit {
@@ -166,7 +160,7 @@ fn open_without_following(path: &Path) -> Result<File, BoundedReadError> {
         Mode::empty(),
     ) {
         Ok(descriptor) => Ok(File::from(descriptor)),
-        Err(Errno::LOOP | Errno::NOTDIR) => Err(BoundedReadError::NotRegular { declared: None }),
+        Err(Errno::LOOP | Errno::NOTDIR) => Err(BoundedReadError::NotRegular),
         Err(_) => Err(BoundedReadError::Inspect),
     }
 }
@@ -285,7 +279,7 @@ mod tests {
 
         assert_eq!(
             read_bounded_file(&link, 1024),
-            Err(BoundedReadError::NotRegular { declared: None })
+            Err(BoundedReadError::NotRegular)
         );
         // The same link is readable when links are deliberately followed,
         // which is what the dossier path does and nothing else does.
@@ -302,7 +296,7 @@ mod tests {
             read_bounded_file(directory.path(), 1024).expect_err("a directory is not a file");
         assert!(matches!(
             error,
-            BoundedReadError::NotRegular { .. } | BoundedReadError::Inspect
+            BoundedReadError::NotRegular | BoundedReadError::Inspect
         ));
     }
 
