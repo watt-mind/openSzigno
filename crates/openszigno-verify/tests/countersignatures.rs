@@ -18,8 +18,8 @@ mod common;
 
 use common::{
     C14N_EXC, CertSpec, CounterSignatureSpec, CrlSpec, DossierSpec, ENVELOPED_URI,
-    ExtraDocumentSpec, RefSpec, SigSpec, SigningCertificateSpec, TestKey, TimestampSpec, build,
-    build_crl, countersignature, document_signature, dossier_signature,
+    ExtraDocumentSpec, RefSpec, SigSpec, SigningCertificateSpec, TestKey, TimestampSpec, XADES_NS,
+    build, build_crl, countersignature, document_signature, dossier_signature,
     extended_key_usage_extension, issued_by, keys, rsa_key, self_signed, tamper,
 };
 use openszigno_verify::codes::{CheckCode, CheckStatus};
@@ -833,4 +833,78 @@ fn the_json_carries_the_placement_role_and_parent() {
     assert_eq!(second["role"], "countersignature");
     assert_eq!(second["parent_signature_index"], 0);
     assert_eq!(second["countersigns"], serde_json::json!([0]));
+}
+
+/// A countersignature carries qualifying properties of its own, nested inside
+/// the countersigned signature's *unsigned* properties. They belong to the
+/// nested signature, and neither signature may be evaluated against the
+/// other's: each reads the properties its own references cover.
+#[test]
+fn a_nested_signatures_properties_are_never_the_outer_signatures() {
+    let pki = pki();
+    let mut parent = countersigned_document_signature(&pki);
+    parent.signing_time = Some("2020-05-01T00:00:00Z".to_owned());
+    let mut counter = enveloped_countersignature(&pki);
+    counter.signing_time = Some("2020-05-02T00:00:00Z".to_owned());
+    // A decoy object inside the *countersignature*, to make sure the choice is
+    // made per signature and the outer one never sees it.
+    counter.decoy_objects = vec![format!(
+        "<ds:Object Id=\"decoy-csig\"><xades:QualifyingProperties xmlns:xades=\"{XADES_NS}\" Target=\"#sig-csig\">\
+<xades:SignedProperties Id=\"sp-decoy-csig\"><xades:SignedSignatureProperties>\
+<xades:SigningTime>1999-12-31T23:59:59Z</xades:SigningTime>\
+</xades:SignedSignatureProperties></xades:SignedProperties></xades:QualifyingProperties></ds:Object>"
+    )];
+    parent.countersignatures = vec![CounterSignatureSpec::new(counter)];
+    let spec = DossierSpec {
+        document_signature: Some(parent),
+        ..Default::default()
+    };
+    let report = run_trusted(
+        &build(
+            &spec,
+            &[("doc", &pki.signer_key), ("csig", &pki.counter_key)],
+        ),
+        &pki,
+    );
+
+    assert_eq!(report.signatures.len(), 2);
+    // Each signature reports the signing time from its own covered properties.
+    assert_eq!(
+        report.signatures[0].xades.signing_time.as_deref(),
+        Some("2020-05-01T00:00:00Z")
+    );
+    assert_eq!(
+        report.signatures[1].xades.signing_time.as_deref(),
+        Some("2020-05-02T00:00:00Z")
+    );
+    // The nested signature's own qualifying properties are not a second set
+    // for the outer signature, and the decoy inside it is not the outer
+    // signature's business either.
+    assert!(!signature_has(
+        &report,
+        0,
+        CheckCode::XadesExtraQualifyingProperties
+    ));
+    assert!(signature_has(
+        &report,
+        1,
+        CheckCode::XadesExtraQualifyingProperties
+    ));
+    // Each still binds its own signing certificate, and both stay valid.
+    assert_eq!(
+        report.signatures[0]
+            .signing_certificate
+            .as_ref()
+            .and_then(|summary| summary.subject_cn.clone()),
+        Some("openSzigno Test Signer".to_owned())
+    );
+    assert_eq!(
+        report.signatures[1]
+            .signing_certificate
+            .as_ref()
+            .and_then(|summary| summary.subject_cn.clone()),
+        Some("openSzigno Test Countersigner".to_owned())
+    );
+    assert_eq!(report.signatures[0].verdict, Verdict::Valid);
+    assert_eq!(report.signatures[1].verdict, Verdict::Valid);
 }
