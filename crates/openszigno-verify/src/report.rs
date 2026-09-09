@@ -7,7 +7,7 @@ use crate::codes::{Check, CheckCode, CheckStatus, Verdict};
 use crate::policy::{PolicyReport, VerifyLimits};
 use crate::trust::{TimeSource, UnixTime, parse_rfc3339};
 use crate::tsa::TimestampReport;
-use crate::xades::{SignaturePolicy, SigningCertificateForm};
+use crate::xades::{SignaturePolicy, SignaturePolicyDigest, SigningCertificateForm};
 
 /// Where a signature sits in the container, which decides which elements it
 /// must cover.
@@ -205,6 +205,20 @@ pub struct XadesReport {
     pub signature_policy: Option<SignaturePolicy>,
     /// The explicit policy's identifier, sanitised. No policy is processed.
     pub signature_policy_id: Option<String>,
+    /// The digest the explicit policy declares for its own policy document,
+    /// when it declares one. Reported so a reader can check the policy by
+    /// hand; nothing here is fetched or compared.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signature_policy_digest: Option<SignaturePolicyDigest>,
+    /// The `xades:ClaimedRole` values of `SignerRole`/`SignerRoleV2`, as
+    /// claimed. Hungarian AVDH signatures state the authenticated citizen
+    /// here. Reported, never validated, and left out when there are none.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub claimed_roles: Vec<String>,
+    /// The `xades:CommitmentTypeIndication` identifiers, as claimed. Reported,
+    /// never applied, and left out when there are none.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub commitment_type_ids: Vec<String>,
     pub signature_timestamps: usize,
     pub archive_timestamps: usize,
     /// Qualifying properties present in the signature that this build does not

@@ -1,14 +1,14 @@
 ---
 name: openszigno
 description: >-
-  Inspect, list, extract, decrypt, verify, create and sign Microsec e-Szigno
-  dossiers
+  Inspect, list, extract, decrypt, verify, create, sign and timestamp
+  Microsec e-Szigno dossiers
   (.es3, .dosszie, "e-akta") with the openszigno CLI. Use whenever a task
   involves an .es3 file, a Hungarian court or company-registry e-akta, a
   signed or encrypted e-Szigno dossier, XAdES signature or timestamp
   verification of one, or getting the documents out of one.
 license: MIT
-compatibility: Requires the openszigno CLI, 0.8.0 or later, on PATH.
+compatibility: Requires the openszigno CLI, 0.9.0 or later, on PATH.
 metadata:
   author: watt-mind
   version: "1.0"
@@ -48,7 +48,7 @@ to, never overwrites a file, and never takes key material from argv.
 ## The boundary, stated once
 
 `verify` is the only command that checks anything cryptographic. Every other
-command, `create` and `sign` included, verifies nothing.
+command, `create`, `sign` and `timestamp` included, verifies nothing.
 
 - **A `valid` verdict** means every check passed at the stated validation
   time against the trust material *you* supplied. Report it in those words.
@@ -58,10 +58,12 @@ command, `create` and `sign` included, verifies nothing.
   data.** Without a `--tsa` token a signature is capped at `indeterminate`
   by `signature_timestamp_absent`, and without `--revocation-store` or
   `--online` by `revocation_status_unknown`. Correct, not a failure.
-- **Creating and signing assert nothing.** `create` writes an unsigned
-  dossier and warns `created_dossier_unsigned`; `sign` writes a signature
-  and checks none of it, warning `signed_dossier_unverified`. Only `verify`
-  on the result says whether it holds.
+- **Creating, signing and timestamping assert nothing.** `create` writes an
+  unsigned dossier and warns `created_dossier_unsigned`; `sign` writes a
+  signature and checks none of it, warning `signed_dossier_unverified`;
+  `timestamp` embeds a token and checks none of it, warning
+  `timestamped_dossier_unverified`. Only `verify` on the result says whether
+  any of it holds.
 - **Nothing here produces a qualified electronic signature.** That needs a
   key on a qualified signature creation device (QSCD), which this process
   cannot hold; even `sign --csc` leaves that claim to the provider. Read
@@ -288,22 +290,63 @@ Consortium API v2 service, so a certificate held by a remote signature
 creation device, or in an EUDI Wallet, signs the dossier. Only the digest of
 the canonicalised `ds:SignedInfo` leaves the machine.
 
-- The configuration holds `base_url`, `client_id` and a bearer token the
-  user obtained out of band (`access_token` or `access_token_file`),
-  optionally `credential_id` and a `pin_file`. Do not read it to the user.
+- The configuration holds `base_url`, `client_id` and a bearer token
+  (`access_token` or `access_token_file`), optionally `credential_id`, a
+  `pin_file`, and the login half: `redirect_uri`, `client_secret_file`,
+  `authorization_url` and `token_url`. Do not read it to the user.
+- **Log in before signing remotely.** `openszigno csc login CONFIG.toml
+  [--credential ID] [--open] --json` runs the OAuth 2.0 authorization-code
+  round with PKCE, prints one URL for the user to open, waits for the
+  browser on a loopback listener, and writes the token, `chmod 600`, to the
+  file `access_token_file` names. Print that URL to the user verbatim and
+  wait; the run finishes on its own once they have finished. It reports
+  `token_file`, `expires_at`, `refresh_token_stored` and, with
+  `--credential`, whether signing will need a second interactive round. It
+  prints no token, and neither may you.
+- A stored token that has expired is refreshed by the next `sign --csc`
+  automatically (warning `csc_token_refreshed`). `csc_token_unusable`
+  (exit 4) means there was nothing to refresh it with: run `csc login`
+  again. `csc_login_failed` (exit 5) and `csc_state_mismatch` (exit 5) mean
+  the round did not complete; report them and do not retry silently.
 - `--csc` is mutually exclusive with `--key`, `--cert`, `--passphrase-file`
   and `--algorithm`: the credential's own key decides the algorithm.
   `--chain` is not needed either, because the chain the service publishes is
   written into `xades:CertificateValues` for you.
 - `csc_credential_ambiguous` (exit 4): several credentials, none named. The
   message lists them, so ask which one and pass `--csc-credential`.
-- `csc_authorization_required` (exit 4): the credential needs a browser
-  round this build does not run. Report it and stop.
+- An `oauth2`-mode credential needs a second browser round bound to the
+  hashes being signed, and `sign` runs it itself: it prints another URL and
+  waits. `csc_authorization_required` (exit 4) is what `--no-interactive`
+  reports instead; report it and stop rather than retrying without the flag
+  unless the user is there to complete the round.
 - `csc_signature_invalid` (exit 5): the service returned a signature that
   does not verify against its own certificate, and nothing was written.
   Report it as a service failure, never retry silently.
 - Such a signature reports `"signer": "csc"` in `data.signatures[]`, with
   `credential_id` and `csc_specs`.
+
+### 7. Timestamp a dossier
+
+Only when the user asks for a dossier to be *timestamped*. No key, no
+certificate and no passphrase are involved: a container timestamp is one RFC
+3161 token over the container, and `--tsa URL` is required.
+
+- `--scope dossier` (the default) writes one `es:TimeStamp` over the whole
+  dossier; `--scope document` writes one inside each document `--document`
+  selects. Order matters when both are wanted: a dossier-level timestamp
+  covers `es:Documents`, so once one exists nothing may be added inside a
+  document. Write the document timestamps first.
+- Refusals, all before a socket is opened and with nothing written:
+  `timestamp_exists` (exit 4) when that placement already carries one,
+  `document_already_signed` (exit 4) when something already in the file
+  covers the insertion point, `document_not_found` (exit 4) for a selector
+  that matches nothing. A request the authority would not answer is
+  `tsa_failed` (exit 5).
+- `data.timestamps[]` reports `id`, `scope`, `document_index` and `gen_time`,
+  the time the token claims. Nothing in the run checked it: verify the result
+  with the user's own trust material and report what `verify` says, which is
+  `dossier_timestamp_verified` or `document_timestamp_verified` when the
+  token checks out, `dossier_timestamp_invalid` when it contradicts the file.
 
 ## Reporting to the user
 
@@ -339,12 +382,18 @@ openszigno sign IN.es3 --output OUT.es3 --key K [--cert C] \
   [--passphrase-file P] [--chain CA] [--scope document|dossier] \
   [--document SELECTOR] [--tsa URL --tsa-cert CA] [--signing-time RFC3339] \
   [--algorithm NAME] --json
+openszigno csc login csc.toml [--credential ID] [--open] \
+  [--online-allow-private] [--online-proxy URL] --json
 openszigno sign IN.es3 --output OUT.es3 --csc csc.toml [--csc-credential ID] \
-  [--tsa URL --tsa-cert CA] [--online-allow-private] [--online-proxy URL] --json
+  [--tsa URL --tsa-cert CA] [--no-interactive] [--online-allow-private] \
+  [--online-proxy URL] --json
+openszigno timestamp IN.es3 --output OUT.es3 --tsa URL \
+  [--scope dossier|document] [--document SELECTOR] [--tsa-cert CA] \
+  [--online-allow-private] [--online-proxy URL] --json
 openszigno skill
 ```
 
-Every command except `create` and `skill` takes `-` in place of `FILE` and
-reads from stdin, and every command that reads a dossier accepts
+Every command except `create`, `csc login` and `skill` takes `-` in place
+of `FILE` and reads from stdin, and every command that reads a dossier accepts
 `--allow-namespace URI`. Full reference: `docs/architecture.md` and
 `docs/trust.md` in the openSzigno repository.

@@ -48,6 +48,7 @@
 mod parse;
 mod qualified;
 mod services;
+mod signer;
 
 pub use parse::{TrustList, load};
 pub(crate) use qualified::qualification;
@@ -67,6 +68,7 @@ use crate::c14n::{C14nAlgorithm, C14nBackend, NodeSet};
 use crate::certs::{CertificateSource, ParsedCertificate};
 use crate::codes::{Check, CheckCode};
 use crate::policy::{Digest, SignatureScheme, Transform};
+use crate::references::ReferenceScope;
 
 /// The largest trusted list this build will parse.
 pub const MAX_TRUST_LIST_BYTES: usize = 32 * 1024 * 1024;
@@ -88,9 +90,20 @@ pub(super) fn verify_list_signature(
     root: Node<'_, '_>,
     signers: &[Vec<u8>],
     backend: &dyn C14nBackend,
-) -> Check {
-    let invalid = |message: &str| Check::failed(CheckCode::TrustListSignatureInvalid, message);
+) -> Vec<Check> {
+    match checked_list_signature(source, root, signers, backend) {
+        Ok(checks) => checks,
+        Err(message) => vec![Check::failed(CheckCode::TrustListSignatureInvalid, message)],
+    }
+}
 
+/// The signature check itself, with every refusal as one `Err` message.
+fn checked_list_signature(
+    source: &XmlSource,
+    root: Node<'_, '_>,
+    signers: &[Vec<u8>],
+    backend: &dyn C14nBackend,
+) -> Result<Vec<Check>, String> {
     // Any one of the supplied certificates verifying is enough: a scheme
     // operator may publish several, and a verifier cannot know which of them
     // signed the copy in hand.
@@ -99,7 +112,7 @@ pub(super) fn verify_list_signature(
         .filter_map(|der| ParsedCertificate::from_der(der, CertificateSource::TrustStore))
         .collect();
     if candidates.is_empty() {
-        return invalid("no supplied trust-list signer is a usable X.509 certificate");
+        return Err("no supplied trust-list signer is a usable X.509 certificate".to_owned());
     }
     let signatures: Vec<Node<'_, '_>> = root
         .children()
@@ -110,21 +123,24 @@ pub(super) fn verify_list_signature(
         })
         .collect();
     let [signature] = signatures.as_slice() else {
-        return invalid("the trusted list does not carry exactly one ds:Signature of its own");
+        return Err(
+            "the trusted list does not carry exactly one ds:Signature of its own".to_owned(),
+        );
     };
     let Some(signed_info) = ds_child(*signature, "SignedInfo") else {
-        return invalid("the trusted list's signature has no ds:SignedInfo");
+        return Err("the trusted list's signature has no ds:SignedInfo".to_owned());
     };
     let Some(signature_value) = ds_child(*signature, "SignatureValue") else {
-        return invalid("the trusted list's signature has no ds:SignatureValue");
+        return Err("the trusted list's signature has no ds:SignatureValue".to_owned());
     };
 
     let Some(c14n) = ds_child(signed_info, "CanonicalizationMethod")
         .and_then(|node| node.attribute("Algorithm"))
         .and_then(C14nAlgorithm::from_uri)
     else {
-        return invalid(
-            "the trusted list's signature names a canonicalization method outside the allowlist",
+        return Err(
+            "the trusted list's signature names a canonicalization method outside the allowlist"
+                .to_owned(),
         );
     };
     let Some(scheme) = ds_child(signed_info, "SignatureMethod")
@@ -132,8 +148,9 @@ pub(super) fn verify_list_signature(
         .and_then(SignatureScheme::from_signature_uri)
         .filter(|scheme| !scheme.is_legacy())
     else {
-        return invalid(
-            "the trusted list's signature names a signature method outside the allowlist",
+        return Err(
+            "the trusted list's signature names a signature method outside the allowlist"
+                .to_owned(),
         );
     };
 
@@ -148,18 +165,19 @@ pub(super) fn verify_list_signature(
         })
         .collect();
     if references.is_empty() {
-        return invalid("the trusted list's ds:SignedInfo carries no ds:Reference");
+        return Err("the trusted list's ds:SignedInfo carries no ds:Reference".to_owned());
     }
     let mut covers_document = false;
+    let mut scopes: Vec<ReferenceScope> = Vec::with_capacity(references.len());
     for reference in references {
-        match check_reference(source, root, *signature, reference, backend) {
-            Ok(whole_document) => covers_document |= whole_document,
-            Err(message) => return invalid(&message),
-        }
+        let (covers_list, scope) = check_reference(source, root, *signature, reference, backend)?;
+        covers_document |= covers_list;
+        scopes.push(scope);
     }
     if !covers_document {
-        return invalid(
-            "the trusted list's signature does not cover the whole list; a partial reference set would leave the service entries unprotected",
+        return Err(
+            "the trusted list's signature does not cover the whole list; a partial reference set would leave the service entries unprotected"
+                .to_owned(),
         );
     }
 
@@ -169,42 +187,57 @@ pub(super) fn verify_list_signature(
         c14n,
         &[],
     ) else {
-        return invalid("the trusted list's ds:SignedInfo could not be canonicalized");
+        return Err("the trusted list's ds:SignedInfo could not be canonicalized".to_owned());
     };
     let Some(value) = decode_base64(&text(signature_value)) else {
-        return invalid("the trusted list's ds:SignatureValue is not Base64");
+        return Err("the trusted list's ds:SignatureValue is not Base64".to_owned());
     };
-    let verified = candidates.iter().any(|candidate| {
+    let Some(verified) = candidates.iter().find(|candidate| {
         crate::certs::verify_with_spki(&candidate.certificate, scheme, &canonical, &value, false)
             .is_ok()
-    });
-    if verified {
-        return Check::passed(
-            CheckCode::TrustListSignatureOk,
-            format!(
-                "the trusted list's own XMLDSig signature verified against one of {} supplied signer certificate(s)",
-                candidates.len()
-            ),
+    }) else {
+        return Err(
+            "the trusted list's own XMLDSig signature did not verify against any supplied signer certificate"
+                .to_owned(),
         );
-    }
-    invalid(
-        "the trusted list's own XMLDSig signature did not verify against any supplied signer certificate",
-    )
+    };
+
+    let mut checks = vec![Check::passed(
+        CheckCode::TrustListSignatureOk,
+        format!(
+            "the trusted list's own XMLDSig signature verified against one of {} supplied signer certificate(s)",
+            candidates.len()
+        ),
+    )];
+    // Which certificate verified is now known, so the list's own signed
+    // statement about who signed it, and the clause 5.7.1 restrictions on that
+    // certificate, can both be evaluated against it.
+    checks.extend(signer::signer_checks(root, *signature, &scopes, verified));
+    Ok(checks)
 }
 
 /// Verify one reference of the trusted list's signature.
 ///
-/// Returns whether this reference covers the whole document.
+/// Returns whether this reference covers the whole list, and the effective
+/// node set it digests, which is what decides whether the signature covers the
+/// XAdES signed properties.
+///
+/// TS 119 612 annex B.1.0 rule 2 asks for "a `ds:Reference` element with the
+/// URI attribute set to a value referencing the `TrustServiceStatusList`
+/// element enveloping the digital signature itself", which both the empty URI
+/// and a same-document `#Id` naming the list element satisfy. Both live EU
+/// lists write the empty URI, but a list that names the element by its `Id` is
+/// covering exactly as much, so it counts too.
 fn check_reference(
     source: &XmlSource,
     root: Node<'_, '_>,
     signature: Node<'_, '_>,
     reference: Node<'_, '_>,
     backend: &dyn C14nBackend,
-) -> Result<bool, String> {
+) -> Result<(bool, ReferenceScope), String> {
     let uri = reference.attribute("URI").unwrap_or("");
-    let whole_document = uri.is_empty();
-    let apex = if whole_document {
+    let empty_uri = uri.is_empty();
+    let apex = if empty_uri {
         root.parent().unwrap_or(root)
     } else {
         let id = uri
@@ -223,8 +256,9 @@ fn check_reference(
         }
         found
     };
+    let covers_list = empty_uri || apex == root;
 
-    let mut set = if whole_document {
+    let mut set = if empty_uri {
         NodeSet::document(apex)
     } else {
         NodeSet::subtree(apex)
@@ -256,7 +290,7 @@ fn check_reference(
             }
         }
     }
-    if whole_document && !enveloped {
+    if covers_list && !enveloped {
         return Err(
             "the trusted list's signature covers the whole document without the enveloped-signature transform, which cannot verify"
                 .to_owned(),
@@ -286,5 +320,6 @@ fn check_reference(
     if computed != expected {
         return Err("a reference digest in the trusted list does not match".to_owned());
     }
-    Ok(whole_document)
+    let scope = ReferenceScope::subtree(apex, enveloped.then_some(signature));
+    Ok((covers_list, scope))
 }

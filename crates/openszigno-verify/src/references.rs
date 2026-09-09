@@ -58,6 +58,20 @@ pub struct ReferenceScope {
 }
 
 impl ReferenceScope {
+    /// The node set of one reference resolved outside the dossier pipeline:
+    /// everything under `apex`, minus the subtree `excluded` names.
+    ///
+    /// The trusted list's own signature resolves and digests its references in
+    /// `trustlist`, where a `Reference` value never exists, but the properties
+    /// that signature covers are decided by the same rule as everywhere else.
+    pub(crate) fn subtree(apex: Node<'_, '_>, excluded: Option<Node<'_, '_>>) -> Self {
+        Self {
+            apex: Some(apex.id()),
+            excluded: excluded.map(|node| node.id()).into_iter().collect(),
+            octets: false,
+        }
+    }
+
     /// A scope that covers nothing at all.
     pub const fn nothing() -> Self {
         Self {

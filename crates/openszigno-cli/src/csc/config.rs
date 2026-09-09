@@ -14,9 +14,10 @@
 //! | :--- | :--- |
 //! | `base_url` | Required. The CSC API base, ending in `/csc/v2`. |
 //! | `client_id` | Required. The OAuth 2.0 client the token was issued to. |
-//! | `client_secret`, `client_secret_file` | Optional, and unused in this round: they belong to the interactive `csc login` flow. |
-//! | `redirect_uri` | Optional, likewise reserved. Must be a loopback URI. |
-//! | `access_token`, `access_token_file` | One of the two is required: the bearer token for `scope=service`, obtained out of band. |
+//! | `client_secret`, `client_secret_file` | Optional. The confidential client's secret, sent only in a token request body or as HTTP Basic credentials. |
+//! | `redirect_uri` | Optional. Must be a loopback URI; its path and, when it names one, its port are what `csc login` binds and sends. |
+//! | `authorization_url`, `token_url` | Optional. The OAuth 2.0 endpoints `csc login` uses; without them the ones the service's `info` publishes under `oauth2` are used. |
+//! | `access_token`, `access_token_file` | The bearer token for `scope=service`. `sign --csc` requires one; `csc login` writes it into `access_token_file`. |
 //! | `credential_id` | Optional. `--csc-credential` overrides it. |
 //! | `pin_file`, `otp_file` | Optional. Read only for an `explicit`-mode credential. |
 //!
@@ -47,16 +48,30 @@ const MAX_CONFIG_BYTES: usize = 64 * 1024;
 pub(crate) struct CscConfig {
     /// The CSC API base URL, without a trailing slash.
     pub(crate) base_url: String,
+    /// The OAuth 2.0 client the token was issued to.
+    pub(crate) client_id: String,
+    /// The confidential client's secret, when there is one. It reaches only a
+    /// token request, never a URL and never `argv`.
+    pub(crate) client_secret: Option<Zeroizing<String>>,
+    /// The loopback redirect the authorization code comes back to, as written.
+    pub(crate) redirect_uri: Option<String>,
+    /// The OAuth 2.0 authorization endpoint, when the file names one.
+    pub(crate) authorization_url: Option<String>,
+    /// The OAuth 2.0 token endpoint, when the file names one.
+    pub(crate) token_url: Option<String>,
     /// The credential named in the file, if any. `--csc-credential` wins.
     pub(crate) credential_id: Option<String>,
-    /// The bearer token for `scope=service`.
-    pub(crate) access_token: Zeroizing<String>,
+    /// The bearer token for `scope=service`, when the configuration already
+    /// carries one. `csc login` runs without it; `sign --csc` does not.
+    pub(crate) access_token: Option<Zeroizing<String>>,
+    /// Where `access_token_file` points, resolved. `csc login` writes the
+    /// token it obtained here, and the token record beside it.
+    pub(crate) access_token_path: Option<PathBuf>,
     /// The PIN for an `explicit`-mode credential.
     pub(crate) pin: Option<Zeroizing<String>>,
     /// The one-time password for an `explicit`-mode credential.
     pub(crate) otp: Option<Zeroizing<String>>,
-    /// What the run should warn about: a world-readable file, and the keys
-    /// that are reserved for the interactive login this round does not have.
+    /// What the run should warn about: today, a world-readable file.
     pub(crate) warnings: Vec<Notice>,
 }
 
@@ -118,46 +133,54 @@ impl CscConfig {
         if !base_url.starts_with("https://") && !base_url.starts_with("http://") {
             return Err(invalid("the --csc `base_url` must be an http or https URL"));
         }
-        // `client_id` is required even though this round never sends it: a
-        // configuration that cannot complete the login it will need next is a
-        // configuration the user should hear about now, not later.
-        if required(table, "client_id")?.is_empty() {
+        // `client_id` is required: a configuration that cannot complete the
+        // login it will need is a configuration the user should hear about
+        // now, not later.
+        let client_id = required(table, "client_id")?.to_owned();
+        if client_id.is_empty() {
             return Err(invalid("the --csc `client_id` is empty"));
         }
-        if let Some(uri) = table.get("redirect_uri") {
-            if !is_loopback_redirect(uri) {
-                return Err(invalid(
-                    "the --csc `redirect_uri` must be a loopback URI (RFC 8252), such as http://127.0.0.1:0/callback",
-                ));
-            }
-            warnings.push(reserved("redirect_uri"));
+        if let Some(uri) = table.get("redirect_uri")
+            && !is_loopback_redirect(uri)
+        {
+            return Err(invalid(
+                "the --csc `redirect_uri` must be a loopback URI (RFC 8252), such as http://127.0.0.1:0/callback",
+            ));
         }
-        for key in ["client_secret", "client_secret_file"] {
-            if let Some(value) = table.get(key) {
-                if value.is_empty() {
-                    return Err(invalid(format!("the --csc `{key}` is empty")));
-                }
-                warnings.push(reserved(key));
+        for key in ["client_secret", "client_secret_file", "credential_id"] {
+            if table.get(key).is_some_and(|value| value.is_empty()) {
+                return Err(invalid(format!("the --csc `{key}` is empty")));
+            }
+        }
+        for key in ["authorization_url", "token_url"] {
+            if let Some(value) = table.get(key)
+                && !value.starts_with("https://")
+                && !value.starts_with("http://")
+            {
+                return Err(invalid(format!(
+                    "the --csc `{key}` must be an http or https URL"
+                )));
             }
         }
 
         let base = path.parent().unwrap_or(Path::new("."));
-        let access_token = secret(table, base, "access_token", "CSC access token")?
-            .ok_or_else(|| {
-                invalid(
-                    "the --csc configuration must carry `access_token` or `access_token_file`: obtain a scope=service bearer token from the provider out of band",
-                )
-            })?;
-        if access_token.is_empty() {
+        // The token file is allowed not to exist yet: `csc login` is what
+        // creates it, and refusing to read a configuration because the token
+        // it will write is not there would make the login impossible.
+        let access_token = secret(table, base, "access_token", "CSC access token", true)?;
+        if access_token.as_ref().is_some_and(|token| token.is_empty()) {
             return Err(invalid("the --csc access token is empty"));
         }
         Ok(Self {
             base_url,
-            credential_id: table
-                .get("credential_id")
-                .map(|value| value.to_string())
-                .filter(|value| !value.is_empty()),
+            client_id,
+            client_secret: secret(table, base, "client_secret", "CSC client secret", false)?,
+            redirect_uri: text(table, "redirect_uri"),
+            authorization_url: text(table, "authorization_url"),
+            token_url: text(table, "token_url"),
+            credential_id: text(table, "credential_id"),
             access_token,
+            access_token_path: resolved(table, base, "access_token_file"),
             pin: secret_file(table, base, "pin_file", "CSC PIN")?,
             otp: secret_file(table, base, "otp_file", "CSC one-time password")?,
             warnings: std::mem::take(warnings),
@@ -165,13 +188,15 @@ impl CscConfig {
     }
 }
 
-/// Every key this build reads or knowingly reserves.
-const KNOWN_KEYS: [&str; 10] = [
+/// Every key this build reads.
+const KNOWN_KEYS: [&str; 12] = [
     "base_url",
     "client_id",
     "client_secret",
     "client_secret_file",
     "redirect_uri",
+    "authorization_url",
+    "token_url",
     "access_token",
     "access_token_file",
     "credential_id",
@@ -179,13 +204,27 @@ const KNOWN_KEYS: [&str; 10] = [
     "otp_file",
 ];
 
-fn reserved(key: &str) -> Notice {
-    Notice {
-        code: "csc_key_unused".to_owned(),
-        message: format!(
-            "the --csc `{key}` is reserved for the interactive `csc login` flow and is not used by this run"
-        ),
-    }
+/// A plain, non-secret value, dropped when it is empty.
+fn text(table: &BTreeMap<String, Zeroizing<String>>, key: &str) -> Option<String> {
+    table
+        .get(key)
+        .map(|value| value.to_string())
+        .filter(|value| !value.is_empty())
+}
+
+/// The path a `*_file` key names, resolved against the configuration's own
+/// directory exactly as the secret readers resolve one.
+fn resolved(
+    table: &BTreeMap<String, Zeroizing<String>>,
+    base: &Path,
+    key: &str,
+) -> Option<PathBuf> {
+    let named = PathBuf::from(table.get(key)?.as_str());
+    Some(if named.is_absolute() {
+        named
+    } else {
+        base.join(named)
+    })
 }
 
 fn required<'a>(
@@ -204,6 +243,7 @@ fn secret(
     base: &Path,
     key: &str,
     what: &str,
+    missing_ok: bool,
 ) -> Result<Option<Zeroizing<String>>, CliError> {
     let file_key = format!("{key}_file");
     if table.contains_key(key) && table.contains_key(&file_key) {
@@ -214,7 +254,7 @@ fn secret(
     if let Some(value) = table.get(key) {
         return Ok(Some(value.clone()));
     }
-    read_secret_file(table, base, &file_key, what)
+    read_secret_file(table, base, &file_key, what, missing_ok)
 }
 
 fn secret_file(
@@ -223,7 +263,7 @@ fn secret_file(
     key: &str,
     what: &str,
 ) -> Result<Option<Zeroizing<String>>, CliError> {
-    read_secret_file(table, base, key, what)
+    read_secret_file(table, base, key, what, false)
 }
 
 /// Read a secret out of a file the configuration names.
@@ -237,6 +277,7 @@ fn read_secret_file(
     base: &Path,
     key: &str,
     what: &str,
+    missing_ok: bool,
 ) -> Result<Option<Zeroizing<String>>, CliError> {
     let Some(value) = table.get(key) else {
         return Ok(None);
@@ -247,6 +288,9 @@ fn read_secret_file(
     } else {
         base.join(named)
     };
+    if missing_ok && !path.exists() {
+        return Ok(None);
+    }
     let bytes = read_file(&path, what)?;
     let mut text = String::from_utf8(bytes.to_vec())
         .map_err(|_| invalid(format!("the {what} file is not UTF-8")))?;

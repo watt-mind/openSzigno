@@ -299,20 +299,54 @@ impl Fetcher {
     pub fn post_json(
         &self,
         url: &str,
-        bearer: &str,
+        bearer: Option<&str>,
         body: &str,
         limit: u64,
         sensitive: bool,
     ) -> Result<Answer, String> {
-        let authorization = format!("Bearer {bearer}");
+        let authorization = bearer.map(|token| format!("Bearer {token}"));
         self.request(
             url,
             Some(Post {
                 media_type: "application/json",
                 accept: "application/json",
                 bytes: body.as_bytes(),
-                authorization: Some(&authorization),
+                authorization: authorization.as_deref(),
                 sensitive,
+            }),
+            limit,
+            true,
+        )
+        .map(|(status, body)| Answer { status, body })
+        .map_err(FailureClass::describe)
+    }
+
+    /// One bounded `POST` of an OAuth 2.0 token request.
+    ///
+    /// It is the same transport again, and the body is always credential
+    /// material: an authorization-code exchange carries the code and the PKCE
+    /// verifier, a refresh carries the refresh token, and a confidential
+    /// client's secret rides in one or the other of the body and the
+    /// `Authorization` header. So it is marked sensitive unconditionally,
+    /// which is what requires `https` on every hop unless the destination is
+    /// loopback under `--online-allow-private`. `authorization` is the whole
+    /// header value when the service takes HTTP Basic client authentication,
+    /// and `None` when the secret goes in the body instead.
+    pub fn post_form(
+        &self,
+        url: &str,
+        authorization: Option<&str>,
+        body: &str,
+        limit: u64,
+    ) -> Result<Answer, String> {
+        self.request(
+            url,
+            Some(Post {
+                media_type: "application/x-www-form-urlencoded",
+                accept: "application/json",
+                bytes: body.as_bytes(),
+                authorization,
+                sensitive: true,
             }),
             limit,
             true,

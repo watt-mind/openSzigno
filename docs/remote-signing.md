@@ -1246,7 +1246,7 @@ natural persons will actually hold.
 | Qualified status cannot be asserted by this tool | Producing a signature through a qualified provider does not let openSzigno claim the result is a qualified signature, and this project's rules forbid claiming validity that is not proven in code | Report what the service returned and what the verifier checked, and nothing more |
 | SAD scope | A credential authorisation not bound to the real hashes authorises signing anything for its lifetime | Always send the actual hashes, and `numSignatures` equal to the number of signatures being produced |
 | Timestamping is a second dependency | Without it there is no XAdES-T, and without XAdES-T there is no company-registry filing; production Hungarian timestamping needs a client certificate or an account | Decide the TSA before the signer, not after |
-| Trusted list format change | EU trusted lists move to TLv6 on 2026-04-29 with no transition, and the Hungarian list moves to HTTPS | Track it as a verify-path item independent of signing; see section 5.1 |
+| Trusted list format change | EU trusted lists move to TLv6 on 2026-04-29 with no transition, and the Hungarian list moves to HTTPS | Done on the verify path: both TLv5 and TLv6 load, branched on `TSLVersionIdentifier`. See [docs/trust.md](trust.md#tlv5-and-tlv6) |
 | Legacy AVDH structures persist | Documents authenticated with AVDH up to 2024-12-31 keep full probative force indefinitely | Nothing on the read path may treat AVDH structures as obsolete |
 
 ## 7. Using openszigno with a CSC service
@@ -1276,6 +1276,13 @@ credential_id = "cred-1a2b3c"
 # The PIN or one-time password an explicit-mode credential is authorised with.
 pin_file = "pin"
 # otp_file = "otp"
+# The login half. The redirect must be a loopback URI; the two endpoints are
+# optional, and without them the ones under the `oauth2` base `info` publishes
+# are used. A confidential client's secret may sit in the file or beside it.
+redirect_uri = "http://127.0.0.1:0/callback"
+# client_secret_file = "client-secret"
+# authorization_url = "https://as.example/oauth2/authorize"
+# token_url = "https://as.example/oauth2/token"
 ```
 
 It is read as a flat table of quoted strings: comments, blank lines, and
@@ -1284,93 +1291,124 @@ number or a bare value is refused by name. A relative secret path is resolved
 against the configuration file's own directory, and one trailing line ending is
 stripped.
 
-`client_secret`, `client_secret_file` and `redirect_uri` are accepted and
-recorded for the interactive login below, and each earns a `csc_key_unused`
-warning today. Permissions are not enforced, but a world-readable file earns
+`client_secret`, `client_secret_file`, `redirect_uri`, `authorization_url` and
+`token_url` are the login half; a `redirect_uri` that is not a loopback URI is
+refused. Permissions are not enforced, but a world-readable file earns
 `csc_config_permissive`: keep it at `chmod 600`, since it may hold a token.
 
-### 7.2 The non-interactive limitation
+### 7.2 Logging in
 
-`sign --csc` runs no browser and binds no redirect listener. That is a
-deliberate boundary for this round, and it has one consequence worth stating
-plainly: **only an `explicit`-mode credential can be signed with.**
+```sh
+openszigno csc login csc.toml --json
+```
 
-Section 1.2 sets out the two credential authorisation modes. Under `explicit`
-the client calls `credentials/authorize` with the credential, the hashes,
-`numSignatures`, and a PIN or one-time password, and gets Signature Activation
-Data back: one call, no user agent, which is what `--csc` does. Under `oauth2`
-the client has to run a second OAuth 2.0 authorization-code round with
-`scope=credential`, and the resulting token plays the SAD role. That round
-needs a consent screen, and a consent screen needs a browser.
+The command prints one URL and waits. Open it, complete the provider's consent
+screen, and the browser is redirected back to a listener the command bound on
+`127.0.0.1` on a port the operating system picked. The exchange is the RFC 8252
+native-application shape with RFC 7636 PKCE `S256`, the `state` is checked
+before the code is read, and the token that comes back is written to the file
+`access_token_file` names, `chmod 600`, alongside a
+`<access_token_file>.record.json` holding its expiry, its refresh token and the
+token endpoint that issued them. Nothing about any of that is printed.
 
-So a credential whose `credentials/info` reports `authMode: "oauth2"` stops the
-run with `csc_authorization_required`, before the dossier is touched, and the
-message names the flow to complete. It is not a bug and there is no flag that
-works around it.
+`--open` also hands the URL to the platform's browser opener; without it the
+URL is only printed, which is what a headless machine or a remote shell needs.
+`--credential ID` additionally reports that credential's authorisation mode, so
+the run says whether signing with it will need a second, interactive round.
 
-Two further gaps belong to the same follow-up:
+Section 1.2 sets out the two credential authorisation modes, and the difference
+survives the login. Under `explicit` the signing run calls
+`credentials/authorize` with the credential, the hashes, `numSignatures` and a
+PIN or one-time password, and gets Signature Activation Data back: one call, no
+user agent. Under `oauth2` it needs a second authorization-code round with
+`scope=credential`, bound to the very hashes being signed, and the token that
+round yields plays the SAD role. **That round belongs to `sign`, not to
+`csc login`**, because only the signing run knows the hashes: `sign --csc`
+prints an authorization URL of its own and waits on a loopback listener, exactly
+as the login did. `--no-interactive` refuses it instead, and an `oauth2`
+credential then stops the run with `csc_authorization_required` before the
+dossier is touched.
 
-- **The service access token.** `--csc` takes a `scope=service` bearer token
-  that the user obtained elsewhere. It does not run the first OAuth 2.0 round
-  either (section 1.3, steps 2 and 5), and it does not refresh a token that has
-  expired: an expired token surfaces as `csc_rejected` with the service's own
-  `error` string.
-- **RFC 9396 rich authorization requests.** `supportsRar` is read from `info`
-  and reported, and `authorization_details` is not built, because the only
-  place it would be used is the browser round. Both the structured form and the
-  plain `scope=credential&credentialID=…&numSignatures=1&hash=…` query form are
-  needed, since PrimeSign answers `true` and Cleverbase answers `false`
-  (section 3.5).
+The credential round's parameters go in as `credentialID`, `numSignatures`,
+`hashes` and `hashAlgorithmOID` query parameters, or as one RFC 9396
+`authorization_details` object when the service's `info` reported
+`supportsRar: true`. Both forms are built, because PrimeSign answers `true` and
+Cleverbase answers `false` (section 3.5).
 
-All three are the follow-up `openszigno csc login` work recorded in
-[roadmap.md](roadmap.md#m5-authoring--done): a loopback redirect
-listener on `127.0.0.1` in the RFC 8252 style, PKCE with S256, both scopes, and
-`authorization_details` where the service supports it. `redirect_uri` in the
-configuration file is reserved for it, which is why a value that is not a
-loopback URI is refused now rather than later.
+An expired token is renewed rather than surfaced: when the stored record says
+the access token has expired, `sign --csc` spends the refresh token first, warns
+`csc_token_refreshed`, and continues. With no refresh token to spend, the run
+stops with `csc_token_unusable` and names `csc login` as the remedy.
 
-### 7.3 Obtaining a token, as far as the research established
+The full contract, every flag and every code, is in
+[architecture.md](architecture.md#the-csc-login-command).
 
-Neither of the two reachable sandboxes issues a token to an unregistered
-client, and this is a finding rather than an omission: section 6.4 records that
-the EUDI reference host has no dynamic client registration and that its
-authorize endpoint rejects an unknown `client_id`. So every target below needs
-credentials obtained out of band, from the vendor, before any token exists.
+### 7.3 Logging in to the two reachable sandboxes
 
-**The EUDI reference QTSP.** The deployment at
-`walletcentric.signer.eudiw.dev` answers `info` without credentials, which is
-where the response quoted in section 1.3 came from, and its `authType` is
-`oauth2code` only, so there is no `auth/login` path to a token. The practical
-route is the one section 6.3 recommends: run the reference QTSP locally from
+Neither reachable sandbox issues a token to an unregistered client, and this is
+a finding rather than an omission: section 6.4 records that the EUDI reference
+host has no dynamic client registration and that its authorize endpoint rejects
+an unknown `client_id`. **Every walkthrough below therefore begins with
+credentials obtained out of band, from the vendor, and none of the steps after
+that was run against the live host: they are what the deployment's own
+documentation and its observed `info` response imply, and they are marked
+unverified for that reason.**
+
+**The EUDI reference QTSP (unverified beyond the `info` response).** The
+deployment at `walletcentric.signer.eudiw.dev` answers `info` without
+credentials, which is where the response quoted in section 1.3 came from, and
+its `authType` is `oauth2code` only, so there is no `auth/login` path to a
+token. The practical route is the one section 6.3 recommends: run the reference
+QTSP locally from
 [eudi-srv-web-walletdriven-rpcentric-signer-qtsp-java](https://github.com/eu-digital-identity-wallet/eudi-srv-web-walletdriven-rpcentric-signer-qtsp-java)
 with `docker compose`, where the client registration and the credentials are
 yours to create. It is Apache-2.0 and inspectable when something disagrees,
-which is exactly what is wanted the first time a signature fails to verify. Its
-credentials are `oauth2`-mode, so completing a signature against it needs the
-interactive flow above.
+which is exactly what is wanted the first time a signature fails to verify.
+With a client registered there, the configuration is the one in section 7.1
+pointed at the local host, and:
 
-**PrimeSign.** The test host `qs.primesign-test.com` answers `info` without
-credentials (section 3.5) and reports `oauth2` at
-`https://id.primesign-test.com/realms/qs-staging/`. Access codes are requested
-from the vendor; no self-service registration was found.
+```sh
+openszigno csc login csc.toml --online-allow-private --json
+openszigno sign input.es3 --output signed.es3 --csc csc.toml \
+  --tsa https://freetsa.org/tsr --online-allow-private --json
+```
 
-**Cleverbase.** The testbed `signing.lab.cleverbase.io` answers `info` without
-credentials and advertises `oauth2/pushed_authorize` alongside the standard
-methods. Onboarding is through the vendor and its extent was not established.
+`--online-allow-private` is what permits a loopback destination and a plain
+`http` base URL, and is needed only for a local deployment. Its credentials are
+`oauth2`-mode, so the signing run prints a second URL for the credential round;
+that is the flow working, not an error.
 
-Once a `scope=service` token is in hand from any of them, put it in
-`access_token_file` and the discovery half of `sign --csc` (`info`,
-`credentials/list`, `credentials/info`) runs against the real service and
-reports what it found. That is worth doing on its own before any signature is
-attempted: it is the cheapest way to see a deployment's actual `specs`,
-`supportsRar`, `supportedHashTypes` and credential mode, and section 6.5 lists
-discovery drift as a standing risk.
+**PrimeSign (unverified).** The test host `qs.primesign-test.com` answers `info`
+without credentials (section 3.5) and reports `oauth2` at
+`https://id.primesign-test.com/realms/qs-staging/`, which is a Keycloak realm,
+so the endpoints are that realm's
+`protocol/openid-connect/auth` and `protocol/openid-connect/token` rather than
+the `/oauth2/...` paths this tool derives from an `oauth2` base. Put them in the
+configuration as `authorization_url` and `token_url`. Access codes and a
+registered `redirect_uri` are requested from the vendor; no self-service
+registration was found, and neither the endpoint paths nor the login were
+exercised.
+
+**Cleverbase (unverified).** The testbed `signing.lab.cleverbase.io` answers
+`info` without credentials and advertises `oauth2/pushed_authorize` alongside
+the standard methods. Pushed authorization requests (RFC 9126) are **not**
+implemented here, and its `supportsRar` is `false`, so the credential round uses
+the query form. Onboarding is through the vendor and its extent was not
+established.
+
+Once a `scope=service` token is in hand from any of them, the discovery half of
+`sign --csc` (`info`, `credentials/list`, `credentials/info`) runs against the
+real service and reports what it found. That is worth doing on its own before
+any signature is attempted: it is the cheapest way to see a deployment's actual
+`specs`, `supportsRar`, `supportedHashTypes` and credential mode, and section
+6.5 lists discovery drift as a standing risk.
 
 **Testing without a vendor.** The repository's own suite serves three mock
 services shaped like the three surveyed deployments, from `127.0.0.1`, in
-`crates/openszigno-cli/tests/csc_support`. `--online-allow-private` is what
-permits a loopback destination and a plain `http` base URL, and it exists for
-exactly this and for an operator's own network.
+`crates/openszigno-cli/tests/csc_support`. Each is its own authorization server
+as well, so the whole login, credential round and signature are exercised
+locally, including PKCE verification and both forms of the credential
+parameters.
 
 ### 7.4 Verify what was signed
 
@@ -1415,6 +1453,13 @@ On the EUDI reference implementation:
   third-party OAuth 2.0 client, and whether the host is intended to remain
   available. Only the open `info` endpoint and the rejection of an unknown
   `client_id` were observed.
+- Every step of the login walkthroughs in section 7.3 after "obtain credentials
+  from the vendor". No authorization or token endpoint of any live deployment
+  was contacted, so the endpoint paths given for PrimeSign's Keycloak realm, and
+  the claim that the EUDI reference deployment's endpoints hang off its `info`
+  `oauth2` base, are read from documentation and convention rather than
+  observed. The flow itself is exercised only against this repository's mock
+  services.
 - Whether the ARF binds a specific CSC API version, and whether the section
   numbers 2.4, 3.9 and 4.3.3 still apply in ARF v3.0.0. The chapter pages
   were read at `eudi.dev/latest`, the section numbering at the 2.4.0

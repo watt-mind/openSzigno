@@ -76,7 +76,8 @@
         "rsa-pss-sha384",
         "rsa-pss-sha512",
         "ecdsa-sha256",
-        "ecdsa-sha384"
+        "ecdsa-sha384",
+        "ecdsa-sha512"
       ],
       "transforms": [
         "http://www.w3.org/2000/09/xmldsig#enveloped-signature",

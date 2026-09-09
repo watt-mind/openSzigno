@@ -9,9 +9,10 @@
 mod common;
 
 use common::{
-    CertSpec, DossierSpec, STATUS_ACCREDITED, STATUS_GRANTED, STATUS_UNDER_SUPERVISION,
-    STATUS_WITHDRAWN, SVCTYPE_TSA_QTST, SigSpec, SigningCertificateSpec, TestKey, TlService,
-    TrustListSpec, build, build_trust_list, document_signature, issued_by, keys,
+    CertSpec, DossierSpec, ECDSA_SHA512_URI, STATUS_ACCREDITED, STATUS_GRANTED,
+    STATUS_UNDER_SUPERVISION, STATUS_WITHDRAWN, SVCTYPE_TSA_QTST, SigSpec, SigningCertificateSpec,
+    TestKey, TlService, TrustListSpec, build, build_trust_list, document_signature, ecdsa_p521_key,
+    extended_key_usage_extension, issued_by, issued_by_with_public_key, keys,
     qc_statements_extension, rsa_key, self_signed,
 };
 use openszigno_verify::certs::{CertificateSource, ParsedCertificate};
@@ -23,6 +24,10 @@ use openszigno_verify::{
 use rcgen::BasicConstraints;
 
 const AT: &str = "2020-06-02T00:00:00Z";
+
+/// `id-tsl-kp-tslSigning`, the extended key usage ETSI TS 119 612
+/// clause 5.7.1 says a trusted list signing certificate should carry.
+const OID_TSL_SIGNING: &str = "0.4.0.2231.3.0";
 
 struct Pki {
     root_der: Vec<u8>,
@@ -51,7 +56,7 @@ fn pki(not_before: (i32, u8, u8), qc: &[&str]) -> Pki {
     }
     let signer = issued_by(&signer_spec, &signer_key, &root, &root_key);
     let tl_signer = self_signed(
-        &CertSpec::signer("openSzigno Test Trusted List Signer"),
+        &tlso_spec("openSzigno Test Trusted List Signer"),
         &rsa_key(keys::SECOND_RSA2048),
     );
 
@@ -61,6 +66,16 @@ fn pki(not_before: (i32, u8, u8), qc: &[&str]) -> Pki {
         signer_key,
         tl_signer_der: tl_signer.der,
     }
+}
+
+/// A scheme operator certificate as ETSI TS 119 612 clause 5.7.1 wants one:
+/// `CA=false`, a `keyUsage` of `digitalSignature` and `nonRepudiation`, and
+/// the `id-tsl-kp-tslSigning` extended key usage. Self-signing it at the call
+/// site satisfies the issuer rule.
+fn tlso_spec(common_name: &str) -> CertSpec<'_> {
+    let mut spec = CertSpec::signer(common_name);
+    spec.custom_extensions = vec![extended_key_usage_extension(&[OID_TSL_SIGNING], false)];
+    spec
 }
 
 fn signature(pki: &Pki) -> SigSpec {
@@ -166,6 +181,7 @@ fn the_list_metadata_is_read() {
     assert_eq!(loaded.sequence_number, Some(7));
     assert_eq!(loaded.issue_date.as_deref(), Some("2020-01-01T00:00:00Z"));
     assert_eq!(loaded.next_update.as_deref(), Some("2021-01-01T00:00:00Z"));
+    assert_eq!(loaded.version, 6);
     assert_eq!(loaded.anchors.len(), 1);
 }
 
@@ -193,6 +209,165 @@ fn a_tsa_qtst_service_is_also_read() {
     let loaded = openszigno_verify::trustlist::load(list.as_bytes(), &[], &RoxmltreeC14n)
         .expect("the list loads");
     assert_eq!(loaded.anchors.len(), 1);
+}
+
+// ---------------------------------------------------------------------------
+// TSLVersionIdentifier: TLv5 and TLv6
+// ---------------------------------------------------------------------------
+
+/// The EU cut over from TLv5 to TLv6 on 2026-04-29 with no transition period,
+/// so a verifier has to read both: TLv6 for anything published from that date,
+/// TLv5 for every archived snapshot taken before it. Both carry the same
+/// namespace and the same element vocabulary, so both must load, contribute
+/// the same anchor, and verify their own signature.
+#[test]
+fn both_a_tlv5_and_a_tlv6_list_load_and_verify() {
+    let pki = pki((2019, 1, 1), &["0.4.0.1862.1.1"]);
+    for (version, spec) in [
+        (
+            5,
+            TrustListSpec::v5(vec![TlService::ca_qc(
+                "openSzigno Test Qualified CA",
+                pki.root_der.clone(),
+            )]),
+        ),
+        (
+            6,
+            TrustListSpec::new(vec![TlService::ca_qc(
+                "openSzigno Test Qualified CA",
+                pki.root_der.clone(),
+            )]),
+        ),
+    ] {
+        let mut spec = spec;
+        assert_eq!(spec.version, version);
+        spec.signer = Some((rsa_key(keys::SECOND_RSA2048), pki.tl_signer_der.clone()));
+        let list = build_trust_list(&spec);
+        let xml = dossier(signature(&pki), &pki.signer_key);
+        let report = run_with_list(&xml, &list, Some(&pki.tl_signer_der), AT);
+
+        assert_check(&report, CheckCode::CertPathOk, CheckStatus::Passed);
+        assert_check(
+            &report,
+            CheckCode::TrustListSignatureOk,
+            CheckStatus::Passed,
+        );
+        let loaded = openszigno_verify::trustlist::load(list.as_bytes(), &[], &RoxmltreeC14n)
+            .expect("the list loads");
+        assert_eq!(loaded.version, u64::from(version));
+        let loaded = report
+            .checks
+            .iter()
+            .find(|check| check.code == CheckCode::TrustListLoaded)
+            .expect("the list reports what it loaded");
+        assert!(
+            loaded.message.contains(&format!("version {version}")),
+            "{}",
+            loaded.message
+        );
+    }
+}
+
+/// A version identifier outside the two this build parses is refused rather
+/// than parsed as if it were one of them, and the message names the version so
+/// an operator can tell "this file is newer than your tool" from "this file is
+/// broken".
+#[test]
+fn a_list_stating_an_unparsed_version_is_refused() {
+    let pki = pki((2019, 1, 1), &[]);
+    let mut spec = TrustListSpec::new(vec![TlService::ca_qc(
+        "openSzigno Test Qualified CA",
+        pki.root_der.clone(),
+    )]);
+    spec.version = 7;
+    let list = build_trust_list(&spec);
+    let error = openszigno_verify::trustlist::load(list.as_bytes(), &[], &RoxmltreeC14n)
+        .expect_err("version 7 is not parsed");
+    assert!(error.contains("TSLVersionIdentifier \"7\""), "{error}");
+    assert!(error.contains("TLv6"), "{error}");
+}
+
+/// TS 119 612 clause 5.3.1 makes the field mandatory in every issue, and it is
+/// the only thing that says which parsing rules apply. A list without one is
+/// refused rather than guessed at.
+#[test]
+fn a_list_stating_no_version_is_refused() {
+    let pki = pki((2019, 1, 1), &[]);
+    let list = build_trust_list(&TrustListSpec::new(vec![TlService::ca_qc(
+        "openSzigno Test Qualified CA",
+        pki.root_der.clone(),
+    )]));
+    let stripped = list.replace("<tsl:TSLVersionIdentifier>6</tsl:TSLVersionIdentifier>", "");
+    let error = openszigno_verify::trustlist::load(stripped.as_bytes(), &[], &RoxmltreeC14n)
+        .expect_err("a list with no version identifier is refused");
+    assert!(error.contains("no TSLVersionIdentifier"), "{error}");
+}
+
+/// TS 119 612 annex B.1.0 rule 2 asks for a reference to the
+/// `TrustServiceStatusList` element, which a same-document `#Id` satisfies
+/// exactly as the empty URI does. Both cover the whole list, so both are
+/// accepted; neither weakens the "the signature covers everything" rule.
+#[test]
+fn a_signature_referencing_the_list_by_id_covers_it() {
+    let pki = pki((2019, 1, 1), &["0.4.0.1862.1.1"]);
+    let mut spec = TrustListSpec::new(vec![TlService::ca_qc(
+        "openSzigno Test Qualified CA",
+        pki.root_der.clone(),
+    )]);
+    spec.signer = Some((rsa_key(keys::SECOND_RSA2048), pki.tl_signer_der.clone()));
+    spec.reference_list_by_id = true;
+    let list = build_trust_list(&spec);
+    let xml = dossier(signature(&pki), &pki.signer_key);
+    let report = run_with_list(&xml, &list, Some(&pki.tl_signer_der), AT);
+
+    assert_check(
+        &report,
+        CheckCode::TrustListSignatureOk,
+        CheckStatus::Passed,
+    );
+}
+
+/// TS 119 612 annex B.1.2 permits any ETSI TS 119 312 algorithm for a list's
+/// own signature, so a member state may sign a TLv6 list with ecdsa-sha512 over
+/// a P-521 key. Such a list must verify rather than be reported as naming a
+/// method outside the allowlist.
+#[test]
+fn a_list_signed_with_ecdsa_p521_verifies() {
+    let pki = pki((2019, 1, 1), &["0.4.0.1862.1.1"]);
+    let root_key = rsa_key(keys::ROOT_RSA2048);
+    let root = self_signed(
+        &CertSpec::ca(
+            "openSzigno Test Qualified CA",
+            BasicConstraints::Unconstrained,
+        ),
+        &root_key,
+    );
+    // The `ring` backend cannot sign with P-521, so the list signer's own
+    // certificate is issued by the RSA root; only its public key matters here.
+    let tl_signer_key = ecdsa_p521_key(23);
+    let tl_signer = issued_by_with_public_key(
+        &CertSpec::signer("openSzigno Test P-521 Trusted List Signer"),
+        &tl_signer_key.spki_der,
+        &root,
+        &root_key,
+    );
+
+    let mut spec = TrustListSpec::new(vec![TlService::ca_qc(
+        "openSzigno Test Qualified CA",
+        pki.root_der.clone(),
+    )]);
+    spec.signature_method = ECDSA_SHA512_URI.to_owned();
+    spec.signer = Some((tl_signer_key, tl_signer.der.clone()));
+    let list = build_trust_list(&spec);
+    let xml = dossier(signature(&pki), &pki.signer_key);
+    let report = run_with_list(&xml, &list, Some(&tl_signer.der), AT);
+
+    assert_check(
+        &report,
+        CheckCode::TrustListSignatureOk,
+        CheckStatus::Passed,
+    );
+    assert_check(&report, CheckCode::CertPathOk, CheckStatus::Passed);
 }
 
 /// Something that is not a trusted list is refused rather than half-read.
@@ -565,6 +740,32 @@ fn a_list_signed_by_the_wrong_key_fails() {
         CheckCode::TrustListSignatureInvalid,
         CheckStatus::Failed,
     );
+}
+
+/// A list whose own signed `xades:SigningCertificateV2` names a certificate
+/// other than the one the caller supplied caps the verdict: the caller and the
+/// list disagree about who signed, and this build does not choose. The rules
+/// applied to the signer certificate itself live in `trustlist_signer.rs`.
+#[test]
+fn a_list_that_names_another_signing_certificate_caps_the_verdict() {
+    let pki = pki((2019, 1, 1), &["0.4.0.1862.1.1"]);
+    let mut spec = TrustListSpec::new(vec![TlService::ca_qc(
+        "openSzigno Test Qualified CA",
+        pki.root_der.clone(),
+    )]);
+    spec.signer = Some((rsa_key(keys::SECOND_RSA2048), pki.tl_signer_der.clone()));
+    // The property names the CA certificate, not the list's signer.
+    spec.signing_certificate = Some(SigningCertificateSpec::v2(pki.root_der.clone()));
+    let list = build_trust_list(&spec);
+    let xml = dossier(signature(&pki), &pki.signer_key);
+    let report = run_with_list(&xml, &list, Some(&pki.tl_signer_der), AT);
+
+    assert_check(
+        &report,
+        CheckCode::TrustListSignerMismatch,
+        CheckStatus::Unknown,
+    );
+    assert_eq!(report.verdict, openszigno_verify::Verdict::Indeterminate);
 }
 
 /// A list that carries no signature at all, checked against a signer, is a
@@ -1051,7 +1252,7 @@ fn historic_pki() -> Pki {
     signer_spec.not_before = (2009, 1, 1);
     let signer = issued_by(&signer_spec, &signer_key, &root, &root_key);
     let tl_signer = self_signed(
-        &CertSpec::signer("openSzigno Test Trusted List Signer"),
+        &tlso_spec("openSzigno Test Trusted List Signer"),
         &rsa_key(keys::SECOND_RSA2048),
     );
     Pki {

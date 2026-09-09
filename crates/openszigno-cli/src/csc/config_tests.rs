@@ -21,6 +21,11 @@ fn load(text: &str) -> Result<CscConfig, CliError> {
     CscConfig::load(&path)
 }
 
+/// The access token a configuration carries, if it carries one.
+fn token(config: &CscConfig) -> Option<&str> {
+    config.access_token.as_deref().map(String::as_str)
+}
+
 const MINIMAL: &str = concat!(
     "base_url = \"https://qtsp.example/csc/v2\"\n",
     "client_id = \"openszigno-cli\"\n",
@@ -31,7 +36,7 @@ const MINIMAL: &str = concat!(
 fn a_minimal_configuration_loads_and_keeps_only_what_it_said() {
     let config = load(MINIMAL).expect("a usable configuration");
     assert_eq!(config.base_url, "https://qtsp.example/csc/v2");
-    assert_eq!(&*config.access_token, "service-token");
+    assert_eq!(token(&config), Some("service-token"));
     assert_eq!(config.credential_id, None);
     assert!(config.pin.is_none() && config.otp.is_none());
     // Not even a debug print may carry the token.
@@ -54,7 +59,7 @@ fn a_trailing_slash_comments_and_both_string_forms_are_all_read() {
     // The base URL is joined to an operation name, so one trailing slash must
     // not become two.
     assert_eq!(config.base_url, "https://qtsp.example/csc/v2");
-    assert_eq!(&*config.access_token, "tok\ten");
+    assert_eq!(token(&config), Some("tok\ten"));
     assert_eq!(config.credential_id.as_deref(), Some("cred-1a2b3c"));
 }
 
@@ -75,7 +80,12 @@ fn a_secret_may_live_in_a_file_beside_the_configuration() {
     let config = CscConfig::load(&path).expect("a usable configuration");
     // A relative path is resolved against the configuration's own directory,
     // and one trailing line ending is what an editor leaves behind.
-    assert_eq!(&*config.access_token, "file-token");
+    assert_eq!(token(&config), Some("file-token"));
+    // The path is kept as well, because `csc login` writes the token there.
+    assert_eq!(
+        config.access_token_path.as_deref(),
+        Some(directory.path().join("token").as_path())
+    );
     assert_eq!(config.pin.as_deref().map(String::as_str), Some("1234"));
 }
 
@@ -88,10 +98,6 @@ fn a_configuration_that_cannot_be_used_is_refused_by_name() {
             "client_id",
         ),
         (
-            "base_url = \"https://q/csc/v2\"\nclient_id = \"a\"\n",
-            "access_token",
-        ),
-        (
             "base_url = \"ftp://q/csc/v2\"\nclient_id = \"a\"\naccess_token = \"t\"\n",
             "base_url",
         ),
@@ -102,6 +108,14 @@ fn a_configuration_that_cannot_be_used_is_refused_by_name() {
         (
             "base_url = \"https://q/csc/v2\"\nclient_id = \"a\"\naccess_token = \"\"\n",
             "access token",
+        ),
+        (
+            "base_url = \"https://q/csc/v2\"\nclient_id = \"a\"\ntoken_url = \"ftp://q/t\"\n",
+            "token_url",
+        ),
+        (
+            "base_url = \"https://q/csc/v2\"\nclient_id = \"a\"\ncredential_id = \"\"\n",
+            "credential_id",
         ),
     ] {
         let error = load(text).expect_err("unusable");
@@ -143,22 +157,59 @@ fn only_the_flat_string_subset_of_toml_is_accepted() {
     }
 }
 
+/// A configuration with no token at all is what `csc login` starts from, so
+/// it loads: the token is what that command is about to write.
 #[test]
-fn the_reserved_login_keys_load_with_a_warning_rather_than_a_refusal() {
+fn a_configuration_without_a_token_loads_because_login_is_what_writes_one() {
+    let directory = tempfile::tempdir().expect("a temporary directory");
+    let path = directory.path().join("csc.toml");
+    std::fs::write(
+        &path,
+        "base_url = \"https://qtsp.example/csc/v2\"\n\
+         client_id = \"openszigno-cli\"\n\
+         access_token_file = \"not-written-yet\"\n",
+    )
+    .expect("written");
+    let config = CscConfig::load(&path).expect("a configuration to log in with");
+    assert_eq!(token(&config), None);
+    assert_eq!(
+        config.access_token_path.as_deref(),
+        Some(directory.path().join("not-written-yet").as_path())
+    );
+}
+
+/// The keys the login round needs are read rather than warned about, and a
+/// redirect that leaves the machine is refused: it would hand somebody else an
+/// authorization code.
+#[test]
+fn the_login_keys_are_read_and_only_a_loopback_redirect_is_accepted() {
     let config = load(&format!(
-        "{MINIMAL}redirect_uri = \"http://127.0.0.1:0/callback\"\nclient_secret = \"s\"\n"
+        "{MINIMAL}redirect_uri = \"http://127.0.0.1:0/callback\"\n\
+         client_secret = \"synthetic-client-secret\"\n\
+         authorization_url = \"https://as.example/oauth2/authorize\"\n\
+         token_url = \"https://as.example/oauth2/token\"\n"
     ))
     .expect("a usable configuration");
-    let codes: Vec<&str> = config
-        .warnings
-        .iter()
-        .map(|notice| notice.code.as_str())
-        .collect();
-    assert_eq!(codes, vec!["csc_key_unused", "csc_key_unused"]);
-    assert!(config.warnings[0].message.contains("csc login"));
+    assert!(config.warnings.is_empty());
+    assert_eq!(
+        config.redirect_uri.as_deref(),
+        Some("http://127.0.0.1:0/callback")
+    );
+    assert_eq!(
+        config.client_secret.as_deref().map(String::as_str),
+        Some("synthetic-client-secret")
+    );
+    assert_eq!(
+        config.authorization_url.as_deref(),
+        Some("https://as.example/oauth2/authorize")
+    );
+    assert_eq!(
+        config.token_url.as_deref(),
+        Some("https://as.example/oauth2/token")
+    );
+    // Nor does a debug print carry the secret.
+    assert!(!format!("{config:?}").contains("synthetic-client-secret"));
 
-    // A redirect that leaves the machine is refused rather than warned about:
-    // it would hand somebody else an authorization code.
     let error = load(&format!(
         "{MINIMAL}redirect_uri = \"https://example.com/cb\"\n"
     ))

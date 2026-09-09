@@ -1,0 +1,1 @@
+error [csc_config_invalid]: the --csc configuration is missing `client_id`

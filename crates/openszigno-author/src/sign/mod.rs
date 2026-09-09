@@ -26,6 +26,7 @@
 //! | `names` | What a dossier may contribute to signature XML: the checks, and the escapers every interpolation goes through. |
 //! | `csc` | Cloud Signature Consortium API v2 request bodies and response readers, for a hash-only remote backend. Pure: the sockets are the CLI's. |
 //! | `tsa` | RFC 3161 requests and responses, as bytes in and bytes out. |
+//! | `stamp` | The container `es:TimeStamp` behind `timestamp`: a timestamp with no signature under it. |
 //!
 //! # How a signature is filled in
 //!
@@ -56,6 +57,7 @@ mod dsig;
 mod error;
 mod names;
 mod signer;
+mod stamp;
 mod tsa;
 mod xades;
 
@@ -63,6 +65,9 @@ use openszigno_core::{Document, ParseOptions};
 
 pub use error::{SignError, SignErrorCode};
 pub use signer::{SignatureAlgorithm, Signer, SoftwareSigner, parse_certificates};
+pub use stamp::{
+    TimestampRequest, TimestampScope, TimestampedDossier, WrittenTimestamp, timestamp,
+};
 pub use tsa::{TIMESTAMP_QUERY_TYPE, TIMESTAMP_REPLY_TYPE, timestamp_request, timestamp_token};
 
 use dsig::{PlannedReference, Working, digest_placeholder, value_placeholder};
@@ -165,7 +170,7 @@ pub fn sign(
     let working = Working::parse(&text)?;
     let plans = working.with_tree(|lookup| {
         refuse_unsafe_placement(lookup, request.scope)?;
-        let targets = targets(&dossier, request)?;
+        let targets = targets(&dossier, request.scope, &request.documents)?;
         plan_signatures(
             lookup,
             &dossier,
@@ -223,25 +228,30 @@ fn normalise_declaration(text: &str) -> String {
     text
 }
 
-/// The documents to sign, in source order.
+/// The documents to write into, in source order.
+///
+/// Shared with the container-timestamp writer, which selects documents by
+/// exactly the same rules: the same `--document` selectors, the same refusals,
+/// and the same "every document" default.
 fn targets<'a>(
     dossier: &'a openszigno_core::Dossier,
-    request: &SignRequest,
+    scope: SignScope,
+    documents: &[String],
 ) -> Result<Vec<&'a Document>, SignError> {
-    if request.scope == SignScope::Dossier {
+    if scope == SignScope::Dossier {
         return Ok(Vec::new());
     }
-    if request.documents.is_empty() {
+    if documents.is_empty() {
         if dossier.documents.is_empty() {
             return Err(SignError::new(
                 SignErrorCode::DocumentNotSignable,
-                "the dossier holds no document with a profile, so there is nothing to sign",
+                "the dossier holds no document with a profile, so there is nothing to write into",
             ));
         }
         return Ok(dossier.documents.iter().collect());
     }
     let mut selected: Vec<&Document> = Vec::new();
-    for selector in &request.documents {
+    for selector in documents {
         let found = resolve_selector(dossier, selector)?;
         if !selected
             .iter()

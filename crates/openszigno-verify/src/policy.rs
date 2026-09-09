@@ -131,6 +131,9 @@ impl SignatureScheme {
             "http://www.w3.org/2001/04/xmldsig-more#ecdsa-sha384" => {
                 Some(Self::Ecdsa(Digest::Sha384))
             }
+            "http://www.w3.org/2001/04/xmldsig-more#ecdsa-sha512" => {
+                Some(Self::Ecdsa(Digest::Sha512))
+            }
             _ => None,
         }
     }
@@ -224,6 +227,10 @@ pub struct PolicyReport {
 /// One trusted list a run consulted, as the report cites it.
 #[derive(Clone, Debug, Serialize)]
 pub struct TrustListSnapshot {
+    /// Which ETSI TS 119 612 format the file was: 5 (TLv5) or 6 (TLv6,
+    /// mandatory in the EU from 2026-04-29). A list that stated any other
+    /// version never loaded, so this is always one of the two.
+    pub version: u64,
     pub territory: Option<String>,
     pub sequence_number: Option<u64>,
     pub issue_date: Option<String>,
@@ -250,6 +257,7 @@ impl PolicyReport {
             "rsa-pss-sha512",
             "ecdsa-sha256",
             "ecdsa-sha384",
+            "ecdsa-sha512",
         ];
         if legacy_algorithms_allowed {
             // Reported so the machine output shows the policy that was

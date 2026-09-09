@@ -2,6 +2,15 @@
 //!
 //! Codes are stable strings that never change meaning. A consumer must treat an
 //! unknown code as blocking unless its status is `passed`.
+//!
+//! [`CheckCode`], [`CheckStatus`] and [`Verdict`] are `#[non_exhaustive]`.
+//! New check codes are emitted as the verifier learns to check more things, and
+//! adding one is a normal, additive change here rather than a semver break, so
+//! a downstream `match` on any of the three must carry a wildcard arm. Handle
+//! the unknown arm conservatively: an unrecognised code or status is not a
+//! passing one, and an unrecognised verdict is not `valid`. Read a code's
+//! stable string with [`CheckCode::as_str`] and enumerate the codes this build
+//! knows with [`CheckCode::ALL`].
 
 use serde::Serialize;
 
@@ -11,6 +20,9 @@ use serde::Serialize;
 /// substitute for `failed`, because "I do not know" and "this is forged" are
 /// different statements.
 ///
+/// The enum is `#[non_exhaustive]`: match it with a wildcard arm and treat an
+/// unrecognised status as blocking.
+///
 /// `info` is the one status that does not block: it exists so that a check
 /// which only *reports* something — a certificate's loosely filled
 /// `extendedKeyUsage`, the presence of a claimed signing time — can be emitted
@@ -19,6 +31,7 @@ use serde::Serialize;
 /// "`unknown` always blocks" true without exception.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum CheckStatus {
     Passed,
     Failed,
@@ -47,8 +60,12 @@ impl CheckStatus {
 
 /// The ETSI EN 319 102-1 status vocabulary, minus the states this phase cannot
 /// reach.
+///
+/// The enum is `#[non_exhaustive]`: match it with a wildcard arm and treat an
+/// unrecognised verdict as not `valid`.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum Verdict {
     /// TOTAL-PASSED.
     Valid,
@@ -77,8 +94,15 @@ impl Verdict {
 macro_rules! check_codes {
     ($( $variant:ident => $text:literal ),* $(,)?) => {
         /// Every check code this crate can emit.
+        ///
+        /// The enum is `#[non_exhaustive]`, because a release that learns to
+        /// check something new emits a new code for it. Match it with a
+        /// wildcard arm, and treat an unknown code as blocking unless the
+        /// [`CheckStatus`] beside it is `passed`. [`CheckCode::ALL`] lists
+        /// every code the build in use knows.
         #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
         #[serde(into = "&'static str")]
+        #[non_exhaustive]
         pub enum CheckCode { $( $variant, )* }
 
         impl CheckCode {
@@ -191,6 +215,8 @@ check_codes! {
     TrustListUnverified => "trust_list_unverified",
     TrustListSignatureOk => "trust_list_signature_ok",
     TrustListSignatureInvalid => "trust_list_signature_invalid",
+    TrustListSignerMismatch => "trust_list_signer_mismatch",
+    TrustListSignerUnqualified => "trust_list_signer_unqualified",
     TrustListServiceNotGranted => "trust_list_service_not_granted",
     CertificateQualified => "certificate_qualified",
     CertificateNotQualified => "certificate_not_qualified",

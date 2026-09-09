@@ -8,6 +8,7 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use openszigno_core::{Limits, XmlSource};
 use openszigno_verify::c14n::{C14nAlgorithm, C14nBackend, NodeSet, RoxmltreeC14n};
+use sha2::{Digest as _, Sha256};
 
 use super::pki::TestKey;
 use super::signer::render_signature;
@@ -28,6 +29,7 @@ pub const RSA_SHA384_URI: &str = "http://www.w3.org/2001/04/xmldsig-more#rsa-sha
 pub const RSA_SHA512_URI: &str = "http://www.w3.org/2001/04/xmldsig-more#rsa-sha512";
 pub const RSA_PSS_SHA256_URI: &str = "http://www.w3.org/2007/05/xmldsig-more#sha256-rsa-MGF1";
 pub const ECDSA_SHA384_URI: &str = "http://www.w3.org/2001/04/xmldsig-more#ecdsa-sha384";
+pub const ECDSA_SHA512_URI: &str = "http://www.w3.org/2001/04/xmldsig-more#ecdsa-sha512";
 pub const SHA384_URI: &str = "http://www.w3.org/2001/04/xmldsig-more#sha384";
 pub const SHA512_URI: &str = "http://www.w3.org/2001/04/xmlenc#sha512";
 pub const RSA_SHA1_URI: &str = "http://www.w3.org/2000/09/xmldsig#rsa-sha1";
@@ -126,6 +128,17 @@ pub struct SigSpec {
     pub signing_certificate: Option<SigningCertificateSpec>,
     /// Emit `xades:SignaturePolicyIdentifier/xades:SignaturePolicyImplied`.
     pub signature_policy_implied: bool,
+    /// Emit an explicit `xades:SignaturePolicyId`, the form a Hungarian
+    /// AVDH-authenticated signature carries.
+    pub signature_policy: Option<SignaturePolicySpec>,
+    /// `xades:ClaimedRole` values, emitted inside `xades:SignerRole` (or
+    /// `SignerRoleV2` when [`SigSpec::signer_role_v2`] is set).
+    pub claimed_roles: Vec<String>,
+    /// Spell the role property `SignerRoleV2`, as EN 319 132-1 does.
+    pub signer_role_v2: bool,
+    /// `xades:CommitmentTypeIndication` identifiers, emitted in
+    /// `xades:SignedDataObjectProperties` against the payload reference.
+    pub commitment_type_ids: Vec<String>,
     /// A signature timestamp over this signature's `ds:SignatureValue`.
     pub timestamp: Option<TimestampSpec>,
     /// Emit an `xades:ArchiveTimeStamp`, which is out of scope and must be
@@ -194,6 +207,30 @@ impl CounterSignatureSpec {
         Self {
             signatures: vec![signature],
             wrapper: Some(wrapper.to_owned()),
+        }
+    }
+}
+
+/// An explicit signature policy: its identifier and, optionally, the digest
+/// the signature claims the policy document has.
+pub struct SignaturePolicySpec {
+    pub identifier: String,
+    pub description: Option<String>,
+    /// `ds:DigestMethod/@Algorithm` and the Base64 `ds:DigestValue`.
+    pub digest: Option<(String, String)>,
+}
+
+impl SignaturePolicySpec {
+    /// A policy identifier with a SHA-256 hash over `document`, which is the
+    /// shape a policy-bearing signature carries.
+    pub fn hashed(identifier: &str, document: &[u8]) -> Self {
+        Self {
+            identifier: identifier.to_owned(),
+            description: None,
+            digest: Some((
+                SHA256_URI.to_owned(),
+                BASE64.encode(Sha256::digest(document)),
+            )),
         }
     }
 }

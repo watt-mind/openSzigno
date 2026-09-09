@@ -1,8 +1,8 @@
 # openSzigno
 
 A safe, agent-friendly command-line tool for inspecting, listing, structurally
-validating, verifying, extracting, creating, and signing Hungarian Microsec
-e-Szignó e-dossiers (`.es3`).
+validating, verifying, extracting, creating, signing, and timestamping
+Hungarian Microsec e-Szignó e-dossiers (`.es3`).
 
 [![CI](https://github.com/watt-mind/openSzigno/actions/workflows/ci.yml/badge.svg?branch=develop)](https://github.com/watt-mind/openSzigno/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
@@ -57,18 +57,18 @@ cargo install openszigno-cli --locked
 Shell and PowerShell installers, for a machine with no Rust toolchain:
 
 ```sh
-curl --proto '=https' --tlsv1.2 -LsSf https://github.com/watt-mind/openSzigno/releases/download/v0.8.0/openszigno-cli-installer.sh | sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/watt-mind/openSzigno/releases/download/v0.9.0/openszigno-cli-installer.sh | sh
 ```
 
 ```powershell
-powershell -ExecutionPolicy Bypass -c "irm https://github.com/watt-mind/openSzigno/releases/download/v0.8.0/openszigno-cli-installer.ps1 | iex"
+powershell -ExecutionPolicy Bypass -c "irm https://github.com/watt-mind/openSzigno/releases/download/v0.9.0/openszigno-cli-installer.ps1 | iex"
 ```
 
 Container image (`linux/amd64` and `linux/arm64`), for CI and sandboxed
 pipelines. It is `FROM scratch` and runs as the numeric user `65532`:
 
 ```sh
-docker run --rm -v "$PWD:/work" ghcr.io/watt-mind/openszigno:0.8.0 inspect /work/file.es3 --json
+docker run --rm -v "$PWD:/work" ghcr.io/watt-mind/openszigno:0.9.0 inspect /work/file.es3 --json
 ```
 
 Otherwise take an archive and the `.sha256` file beside it from the
@@ -149,6 +149,8 @@ the URLs the certificates themselves publish.
 | `verify FILE` | Verify every `ds:Signature` against the trust material you supply and report a per-signature verdict of `valid`, `invalid`, or `indeterminate`. | 0, 2, 3, 4, 6, 7 |
 | `create --output FILE --title TITLE` | Build one new, unsigned dossier from files on disk, with `--document`, `--zip`, `--embed`, `--encrypt-for`, and `--created`. Never overwrites the output. | 0, 2, 3, 4, 5 |
 | `sign FILE --output FILE --key KEY` | Write a signed copy of a dossier: one enveloped XMLDSig/XAdES signature per document, or one over the dossier with `--scope dossier`, optionally timestamped with `--tsa`, and with `--csc` instead of `--key` signed by a remote qualified certificate. Never overwrites the output. | 0, 2, 3, 4, 5 |
+| `timestamp FILE --output FILE --tsa URL` | Write a copy of a dossier carrying a container `es:TimeStamp`: an RFC 3161 token over the dossier, or over each selected document with `--scope document`, and no signature. Never overwrites the output. | 0, 2, 3, 4, 5 |
+| `csc login CONFIG.toml` | Run the OAuth 2.0 authorization-code round a Cloud Signature Consortium service needs and store the tokens `sign --csc` reads. Prints one URL, waits for the browser on a loopback listener, and prints no token. | 0, 2, 3, 4, 5 |
 | `skill` | Write the embedded agent skill (`SKILL.md`) to stdout and nothing else. Takes no `FILE` and no `--json`. | 0, 2, 3 |
 
 `create` is the writing side: it builds a new dossier from files on disk,
@@ -160,14 +162,16 @@ it writes carries no signature, which every run says out loud.
 `--encrypt-for CERT.pem` encrypts every `--document` payload for that
 recipient certificate as CMS EnvelopedData, which `extract --decrypt-key`
 reads back; it is the one thing that makes the output non-deterministic,
-because a content key must be random. Signing a dossier is `sign`, below;
-writing a container timestamp is not implemented, see
-[docs/roadmap.md](docs/roadmap.md).
+because a content key must be random. Signing a dossier is `sign`, below,
+and `timestamp` writes a container `es:TimeStamp` over a dossier without
+signing it: one RFC 3161 token, no key of any kind, refused rather than
+written where it would break something already in the file. See
+[The timestamp command](docs/architecture.md#the-timestamp-command).
 
-Every command except `create` and `skill` takes `-` in place of the path and
-reads the dossier from standard input. Every flag, the JSON envelope, the stable
-error, warning and check codes, the exit statuses, and the parser limits
-are specified in [docs/architecture.md](docs/architecture.md).
+Every command except `create`, `csc login` and `skill` takes `-` in place of
+the path and reads the dossier from standard input. Every flag, the JSON
+envelope, the stable error, warning and check codes, the exit statuses, and
+the parser limits are specified in [docs/architecture.md](docs/architecture.md).
 
 ## Verification
 
@@ -203,10 +207,15 @@ instead of a local key, so a qualified certificate held by a remote signature
 creation device signs the same structure and only the digest ever leaves the
 machine; see
 [Signing through a CSC service](docs/architecture.md#signing-through-a-csc-service).
+Run `openszigno csc login CONFIG.toml` first: it completes the OAuth 2.0
+authorization-code round with PKCE on a loopback redirect, stores the token
+`chmod 600` where the configuration says, and refreshes it later rather than
+letting it expire mid-run.
 
-**Signing is not verification.** `sign` produces a signature and checks
+**Writing is not verification.** `sign` produces a signature and checks
 nothing: not the key, not the certificate, not the chain, and it says so on
-every run. Whether what it wrote holds is a question for `verify`, against
+every run, and `timestamp` says the same about the token it embeds.
+Whether what either wrote holds is a question for `verify`, against
 trust material you supply; and a `valid` verdict over a chain you built
 yourself means only that the chain you chose to trust verified. It is not a
 statement about anybody's identity, not a legal opinion, and not a qualified

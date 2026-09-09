@@ -14,11 +14,15 @@
 //! reaches the internet and no real QTSP is contacted or named.
 //!
 //! The mock signs in `explicit` mode, with `credentials/authorize` returning
-//! Signature Activation Data for a PIN, because that is the one mode a
-//! non-interactive command can complete; the `oauth2` personality exists to be
-//! refused, not to sign.
+//! Signature Activation Data for a PIN; in `oauth2` mode the Signature
+//! Activation Data comes out of the authorization round instead, and the
+//! service is its own authorization server: `/oauth2/authorize` answers a
+//! redirect to the client's loopback listener and `/oauth2/token` redeems the
+//! code. PKCE is verified rather than accepted, because a client that could
+//! send any verifier would be a client whose PKCE was never tested.
 #![allow(dead_code)]
 
+use std::collections::HashMap;
 use std::io::{Read as _, Write as _};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -106,6 +110,14 @@ pub struct Mock {
     /// hostile or misconfigured service asks the client to carry its bearer
     /// token somewhere else.
     pub redirect_info_to: Option<String>,
+    /// Answer every token request with `invalid_grant`, which is what a wrong
+    /// PKCE verifier or a replayed code looks like from the client.
+    pub reject_token: bool,
+    /// How long the access tokens this service issues last. `None` omits
+    /// `expires_in` entirely, which is what a service that never says does.
+    pub expires_in: Option<u64>,
+    /// Whether a refresh token comes with them.
+    pub issue_refresh_token: bool,
 }
 
 impl Mock {
@@ -117,6 +129,9 @@ impl Mock {
             wrong_signature: false,
             credential_ids: vec![CREDENTIAL.to_owned()],
             redirect_info_to: None,
+            reject_token: false,
+            expires_in: Some(3_600),
+            issue_refresh_token: true,
         }
     }
 }
@@ -169,6 +184,12 @@ pub struct Service {
     seen_authorization: Arc<Mutex<Vec<String>>>,
     /// Every request path, in order, so a test can assert the sequence.
     seen_paths: Arc<Mutex<Vec<String>>>,
+    /// The query string of every `/oauth2/authorize` request, so a test can
+    /// assert what the client asked for: PKCE, the state, the scope, and the
+    /// credential parameters in whichever form the personality takes.
+    seen_authorize: Arc<Mutex<Vec<String>>>,
+    /// The body of every `/oauth2/token` request, for the same reason.
+    seen_token_requests: Arc<Mutex<Vec<String>>>,
 }
 
 impl Service {
@@ -189,6 +210,20 @@ impl Service {
             .expect("the log is not poisoned")
             .clone()
     }
+
+    pub fn authorize_queries(&self) -> Vec<String> {
+        self.seen_authorize
+            .lock()
+            .expect("the log is not poisoned")
+            .clone()
+    }
+
+    pub fn token_requests(&self) -> Vec<String> {
+        self.seen_token_requests
+            .lock()
+            .expect("the log is not poisoned")
+            .clone()
+    }
 }
 
 impl Drop for Service {
@@ -203,12 +238,16 @@ pub fn serve(mock: Mock, material: Material) -> Service {
     let listener = TcpListener::bind("127.0.0.1:0").expect("a loopback port is available");
     let address = listener.local_addr().expect("the port is known");
     let stop = Arc::new(AtomicBool::new(false));
-    let seen_authorization: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
-    let seen_paths: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let logs = Logs::default();
     let flag = Arc::clone(&stop);
-    let authorization_log = Arc::clone(&seen_authorization);
-    let path_log = Arc::clone(&seen_paths);
-    let state = Arc::new(State { mock, material });
+    let shared = logs.clone();
+    let state = Arc::new(State {
+        mock,
+        material,
+        address,
+        issued: Mutex::new(HashMap::new()),
+        refresh_tokens: Mutex::new(HashMap::new()),
+    });
     std::thread::spawn(move || {
         for stream in listener.incoming() {
             if flag.load(Ordering::SeqCst) {
@@ -216,33 +255,58 @@ pub fn serve(mock: Mock, material: Material) -> Service {
             }
             let Ok(mut stream) = stream else { continue };
             let state = Arc::clone(&state);
-            let authorization_log = Arc::clone(&authorization_log);
-            let path_log = Arc::clone(&path_log);
+            let logs = shared.clone();
             std::thread::spawn(move || {
-                handle(&mut stream, &state, &authorization_log, &path_log);
+                handle(&mut stream, &state, &logs);
             });
         }
     });
     Service {
         address,
         stop,
-        seen_authorization,
-        seen_paths,
+        seen_authorization: logs.authorization,
+        seen_paths: logs.paths,
+        seen_authorize: logs.authorize,
+        seen_token_requests: logs.token_requests,
     }
+}
+
+/// Everything the service records, shared with the threads that answer.
+#[derive(Clone, Default)]
+struct Logs {
+    authorization: Arc<Mutex<Vec<String>>>,
+    paths: Arc<Mutex<Vec<String>>>,
+    authorize: Arc<Mutex<Vec<String>>>,
+    token_requests: Arc<Mutex<Vec<String>>>,
+}
+
+impl Logs {
+    fn push(log: &Mutex<Vec<String>>, value: String) {
+        log.lock().expect("the log is not poisoned").push(value);
+    }
+}
+
+/// One authorization code the service has issued and not yet redeemed.
+struct Pending {
+    challenge: String,
+    redirect_uri: String,
+    /// The Signature Activation Data the credential round's token will be,
+    /// which is the hash the round was bound to. `None` for `scope=service`.
+    sad: Option<String>,
 }
 
 struct State {
     mock: Mock,
     material: Material,
+    address: SocketAddr,
+    /// Authorization codes awaiting redemption, by code.
+    issued: Mutex<HashMap<String, Pending>>,
+    /// Refresh tokens this service has handed out, by token.
+    refresh_tokens: Mutex<HashMap<String, ()>>,
 }
 
 /// One request, answered.
-fn handle(
-    stream: &mut TcpStream,
-    state: &State,
-    authorization_log: &Mutex<Vec<String>>,
-    path_log: &Mutex<Vec<String>>,
-) {
+fn handle(stream: &mut TcpStream, state: &State, logs: &Logs) {
     stream
         .set_read_timeout(Some(Duration::from_secs(5)))
         .expect("the read timeout is set");
@@ -264,15 +328,15 @@ fn handle(
         .unwrap_or_default()
         .to_owned();
     if let Some(value) = header(&head, "authorization") {
-        authorization_log
-            .lock()
-            .expect("the log is not poisoned")
-            .push(value.to_owned());
+        Logs::push(&logs.authorization, value.to_owned());
     }
-    path_log
-        .lock()
-        .expect("the log is not poisoned")
-        .push(path.clone());
+    // The query string is part of an authorization request and no part of a
+    // CSC operation, so the path log keeps the operation and the authorize log
+    // keeps the parameters.
+    Logs::push(
+        &logs.paths,
+        path.split('?').next().unwrap_or_default().to_owned(),
+    );
 
     let declared = header(&head, "content-length")
         .and_then(|value| value.trim().parse::<usize>().ok())
@@ -285,10 +349,18 @@ fn handle(
         }
     }
 
-    let (status, payload) = answer(state, &path, &body);
+    let (status, payload) = answer(state, &path, &body, logs);
     let location = match (status, &state.mock.redirect_info_to) {
         (302, Some(target)) => format!("Location: {target}\r\n"),
+        // An authorization redirect names its target in the body, which is
+        // where the redirect half of this mock puts it.
+        (302, None) => format!("Location: {payload}\r\n"),
         _ => String::new(),
+    };
+    let payload = if status == 302 && state.mock.redirect_info_to.is_none() {
+        String::new()
+    } else {
+        payload
     };
     let head = format!(
         "HTTP/1.1 {status} {}\r\n{location}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
@@ -314,13 +386,23 @@ fn handle(
 }
 
 /// The body one operation answers with.
-fn answer(state: &State, path: &str, body: &[u8]) -> (u16, String) {
+fn answer(state: &State, path: &str, body: &[u8], logs: &Logs) -> (u16, String) {
     let mock = &state.mock;
+    let (route, query) = path.split_once('?').unwrap_or((path, ""));
+    if route == "/oauth2/authorize" {
+        Logs::push(&logs.authorize, query.to_owned());
+        return authorize_round(state, query);
+    }
+    if route == "/oauth2/token" {
+        let form = String::from_utf8_lossy(body).into_owned();
+        Logs::push(&logs.token_requests, form.clone());
+        return token(state, &form);
+    }
     // The operation is the whole suffix, not the last segment: `info` and
     // `credentials/info` end in the same word and are different operations.
-    match path.strip_prefix("/csc/v2/").unwrap_or_default() {
+    match route.strip_prefix("/csc/v2/").unwrap_or_default() {
         "info" if mock.redirect_info_to.is_some() => (302, String::new()),
-        "info" => (200, info_body(mock)),
+        "info" => (200, info_body(state)),
         "credentials/list" => (
             200,
             format!(
@@ -339,20 +421,194 @@ fn answer(state: &State, path: &str, body: &[u8]) -> (u16, String) {
     }
 }
 
-fn info_body(mock: &Mock) -> String {
+fn info_body(state: &State) -> String {
+    let mock = &state.mock;
     let (algorithms, _) = mock.flavour.algorithms();
     format!(
         concat!(
             r#"{{"specs":"{}","name":"openSzigno mock CSC service","region":"EU","#,
-            r#""authType":["oauth2code"],"#,
+            r#""authType":["oauth2code"],"oauth2":"http://{}","#,
             r#""methods":["credentials/list","credentials/info","credentials/authorize","signatures/signHash"],"#,
             r#""signAlgorithms":{},"supportsRar":{},"supportedHashTypes":{}}}"#
         ),
         mock.flavour.specs(),
+        state.address,
         algorithms,
         mock.flavour.supports_rar(),
         mock.flavour.hash_types()
     )
+}
+
+/// `GET /oauth2/authorize`: the consent screen a person would see, answered
+/// as the redirect that screen ends in.
+///
+/// Everything the client is required to send is checked rather than assumed:
+/// the response type, PKCE with `S256`, a state, and a loopback redirect. The
+/// code is bound to the challenge, so only the client that started the round
+/// can redeem it.
+fn authorize_round(state: &State, query: &str) -> (u16, String) {
+    let parameters = form(query);
+    let value = |name: &str| parameters.get(name).cloned().unwrap_or_default();
+    if value("response_type") != "code"
+        || value("code_challenge_method") != "S256"
+        || value("code_challenge").is_empty()
+        || value("state").is_empty()
+    {
+        return (400, r#"{"error":"invalid_request"}"#.to_owned());
+    }
+    let redirect_uri = value("redirect_uri");
+    if !redirect_uri.starts_with("http://127.0.0.1:") {
+        return (400, r#"{"error":"invalid_request"}"#.to_owned());
+    }
+    // A credential round names the hash it authorises, in one of the two forms
+    // the surveyed services take. The token issued for it *is* the Signature
+    // Activation Data, so it is bound to that hash here.
+    let sad = if value("scope") == "credential" {
+        let hash = if let Some(details) = parameters.get("authorization_details") {
+            let parsed: serde_json::Value =
+                serde_json::from_str(details).expect("the client sent JSON authorization_details");
+            parsed[0]["documentDigests"][0]["hash"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned()
+        } else {
+            value("hashes")
+        };
+        if hash.is_empty()
+            || value("credentialID").is_empty() && !parameters.contains_key("authorization_details")
+        {
+            return (400, r#"{"error":"invalid_request"}"#.to_owned());
+        }
+        Some(format!("sad::{hash}"))
+    } else {
+        None
+    };
+    let code = format!("code-{}", state.issued.lock().expect("not poisoned").len());
+    state.issued.lock().expect("not poisoned").insert(
+        code.clone(),
+        Pending {
+            challenge: value("code_challenge"),
+            redirect_uri: redirect_uri.clone(),
+            sad,
+        },
+    );
+    // The body carries the redirect target; `handle` turns it into the header.
+    (
+        302,
+        format!(
+            "{redirect_uri}?code={code}&state={}",
+            value("state").replace('&', "")
+        ),
+    )
+}
+
+/// `POST /oauth2/token`: the authorization-code and refresh-token grants.
+fn token(state: &State, body: &str) -> (u16, String) {
+    if state.mock.reject_token {
+        return (400, r#"{"error":"invalid_grant"}"#.to_owned());
+    }
+    let parameters = form(body);
+    let value = |name: &str| parameters.get(name).cloned().unwrap_or_default();
+    let sad = match value("grant_type").as_str() {
+        "authorization_code" => {
+            let Some(pending) = state
+                .issued
+                .lock()
+                .expect("not poisoned")
+                .remove(&value("code"))
+            else {
+                return (400, r#"{"error":"invalid_grant"}"#.to_owned());
+            };
+            // RFC 7636 section 4.6: the verifier is checked against the
+            // challenge, and a code with the wrong one buys nothing.
+            if s256(&value("code_verifier")) != pending.challenge
+                || value("redirect_uri") != pending.redirect_uri
+            {
+                return (400, r#"{"error":"invalid_grant"}"#.to_owned());
+            }
+            pending.sad
+        }
+        "refresh_token" => {
+            if !state
+                .refresh_tokens
+                .lock()
+                .expect("not poisoned")
+                .contains_key(&value("refresh_token"))
+            {
+                return (400, r#"{"error":"invalid_grant"}"#.to_owned());
+            }
+            None
+        }
+        _ => return (400, r#"{"error":"unsupported_grant_type"}"#.to_owned()),
+    };
+    let access_token = sad.unwrap_or_else(|| {
+        format!(
+            "synthetic-service-token-{}",
+            state.refresh_tokens.lock().expect("not poisoned").len()
+        )
+    });
+    let mut fields = vec![
+        format!(r#""access_token":"{access_token}""#),
+        r#""token_type":"Bearer""#.to_owned(),
+    ];
+    if let Some(seconds) = state.mock.expires_in {
+        fields.push(format!(r#""expires_in":{seconds}"#));
+    }
+    if state.mock.issue_refresh_token {
+        let refresh = format!(
+            "synthetic-refresh-token-{}",
+            state.refresh_tokens.lock().expect("not poisoned").len()
+        );
+        state
+            .refresh_tokens
+            .lock()
+            .expect("not poisoned")
+            .insert(refresh.clone(), ());
+        fields.push(format!(r#""refresh_token":"{refresh}""#));
+    }
+    (200, format!("{{{}}}", fields.join(",")))
+}
+
+/// The base64url of the SHA-256 of a PKCE verifier, unpadded.
+fn s256(verifier: &str) -> String {
+    use sha2::Digest as _;
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(sha2::Sha256::digest(verifier))
+}
+
+/// A `key=value&...` string, percent-decoded.
+pub fn form(text: &str) -> HashMap<String, String> {
+    text.split('&')
+        .filter(|pair| !pair.is_empty())
+        .map(|pair| {
+            let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+            (percent_decode(key), percent_decode(value))
+        })
+        .collect()
+}
+
+/// Percent-decoding, `+` as a space, for the query and form parsers above.
+pub fn percent_decode(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'+' => out.push(b' '),
+            b'%' if index + 2 < bytes.len() => {
+                let hex = std::str::from_utf8(&bytes[index + 1..index + 3]).unwrap_or_default();
+                match u8::from_str_radix(hex, 16) {
+                    Ok(byte) => {
+                        out.push(byte);
+                        index += 2;
+                    }
+                    Err(_) => out.push(b'%'),
+                }
+            }
+            other => out.push(other),
+        }
+        index += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 fn credential_body(state: &State) -> String {

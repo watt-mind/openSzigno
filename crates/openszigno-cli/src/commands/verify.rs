@@ -244,11 +244,7 @@ pub(crate) fn verify_command(args: &VerifyArgs) -> CliResult {
                     .map_err(|message| {
                         failure(
                             input.clone(),
-                            CliError {
-                                code: "online_options_invalid",
-                                message,
-                                exit: 3,
-                            },
+                            CliError::option_invalid("online_options_invalid", message),
                         )
                     })?;
             let limits = openszigno_verify::VerifyLimits::default();
@@ -367,10 +363,14 @@ pub(crate) fn verify_command(args: &VerifyArgs) -> CliResult {
     // certificate no verdict depended on sink a dossier whose every signature
     // is valid.
     report.checks.extend(online_checks);
+    // `Verdict` is `#[non_exhaustive]`, so this match keeps a wildcard arm.
+    // Only `valid` exits 0 and only `invalid` exits 6; `indeterminate` and any
+    // verdict a future version of the verifier adds exit 7, because a verdict
+    // this build cannot name is one it cannot call passing.
     let exit = match report.verdict {
         Verdict::Invalid => 6,
-        Verdict::Indeterminate => 7,
         Verdict::Valid => 0,
+        _ => 7,
     };
     let mut data = serde_json::to_value(&report).map_err(|_| {
         failure(

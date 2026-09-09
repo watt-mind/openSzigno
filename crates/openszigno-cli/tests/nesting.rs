@@ -1042,3 +1042,64 @@ fn a_document_without_a_source_size_is_reported_by_every_command() {
         .expect("human output is text");
     assert!(stdout.contains("| ? B |"), "{stdout}");
 }
+
+// ---------------------------------------------------------------------------
+// A PAdES payload
+// ---------------------------------------------------------------------------
+
+/// AVDH authenticated a PDF by signing it as a PDF: the result is a PAdES
+/// signature inside the payload, which this build does not verify and must not
+/// choke on either. `inspect` and `list` describe it as the document it is,
+/// `extract` sniffs it as a PDF, and nothing anywhere claims a signature was
+/// checked.
+#[test]
+fn a_pades_pdf_payload_is_reported_as_a_document() {
+    // A PDF far too small to be real, carrying the marker a PAdES signature
+    // dictionary uses. Nothing here is parsed as PDF by any command.
+    let pdf = b"%PDF-1.7\n1 0 obj<</Type/Sig/SubFilter/ETSI.CAdES.detached>>endobj\n%%EOF\n";
+    let xml = dossier(&document(
+        0,
+        "authenticated",
+        "application",
+        "pdf",
+        Some("pdf"),
+        pdf,
+    ));
+    let directory = scratch();
+    let input = write_input(directory.path(), &xml);
+
+    for command in ["inspect", "list", "validate-structure"] {
+        let output = run(&[command, input.to_str().unwrap(), "--json"]);
+        assert!(output.status.success(), "{command} must succeed");
+        let response = parse_json(&output);
+        assert_eq!(response["ok"], Value::Bool(true));
+        assert!(
+            warning_codes(&response).is_empty(),
+            "{command} must warn about nothing"
+        );
+    }
+
+    let listed = parse_json(&run(&["list", input.to_str().unwrap(), "--json"]));
+    let documents = listed["data"]["documents"]
+        .as_array()
+        .expect("documents are listed");
+    assert_eq!(documents.len(), 1);
+    assert_eq!(documents[0]["mime_type"]["media_type"], "application");
+    assert_eq!(documents[0]["mime_type"]["subtype"], "pdf");
+    // The dossier itself carries no XML signature, and the PDF's own is never
+    // looked at: nothing was verified, and the output says so.
+    assert_eq!(listed["data"]["dossier"]["signatures_present"], 0);
+    assert_eq!(
+        listed["data"]["dossier"]["signatures_verified"],
+        Value::Bool(false)
+    );
+
+    let (output, _directory, _output_dir) = extract_with(&xml, &[]);
+    assert!(output.status.success());
+    let extracted = parse_json(&output)["data"]["extracted"]
+        .as_array()
+        .expect("files were extracted")
+        .clone();
+    assert_eq!(extracted[0]["detected_type"], "pdf");
+    assert_eq!(extracted[0]["filename"], "authenticated.pdf");
+}

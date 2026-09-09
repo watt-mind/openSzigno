@@ -21,13 +21,15 @@ use clap::Parser;
 use openszigno_core::DecryptOptions;
 use serde_json::Value;
 
-use crate::args::{Cli, Command, MAX_NESTING_DEPTH};
+use crate::args::{Cli, Command, CscCommand, MAX_NESTING_DEPTH};
 use crate::commands::create::create;
+use crate::commands::csc::csc_login;
 use crate::commands::extract::{extract, load_recipient_key};
 use crate::commands::inspect::inspect;
 use crate::commands::list::list;
 use crate::commands::sign::sign;
 use crate::commands::skill::skill;
+use crate::commands::timestamp::timestamp;
 use crate::commands::validate::validate_structure;
 use crate::commands::verify::verify_command;
 use crate::extract::ExtractRequest;
@@ -109,6 +111,18 @@ fn main() -> ExitCode {
             let result = sign(&args);
             ("sign", args.json, result)
         }
+        Command::Timestamp(args) => {
+            let result = timestamp(&args);
+            ("timestamp", args.json, result)
+        }
+        // `csc login` reads no dossier: it obtains the tokens a later
+        // `sign --csc` needs, and its envelope describes no input.
+        Command::Csc(args) => match args.command {
+            CscCommand::Login(args) => {
+                let result = csc_login(&args);
+                ("csc-login", args.json, result)
+            }
+        },
         // Handled above, before any envelope machinery is set up.
         Command::Skill => unreachable!("skill is handled before the dispatch"),
     };

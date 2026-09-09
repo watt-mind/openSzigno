@@ -103,7 +103,7 @@ fn run(args: &SignArgs, options: &ParseOptions, bytes: &[u8]) -> Result<Success,
         None => sign_dossier(bytes, options, &request, signer, None),
         Some(url) => {
             let fetcher = Fetcher::new(args.online_proxy.as_deref(), args.online_allow_private)
-                .map_err(|message| CliError::invalid("online_options_invalid", message))?;
+                .map_err(|message| CliError::option_invalid("online_options_invalid", message))?;
             let mut stamp = |octets: &[u8]| -> Result<Vec<u8>, String> {
                 let query =
                     timestamp_request(octets).map_err(|error| error.message().to_owned())?;
@@ -180,6 +180,7 @@ fn load_backend(args: &SignArgs) -> Result<(Backend, Vec<Notice>), CliError> {
         credential: args.csc_credential.as_deref(),
         proxy: args.online_proxy.as_deref(),
         allow_private: args.online_allow_private,
+        interactive: !args.no_interactive,
     })?;
     Ok((Backend::Csc(Box::new(signer)), notices))
 }

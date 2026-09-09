@@ -47,6 +47,13 @@ fn write_signature_inventory(out: &mut impl Write, inventory: &Value) -> io::Res
         if !properties.is_empty() {
             line.push_str(&format!(", xades={properties}"));
         }
+        // Claimed roles, when the signature states any. An AVDH-authenticated
+        // dossier carries the citizen's asserted identity here, and it is a
+        // claim like every other line: nothing on it was checked.
+        let roles = join_json_strings(&signature["claimed_roles"]);
+        if !roles.is_empty() {
+            line.push_str(&format!(", claimed roles={roles}"));
+        }
         let evidence = &signature["evidence"];
         line.push_str(&format!(
             ", certificates={}, crls={}, ocsp={}, signature-timestamps={}, archive-timestamps={}",
@@ -392,6 +399,74 @@ pub(crate) fn write_human_success(command: &str, response: &Response) -> io::Res
                 out,
                 "Signing verified nothing. Run `openszigno verify` with your own trust material to judge these signatures."
             )?;
+        }
+        "timestamp" => {
+            let timestamps = response.data["timestamps"]
+                .as_array()
+                .map_or(&[][..], |items| items);
+            writeln!(
+                out,
+                "Timestamped {} ({} B, {} timestamp(s)).",
+                display_json_string(&response.data["output"]),
+                response.data["bytes"],
+                timestamps.len()
+            )?;
+            for timestamp in timestamps {
+                let mut line = format!(
+                    "{} | scope={}",
+                    display_json_string(&timestamp["id"]),
+                    display_json_string(&timestamp["scope"])
+                );
+                if let Some(index) = timestamp["document_index"].as_u64() {
+                    line.push_str(&format!(" | document={index}"));
+                }
+                // The authority's own claim about when it saw the imprint.
+                // Nothing in this run checked it.
+                if let Some(gen_time) = timestamp["gen_time"].as_str() {
+                    line.push_str(&format!(" | genTime={gen_time}"));
+                }
+                writeln!(out, "{line}")?;
+            }
+            writeln!(
+                out,
+                "Timestamping verified nothing. Run `openszigno verify` with your own trust material to judge this timestamp."
+            )?;
+        }
+        "csc-login" => {
+            let data = &response.data;
+            writeln!(
+                out,
+                "Logged in to {}.",
+                display_json_string(&data["base_url"])
+            )?;
+            writeln!(
+                out,
+                "Token written to {} (mode 0600 on Unix; it is never printed).",
+                display_json_string(&data["token_file"])
+            )?;
+            let expiry = data["expires_at"]
+                .as_str()
+                .map_or_else(|| "not stated by the service".to_owned(), str::to_owned);
+            writeln!(
+                out,
+                "Expires: {expiry} | refresh token stored: {}",
+                data["refresh_token_stored"]
+            )?;
+            writeln!(
+                out,
+                "Service: specs={} | supportsRar={}",
+                display_json_string(&data["specs"]),
+                data["supports_rar"]
+            )?;
+            if let Some(credential) = data["credential"].as_object() {
+                writeln!(
+                    out,
+                    "Credential {} | auth mode={} | interactive signature round required: {}",
+                    display_json_string(&credential["credential_id"]),
+                    display_json_string(&credential["auth_mode"]),
+                    credential["interactive_signature_required"]
+                )?;
+            }
         }
         "validate-structure" => {
             writeln!(

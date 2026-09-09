@@ -18,10 +18,11 @@ pub use decode::{DecodeOutcome, DecodedDocument, UnsupportedReason, decode_docum
 pub use decrypt::{DecryptOptions, RecipientKey};
 pub use error::{Error, ErrorCode};
 pub use model::{
-    Document, Dossier, Limits, MAX_INVENTORIED_DIGEST_METHODS, MAX_INVENTORIED_REFERENCE_URIS,
-    MAX_INVENTORIED_SIGNATURES, MAX_INVENTORIED_TIMESTAMPS, MAX_INVENTORIED_XADES_PROPERTIES,
-    MimeType, ParseOptions, SignatureEvidence, SignaturePlacement, SignatureSummary,
-    StructuralWarning, StructuralWarningCode, TimestampPlacement, TimestampSummary,
+    Document, Dossier, Limits, MAX_INVENTORIED_CLAIMED_ROLE_CHARS, MAX_INVENTORIED_CLAIMED_ROLES,
+    MAX_INVENTORIED_DIGEST_METHODS, MAX_INVENTORIED_REFERENCE_URIS, MAX_INVENTORIED_SIGNATURES,
+    MAX_INVENTORIED_TIMESTAMPS, MAX_INVENTORIED_XADES_PROPERTIES, MimeType, ParseOptions,
+    SignatureEvidence, SignaturePlacement, SignatureSummary, StructuralWarning,
+    StructuralWarningCode, TimestampPlacement, TimestampSummary,
 };
 pub use sniff::{DetectedType, sniff};
 pub use text::{MAX_DISPLAY_CHARS, sanitize_display};

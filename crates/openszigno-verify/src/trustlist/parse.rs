@@ -20,9 +20,27 @@ use super::services::{
 };
 use super::{MAX_TRUST_LIST_BYTES, verify_list_signature};
 
-/// The TS 119 612 namespaces this build recognises. TLv5 and TLv6 share the
-/// element namespace; only the content differs.
+/// The TS 119 612 namespaces this build recognises.
+///
+/// TLv5 and TLv6 share it. ETSI TS 119 612 V2.3.1 and V2.4.1, annex B.0, both
+/// name `http://uri.etsi.org/02231/v2#` as the base schema namespace and note
+/// that the "02231" in it is kept from ETSI TS 102 231 "for compatibility
+/// reasons": the namespace did not move at the TLv6 cut-over, so the version
+/// has to be read from `TSLVersionIdentifier` and cannot be inferred from the
+/// namespace.
 const TSL_NAMESPACES: &[&str] = &["http://uri.etsi.org/02231/v2#"];
+
+/// The `TSLVersionIdentifier` values this build parses.
+///
+/// `5` is TLv5, the format every EU member state published until 2026-04-28.
+/// `6` is TLv6, mandatory from 2026-04-29 with no transition period, and the
+/// value ETSI TS 119 612 V2.3.1 and V2.4.1 clause 5.3.1 both require ("It
+/// shall be \"6\""). The two share the namespace, the element vocabulary this
+/// build reads, and the registered service-type and service-status URIs, so
+/// one parser serves both; what a version identifier outside this set means
+/// for the parsing rules is precisely what clause 5.3.1's note says the field
+/// exists to signal, and guessing is not an option.
+const SUPPORTED_TSL_VERSIONS: &[u64] = &[5, 6];
 
 /// The largest number of anchors one list may contribute.
 const MAX_ANCHORS: usize = 4096;
@@ -35,6 +53,10 @@ const MAX_POINTER_CERTIFICATES: usize = 512;
 /// One loaded trusted list.
 #[derive(Clone, Debug)]
 pub struct TrustList {
+    /// The `TSLVersionIdentifier` the list states: 5 (TLv5) or 6 (TLv6). A
+    /// list stating anything else, or nothing, does not load at all, so this
+    /// is always one of the two.
+    pub version: u64,
     pub sequence_number: Option<u64>,
     pub territory: Option<String>,
     pub issue_date: Option<String>,
@@ -86,6 +108,7 @@ pub fn load(
     }
 
     let scheme = child(root, "SchemeInformation");
+    let version = read_version(scheme)?;
     let sequence_number = scheme
         .and_then(|node| child(node, "TSLSequenceNumber"))
         .and_then(|node| text(node).trim().parse::<u64>().ok());
@@ -107,7 +130,7 @@ pub fn load(
             "the trusted list's own signature was not checked, because no signer certificate was given; its anchors are used but cannot support a valid verdict",
         ));
     } else {
-        checks.push(verify_list_signature(&source, root, signers, backend));
+        checks.extend(verify_list_signature(&source, root, signers, backend));
     }
 
     // The pointers are read whatever the signature said, so that a caller can
@@ -156,12 +179,13 @@ pub fn load(
     checks.push(Check::info(
         CheckCode::TrustListLoaded,
         format!(
-            "the trusted list contributed {} trust anchor(s) from qualified CA and timestamping services",
+            "the trusted list is ETSI TS 119 612 version {version} (TLv{version}) and contributed {} trust anchor(s) from qualified CA and timestamping services",
             anchors.len()
         ),
     ));
 
     Ok(TrustList {
+        version,
         sequence_number,
         territory,
         issue_date,
@@ -171,6 +195,36 @@ pub fn load(
         pointer_certificates,
         checks,
     })
+}
+
+/// Read and check `SchemeInformation/TSLVersionIdentifier`.
+///
+/// The field decides which parsing rules apply — that is the whole reason
+/// TS 119 612 clause 5.3.1 says it "will only be incremented when the rules for
+/// parsing the TL change" — so a list that states a version this build has
+/// never seen is refused rather than parsed as if it were one that it has. A
+/// list that states no version at all is refused for the same reason: the
+/// field "shall be present" in every issue of the specification, and a parser
+/// that guessed would be guessing about trust anchors.
+///
+/// The refusal message names the version, because "which version is this file"
+/// is the one question an operator needs answered on the day the EU cut over.
+fn read_version(scheme: Option<Node<'_, '_>>) -> Result<u64, String> {
+    let Some(stated) = scheme
+        .and_then(|node| child(node, "TSLVersionIdentifier"))
+        .map(|node| text(node).trim().to_owned())
+    else {
+        return Err(
+            "the trusted list states no TSLVersionIdentifier, which ETSI TS 119 612 requires; without it there is no saying which version's parsing rules apply".to_owned(),
+        );
+    };
+    match stated.parse::<u64>() {
+        Ok(version) if SUPPORTED_TSL_VERSIONS.contains(&version) => Ok(version),
+        _ => Err(format!(
+            "the trusted list states TSLVersionIdentifier \"{}\", which this build does not parse; it reads ETSI TS 119 612 version 5 (TLv5) and version 6 (TLv6, mandatory in the EU from 2026-04-29)",
+            sanitize(&stated)
+        )),
+    }
 }
 
 /// Read one `TSPService` into zero or more anchors.

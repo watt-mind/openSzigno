@@ -2,9 +2,10 @@
 //!
 //! This crate is the writer side of openSzigno. It builds an unsigned
 //! `es:Dossier` in the default e-Szignó 3.0 namespace, in the shape
-//! [`openszigno_core`] parses, and it does almost nothing else: it signs
-//! nothing, reads no file, and consults no clock. A dossier it produces
-//! carries no signature and is not evidence of anything.
+//! [`openszigno_core`] parses, and [`sign`] adds the two things that can be
+//! written into one afterwards: a signature, and a container `es:TimeStamp`.
+//! It reads no file, opens no socket and consults no clock, and it verifies
+//! nothing whatever: a dossier it produces is not evidence of anything.
 //!
 //! The one exception is the `encrypt` transform: when a [`DossierSpec`]
 //! names recipients, a document's payload is written as a CMS

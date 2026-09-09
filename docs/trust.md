@@ -9,8 +9,8 @@ gained nothing: whoever can answer the download decides what is trusted. Pinning
 the material yourself is more work and is the only version of the job that means
 anything.
 
-The one exception is `--online`, which lets the CLI fetch **revocation data**
-— and only revocation data — from the URLs the certificates themselves publish.
+The one exception is `--online`, which lets the CLI fetch **revocation data**,
+and only revocation data, from the URLs the certificates themselves publish.
 Trust anchors and trusted lists are never fetched, in any mode. See
 [Online fetching](#online-fetching).
 
@@ -77,6 +77,23 @@ plain-HTTP direct links, verify the fingerprints against the ones the page
 publishes, and record where and when you fetched them. `docs/references.md`
 lists the URLs and the checksums of the copies in the gitignored `refs/` cache.
 
+Documents authenticated with AVDH, the Hungarian state's identification-based
+document authentication service, are signed by a state seal rather than by the
+citizen, and section 634(15) of the Code of Civil Procedure keeps the ones
+issued up to 31 December 2024 in circulation indefinitely. The published
+service description says the seal is an advanced electronic seal on a
+**qualified certificate**, accompanied by a qualified timestamp
+([SZEUSZ](https://szeusz.gov.hu/szeusz/avdh-dhsz)), which means its chain ends
+at a Hungarian qualified trust service provider on the national trusted list,
+and loading the Hungarian trusted list is therefore the way to validate one.
+**Which** provider issued the seal certificate could not be established from a
+public source: the service's own terms of service were not reachable from this
+environment, and no published certificate profile was found. Read the issuer
+off a document you actually hold rather than assuming a root here. Nothing in
+openSzigno special-cases such a certificate; it is path-validated like any
+other, and what the read path does with the rest of the structure is described
+in [architecture.md](architecture.md#avdh-authenticated-documents).
+
 ## Trusted lists
 
 An ETSI TS 119 612 trusted list is how an EU member state says which CAs are
@@ -95,11 +112,18 @@ one gives two things a directory of certificates cannot:
 | EU list of trusted lists (LOTL) | <https://ec.europa.eu/tools/lotl/eu-lotl.xml> | <https://ec.europa.eu/digital-building-blocks/sites/spaces/DIGITAL/pages/467109149/eSignature+List+of+Trusted+Lists> |
 | Hungarian trusted list | <https://nmhh.hu/tl/pub/HU_TL.xml> | <https://nmhh.hu/tl/pub/HU_TL.pdf> |
 
+Both are served over HTTPS, and both should be fetched that way: the Hungarian
+list moved off plain HTTP at the TLv6 cut-over (see below), and a trusted list
+fetched over HTTP is a trusted list whoever answers the request chose for you.
+The signature check is what actually decides, that is the whole point of
+`--trust-list-signer`, but there is no reason to hand an attacker the first
+move.
+
 The lists are refreshed daily. Fetch a snapshot, record its
 `TSLSequenceNumber` and `ListIssueDateTime`, and keep it under version control
 or in an archive alongside whatever you verified with it; the report's
-`policy.trust_lists` block cites exactly those fields so a result can be
-reproduced later.
+`policy.trust_lists` block cites exactly those fields, plus the `version` the
+list stated, so a result can be reproduced later.
 
 ```bash
 mkdir -p trust-lists
@@ -107,11 +131,82 @@ curl --proto '=https' --tlsv1.2 -sSf \
   https://nmhh.hu/tl/pub/HU_TL.xml -o trust-lists/HU_TL.xml
 ```
 
+### TLv5 and TLv6
+
+On **2026-04-29** every EU trusted list moved from TLv5 to TLv6, with **no
+transition period**: until 2026-04-28 all member-state lists were version 5,
+and from that date only version 6 is published or accepted. openSzigno reads
+both, because an archived snapshot taken before the cut-over is still a TLv5
+file and still the right list to verify a signature made back then against.
+
+`SchemeInformation/TSLVersionIdentifier` says which version a file is ,
+ETSI TS 119 612 clause 5.3.1 requires the field and says it is incremented
+exactly when the rules for parsing the list change. A list stating `5` or `6`
+loads; anything else, and a list stating nothing, is refused as
+`trust_list_invalid` (exit 3) with a message naming what it stated. That is
+deliberate: a parser that guessed at an unknown version would be guessing about
+trust anchors. The version read is reported twice, as
+`policy.trust_lists[].version` in the machine-readable report and in the
+`trust_list_loaded` check message, so a run always says which format it read.
+
+What TLv6 actually changed, and what it did not:
+
+| Aspect | TLv5 | TLv6 | Effect here |
+| --- | --- | --- | --- |
+| Specification | ETSI TS 119 612 V2.1.1 | V2.3.1 (2024-11), now V2.4.1 (2025-08) | n/a |
+| `TSLVersionIdentifier` | `5` | `6` | The one thing branched on. |
+| Schema namespace | `http://uri.etsi.org/02231/v2#` | unchanged | Nothing to branch on. Annex B.0 of both issues names the same three namespaces and notes the `02231` is kept from ETSI TS 102 231 "for compatibility reasons". |
+| Service status URIs | the `.../Svcstatus/...` set | unchanged | The granted/pre-eIDAS/terminal rules below are untouched. |
+| Service type URIs | the `.../Svctype/...` set | extended (wallet-era types such as `.../Svctype/EAA/Q`, `.../Svctype/Ledgers/Q`) | Additive. This build reads `CA/QC` and `TSA/QTST` and ignores the rest, exactly as before. |
+| `ServiceDigitalIdentity` | `X509Certificate`, `X509SubjectName`, `X509SKI`, `ds:KeyValue` | unchanged | All three forms are read as before. |
+| `PointersToOtherTSL` | names the national lists' signers | unchanged | The LOTL bootstrap is unaffected. |
+| Signature format | XAdES-BES (TS 101 903) | XAdES-B-B (EN 319 132-1) | Both are an enveloped `ds:Signature` over the whole list; the difference is in the signed properties, which this build does not require. `xades:SigningCertificateV2` is now the mandated signed property. |
+| Signature reference | `URI=""` in practice | unchanged in practice | Annex B.1.0 rule 2 permits a same-document `#Id` naming `TrustServiceStatusList` instead, and this build now accepts both. |
+| Canonicalization | exclusive c14n | unchanged | Already the only algorithm real lists use, and inside the allowlist. |
+| Signature algorithms | XML-Signature's set, plus ECDSA and SHA-2 | unchanged wording (annex B.1.2), constrained by ETSI TS 119 312 tables 4, 6 and 7 to a key usable for at least three years | Covered: see below. |
+| `ServiceSupplyPoint` | URIs | each URI may now carry a type attribute | Not read here; supply points contribute no trust. |
+| `ElectronicAddress` | e-mail or web address | may also carry a telephone number | Not read here. |
+
+The signature algorithms the live lists actually use are inside the pinned
+allowlist: the EU LOTL signs with `rsa-sha512` (RSA PKCS#1 v1.5) and the
+Hungarian list with `ecdsa-sha256` over a P-256 key. The allowlist is RSA
+PKCS#1 v1.5 and RSA-PSS with SHA-256/384/512, and ECDSA with SHA-256,
+SHA-384 and SHA-512 (P-256, P-384 and P-521), which covers the ETSI TS 119 312
+algorithms annex B.1.2 admits for a list's own signature. The curve is bound to
+the digest the method names, so a P-521 key under `ecdsa-sha256` is refused
+rather than verified. SHA-1 is refused in a trusted list's own signature
+whatever `--allow-legacy-algorithms` says.
+
+#### TLv6 caveats
+
+Points established from the specification text and from the live lists, but
+worth knowing they were not proven against every member state's file:
+
+- **Only the EU LOTL and the Hungarian list were exercised end to end.** Both
+  are TLv6 today and both parse, and the Hungarian list's signature verifies
+  through the LOTL's pointer certificates. The other 26 member-state lists were
+  not fetched.
+- **Whether every TLv6 list is version-tagged the way the two checked ones
+  are.** The specification requires the field; a list that omits it is refused
+  here rather than assumed to be TLv6.
+- **XAdES-B-B's signed properties are required only where they exist.** The
+  extra `ds:Reference` over `xades:SignedProperties` must verify, and does. A
+  list that carries a signed `xades:SigningCertificateV2` is now also held to
+  it, and the clause 5.7.1 restrictions on the scheme operator's certificate
+  are reported: see [The scheme operator's own
+  certificate](#the-scheme-operators-own-certificate) below. A list that
+  carries no such property, as a TLv5 XAdES-BES list need not, says nothing
+  about who signed it, and the caller's out-of-band certificate stays the only
+  answer.
+- **`Qualifications` and other scheme extensions are still not processed**, in
+  either version, and are reported as unprocessed rather than used to widen a
+  determination.
+
 ### Bootstrapping national lists from the LOTL
 
 The LOTL's `PointersToOtherTSL` entries name the signing certificates of the
-national lists. `--lotl FILE` reads them, so **one** out-of-band certificate —
-the LOTL's, from the Official Journal — verifies the LOTL, and the LOTL's
+national lists. `--lotl FILE` reads them, so **one** out-of-band certificate
+(the LOTL's, from the Official Journal) verifies the LOTL, and the LOTL's
 pointers then verify each `--trust-list`:
 
 ```bash
@@ -137,29 +232,77 @@ it.
 
 Pass that certificate as `--trust-list-signer CERT` (PEM or DER, exactly one
 certificate). openSzigno then verifies the list's enveloped signature with the
-same XMLDSig core it uses on a dossier — the same canonicalization backend, the
-same pinned algorithm and transform allowlists — and requires the signature to
+same XMLDSig core it uses on a dossier (the same canonicalization backend, the
+same pinned algorithm and transform allowlists) and requires the signature to
 cover the whole document.
 
-Any one of the supplied certificates verifying is enough — the one from
+Any one of the supplied certificates verifying is enough: the one from
 `--trust-list-signer` plus, when `--lotl` was given, every pointer certificate
-it named — because a scheme operator may publish several and a verifier cannot
+it named, because a scheme operator may publish several and a verifier cannot
 know which of them signed the copy in hand.
 
 - Signature verifies: `trust_list_signature_ok` (`passed`).
 - Signature does not verify against any supplied certificate, or the list
   carries none while one was demanded: `trust_list_signature_invalid`
-  (`failed`) — the run is `invalid`.
+  (`failed`); the run is `invalid`.
 - No signer certificate at all: `trust_list_unverified` (`unknown`). The list's
   anchors are still used, but the run can never reach `valid`.
+
+### The scheme operator's own certificate
+
+Verifying the signature answers "did this key sign this list". Two further
+questions follow, and openSzigno answers them at two different strengths,
+because they are not the same kind of question.
+
+**Does the list itself say this is its signer?** A TLv6 list is signed as
+XAdES-B-B, and annex B.1.1 of ETSI TS 119 612 V2.4.1 makes
+`xades:SigningCertificateV2` "an effective way of securing the scheme operator
+identifier": the property is covered by the signature, so it is the scheme
+operator's own signed statement of which certificate signed. When a list
+carries it, or the older `xades:SigningCertificate`, the certificate the caller
+supplied must be the one it designates, digest and all. If it is not, the
+caller and the list disagree about who signed, and this build does not pick a
+winner: `trust_list_signer_mismatch` (`unknown`) blocks, and the list cannot
+support a `valid` verdict. The property is read only where the list's own
+signature actually covers it; an unsigned `ds:Object` decides nothing.
+
+**Does the certificate look like a scheme operator's?** ETSI TS 119 612
+clause 5.7.1 says the certificate used to validate the signature on a trusted
+list:
+
+| Clause 5.7.1 requirement | Checked here |
+| --- | --- |
+| The issuer "shall be the TLSO itself (i.e. a self-signed certificate) or a TSP trust service listed in the TL or in one of the TL that is part of the same community" | Self-signed, or issued by a certificate this list names. The other-list half of the rule cannot be answered from one file. |
+| "Country code" and "Organization" in the subject shall match the scheme territory and a scheme operator name | Not checked. It is a comparison of transliterated names, which this build does not do. |
+| KeyUsage "shall be set to digitalSignature and/or to nonRepudiation (contentCommitment) to the exclusion of any other KeyUsage value" | The extension, when present, must include one of the two. The exclusivity half is not enforced. |
+| ExtendedKeyUsage "should be present containing id-tsl-kp-tslSigning" (`0.4.0.2231.3.0`) | Reported when absent or when the extension names other purposes instead. |
+| SubjectKeyIdentifier shall be present | Not checked; it identifies, it does not authorise. |
+| BasicConstraints "shall indicate CA=false" | The extension, when present, must not say `CA=true`. |
+
+Each failed rule is one `trust_list_signer_unqualified` check, at `info`, whose
+message names the requirement. **None of them blocks.** Two reasons, and the
+second is the decisive one:
+
+- The clause makes the extended key usage a "should", not a "shall".
+- The European Commission's own LOTL signing certificate does not carry
+  `id-tsl-kp-tslSigning` at all: its `extendedKeyUsage` names TLS client
+  authentication and e-mail protection, and it is not self-signed. A build that
+  blocked on those rules would refuse the one list every national list is
+  bootstrapped from. The Hungarian list's signer, by contrast, satisfies every
+  rule above, `id-tsl-kp-tslSigning` included.
+
+What makes a list trustworthy here is the caller's out-of-band certificate and
+the cryptography, not the scheme operator's certificate hygiene. The hygiene is
+still worth reporting, because a scheme operator certificate that drifts from
+the clause is worth someone looking at.
 
 ### What is read, and what is not
 
 For every `TSPService` whose `ServiceTypeIdentifier` is:
 
-- `http://uri.etsi.org/TrstSvc/Svctype/CA/QC` — a CA issuing qualified
+- `http://uri.etsi.org/TrstSvc/Svctype/CA/QC`: a CA issuing qualified
   certificates, or
-- `http://uri.etsi.org/TrstSvc/Svctype/TSA/QTST` — a qualified timestamping
+- `http://uri.etsi.org/TrstSvc/Svctype/TSA/QTST`: a qualified timestamping
   authority,
 
 every `X509Certificate` in the service digital identity becomes a trust anchor,
@@ -171,7 +314,7 @@ real national list the CA/QC identities are the *issuing* CAs, which are
 intermediates: the Hungarian list records NetLock's qualified issuing CAs as
 CA/QC services with pre-eIDAS history, and the root that signed them only as a
 qualified timestamping service granted from 2018. Following ETSI TS 119 615,
-the path ends where the list speaks — at the issuing CA — rather than climbing
+the path ends where the list speaks (at the issuing CA) rather than climbing
 to the root and being judged by an entry that was never about issuing
 certificates. The nearest listed certificate along a chain wins, so a root's
 entry cannot override the issuing CA's below it; when the nearest one's service
@@ -189,7 +332,7 @@ supervised still verify after that CA was withdrawn, and stops a signature made
 after the withdrawal from doing so: the path then reports
 `trust_list_service_not_granted` instead of `cert_path_ok`, and every other
 candidate path is tried before that is concluded. The check is `unknown`, not
-`failed` — trust you no longer have is not evidence against a signature — so
+`failed`: trust you no longer have is not evidence against a signature, so
 the run is capped at `indeterminate` and is never `invalid` for this reason
 alone. A `--trust-store` anchor is unaffected.
 
@@ -197,7 +340,7 @@ The kind of service has to match the use: a CA/QC service for a signing path
 (and for an OCSP responder's own path), a TSA/QTST service for a timestamping
 one. Where a list records a certificate only under some *other* kind of
 service, it has said nothing about that use, and the anchor is treated as a
-trust-store one would be — provided some service it does record was granted
+trust-store one would be, provided some service it does record was granted
 then. A certificate every one of whose listed services has been withdrawn
 anchors nothing.
 
@@ -219,17 +362,17 @@ been granted under the new vocabulary, so the window closes. Whichever status
 was honoured is named in the `certificate_qualified` message, so you can always
 tell an eIDAS `granted` from a historical `accredited`.
 
-Every terminal status — `withdrawn`, `supervisionceased`, the `deprecated*`
-family — is never treated as granted.
+Every terminal status (`withdrawn`, `supervisionceased`, the `deprecated*`
+family) is never treated as granted.
 
 Service digital identities are read in all three forms a real list uses, but
 they are not equally strong:
 
 | Form | What it can do |
 | --- | --- |
-| `X509Certificate` | Becomes a **trust anchor** — self-signed or not, so a listed issuing CA ends a path — and can establish that a chain certificate *was issued by* the listed service: a verified signature, not a name match. |
+| `X509Certificate` | Becomes a **trust anchor** (self-signed or not, so a listed issuing CA ends a path) and can establish that a chain certificate *was issued by* the listed service: a verified signature, not a name match. |
 | `X509SKI` | Recognises a certificate already in the validated chain by its `subjectKeyIdentifier`. Contributes **no anchor** and grants no trust; it can only decide `qualified`. |
-| `X509SubjectName` | The same, matched attribute by attribute against the certificate's subject, exactly as written — no case folding, no normalisation. The weakest form. |
+| `X509SubjectName` | The same, matched attribute by attribute against the certificate's subject, exactly as written, no case folding, no normalisation. The weakest form. |
 
 If a national list names its CAs only by SKI or subject name, you still need
 the certificates themselves in `--trust-store` for a path to be built; the list
@@ -240,14 +383,14 @@ Deliberately not read:
 - Scheme-level `Qualifications` extensions, which refine qualified status per
   certificate subset. They are never used to *widen* a determination.
 - Trusted lists themselves, over the network. There is no
-  `openszigno trust update`, and `--online` does not fetch lists — only
+  `openszigno trust update`, and `--online` does not fetch lists, only
   revocation data.
 
 ### How `qualified` is decided
 
 **Over the whole chain, not over its anchor.** This matters in practice: the
-Hungarian list names the *issuing* CAs — the "Qualified e-Szigno CA" style
-services — as its CA/QC service identities, while the Microsec roots that end
+Hungarian list names the *issuing* CAs (the "Qualified e-Szigno CA" style
+services) as its CA/QC service identities, while the Microsec roots that end
 the chain are certificates you pinned into `--trust-store` yourself. A rule that
 looked only at the anchor would answer "not determined" for every real dossier.
 
@@ -260,7 +403,7 @@ Two things must both hold:
 2. the signing certificate's own `QCStatements` do not contradict it. A
    certificate issued on or after 2016-07-01, when eIDAS began to apply, whose
    `qcStatements` extension is present but omits `QcCompliance`
-   (`0.4.0.1862.1.1`) — or will not parse — contradicts the list and yields
+   (`0.4.0.1862.1.1`), or will not parse, contradicts the list and yields
    `false`.
 
 A post-eIDAS certificate carrying no `qcStatements` extension at all denies
@@ -294,7 +437,7 @@ the list is the stronger provenance.
 A directory holding files directly, with no `crls` or `ocsp` subdirectory, is
 read as a bag of both: each file is classified by what it actually contains,
 not by where it sits or what it is called. A file that is neither a CRL nor an
-OCSP response fails the run (`revocation_store_invalid`, exit 3) — "no
+OCSP response fails the run (`revocation_store_invalid`, exit 3): "no
 revocation data" is itself an answer that changes a verdict, so a store that
 quietly dropped half its contents would be worse than no store at all.
 
@@ -307,7 +450,7 @@ the contents of whichever file crossed the line, with the same
 
 ### Where the data comes from, and which answer wins
 
-1. The signature's own validation data — `CRLValues` and `OCSPValues` — from
+1. The signature's own validation data (`CRLValues` and `OCSPValues`) from
    **either** placement: directly under
    `xades:UnsignedSignatureProperties/xades:RevocationValues`, or nested inside
    an `xades141:TimeStampValidationData`. Real long-term Microsec dossiers put
@@ -343,9 +486,9 @@ already settled by the rules above.
 
 **A real Microsec dossier embeds an OCSP response for the end-entity
 certificate only.** Its issuing CA and the root above that carry no embedded
-status at all. Since every non-anchor certificate in the chain needs a status —
-a revoked intermediate condemns everything under it, so exempting CAs would
-make the check worth much less than it looks — a `valid` verdict on real
+status at all. Since every non-anchor certificate in the chain needs a status
+(a revoked intermediate condemns everything under it, so exempting CAs would
+make the check worth much less than it looks), a `valid` verdict on real
 material needs the **CA CRLs** in `--revocation-store`, or online fetching once
 M3 ships.
 
@@ -393,7 +536,7 @@ RFC 6960 gives three ways for a responder to be authorised, and openSzigno
 accepts all three, in this order:
 
 1. **The issuing CA answered for itself.** Nothing else is needed.
-2. **A responder that CA delegated to** — a certificate the CA issued, carrying
+2. **A responder that CA delegated to**: a certificate the CA issued, carrying
    `id-kp-OCSPSigning`. The CA's signature over that certificate is the
    delegation.
 3. **A responder you trust directly.** Its certificate carries
@@ -407,6 +550,12 @@ than by whichever CA issued the certificate being asked about. Until M3 this
 tool implemented only the first two models and refused every one of those
 responses as unauthorised; supplying the operator's root as an anchor now
 covers the responder as well as the CAs.
+
+A `--trust-list` on its own is enough. A list ends a path wherever it speaks,
+at a listed issuing CA as readily as at a self-signed root, so a run with a
+list and no `--trust-store` still has trust material for the responder's path
+to reach. The third model is skipped only when nothing at all was configured:
+no store anchor, and no listed service that supplies a certificate.
 
 The report says which model applied, in
 `chain[].revocation.responder_model` (`issuer`, `delegated`, `trusted`), and
@@ -425,7 +574,7 @@ response this build cannot authorise, followed by the CA's own CRL, ends as
 
 The refusal stays in the report either way. `chain[].revocation.detail` says
 what was refused and why, and which source answered instead, and the path
-summary repeats it — so a `revocation_ok` that was rescued by a CRL still tells
+summary repeats it, so a `revocation_ok` that was rescued by a CRL still tells
 you your responder was not usable, which is the thing worth fixing.
 
 ### What makes data unusable
@@ -458,7 +607,7 @@ whether the validation time is proven:
   still be `valid`. This is the ETSI EN 319 102-1 best-signature-time rule and
   it is why long-term signatures carry timestamps.
 - If you pass `--at`, or let the clock decide, the time is *asserted* rather
-  than proven — a caller can pass any `--at` — so the same finding stays
+  than proven (a caller can pass any `--at`), so the same finding stays
   `unknown` and blocks.
 
 Either way the revocation is reported in full, with its time and reason, and
@@ -485,7 +634,7 @@ openszigno verify dossier.es3 --json \
 
 - **Only for certificates your trust material vouches for.** A URL is
   contacted only for a certificate on a path openszigno *validated* to a trust
-  anchor you configured — with `--trust-store` or through a trusted list — for
+  anchor you configured (with `--trust-store` or through a trusted list) for
   a signature or a timestamp it was checking. A certificate sitting elsewhere
   in the XML generates no traffic even if it chains to your anchor, because
   nothing was validating it. **Without an anchor nothing is fetched at all**: a
@@ -493,7 +642,7 @@ openszigno verify dossier.es3 --json \
   signer, so acting on a URL out of one would let any file you were handed
   choose what your machine connects to. When that happens `policy.revocation`
   reads `online_no_anchors` and both the `revocation_policy` check and every
-  `revocation_status_unknown` message say so — configure trust material and the
+  `revocation_status_unknown` message say so: configure trust material and the
   same run fetches.
 - **Only URLs the certificates publish.** The `cRLDistributionPoints` URIs and
   the `authorityInfoAccess` OCSP responders, read out of the certificates
@@ -520,7 +669,7 @@ openszigno verify dossier.es3 --json \
 - **Only revocation data.** Never trust anchors, never trusted lists.
 - **The scheme the CA published.** `http` and `https` are the only two schemes
   fetched, and neither is rewritten. TLS is not what makes the answer
-  trustworthy — the artefact's own signature is, and it is checked either way.
+  trustworthy; the artefact's own signature is, and it is checked either way.
 - **No downgrade on a redirect.** A redirect that leaves `https` for `http` is
   refused, for every request kind, as `destination_refused` with the rule
   `redirect_downgrade`. Not rewriting a published `http` URL is one thing; a
@@ -530,8 +679,8 @@ openszigno verify dossier.es3 --json \
   downgraded target.
 - **Credentials need TLS on every hop.** A request that carries a bearer token
   in the `Authorization` header, or a body the caller marked sensitive, is
-  refused unless the URL is `https` — on the first hop as well as on every
-  later one — with the rule `credentials_require_https`. A revocation fetch
+  refused unless the URL is `https` (on the first hop as well as on every
+  later one) with the rule `credentials_require_https`. A revocation fetch
   carries no credentials and is unaffected; `sign --csc` carries both, and
   this is the transport half of the rule its configuration already states.
   The one exemption is a loopback service under `--online-allow-private`, and
@@ -542,7 +691,7 @@ openszigno verify dossier.es3 --json \
   address pin, so a target that failed any check is never sent one.
 - **Only public destinations, by default.** A URL carrying userinfo
   (`http://user:secret@host/…`) is always refused. So is one naming any of
-  these, whether it names them directly or *resolves* to them — the resolved
+  these, whether it names them directly or *resolves* to them: the resolved
   addresses are checked before connecting, and **the socket is then opened to
   exactly those addresses**, so DNS rebinding does not walk past the rule, and
   every redirect target is checked and pinned again:
@@ -591,8 +740,8 @@ openszigno verify dossier.es3 --json \
 - **One request per question.** CRLs are deduplicated by URL; OCSP by responder
   URL *and* `certID`, because a response answers about one certificate and two
   certificates behind one responder are two questions.
-- **Bounded.** 5 s to connect, 20 s per fetch, 16 MiB for a CRL — the same
-  limit the verifier itself will parse — 64 KiB for an OCSP response, at most 3
+- **Bounded.** 5 s to connect, 20 s per fetch, 16 MiB for a CRL (the same
+  limit the verifier itself will parse), 64 KiB for an OCSP response, at most 3
   redirects, **never to another host** and **never from `https` to `http`**,
   at most 32 certificates per run, rounds included.
 - **Judged offline.** Every fetched artefact goes through exactly the rules in
@@ -603,13 +752,13 @@ Online material is consulted **last**, after the signature's own
 `RevocationValues` and the revocation store, so it can only fill a gap and can
 never displace an answer you already had. `chain[].revocation.source` reads
 `online_crl` or `online_ocsp` when an answer came from the network, and
-`policy.revocation` reads `online` for the whole run — or `online_no_anchors`
+`policy.revocation` reads `online` for the whole run, or `online_no_anchors`
 when the flag was given with no anchor to gate fetching on.
 
 ### When a fetch fails
 
 Each failure adds one `online_fetch_failed` naming the URL and the failure
-class — `timeout`, `http status <code>`, `too large` (with the limit it went
+class: `timeout`, `http status <code>`, `too large` (with the limit it went
 over), `redirect`, `invalid`, `transport`, `destination_refused` (with the rule
 that refused it, in which case nothing was contacted at all), or
 `cache_collision` (the artefact was fetched and used, but `--online-cache`
@@ -620,21 +769,21 @@ That check is `info`, and it is not the thing that decides anything. A fetch
 that did not happen leaves the certificate exactly as uncovered as it was, and
 *that* is reported on the chain which needed the data, as
 `revocation_status_unknown`, which blocks. So `--online` still cannot turn an
-unanswered question into a passed one — the answer is the verifier's to give,
+unanswered question into a passed one; the answer is the verifier's to give,
 not the fetcher's. The split matters in practice: a fetch attempted for a
 certificate no verdict depended on, such as the timestamp authority of a
 container `es:TimeStamp`, no longer drags a dossier whose every signature is
 `valid` down to `indeterminate`.
 
 The class tells you what to do next. A `timeout` or a `5xx` is the CA's outage;
-retry later. A `404` is a stale URL in an old certificate — fetch the CRL from
+retry later. A `404` is a stale URL in an old certificate: fetch the CRL from
 the CA's current publication point and drop it into `--revocation-store` by
 hand. `invalid` means the server answered with something that is not a CRL or
 an OCSP response, which is what a captive portal or an intercepting proxy looks
 like from here. `destination_refused` means the URL named a destination the
 policy does not permit, and the rule after it says which: fix the
-certificate's publication point, or — if it is an internal CA on your own
-network and you meant it — pass `--online-allow-private`.
+certificate's publication point, or, if it is an internal CA on your own
+network and you meant it, pass `--online-allow-private`.
 `redirect_downgrade` is the server answering with a redirect from `https` to
 `http`, which is a misconfigured publication point at best, and
 `credentials_require_https` is a request that would have carried credentials
@@ -664,13 +813,13 @@ The second run reaches the same answer, with `chain[].revocation.source`
 reading `store_crl` or `store_ocsp` instead of the `online_*` form. This is the
 recommended way to use `--online`: fetch once, pin what you got, and make every
 later verification reproducible and offline. Remember that revocation data
-expires — a cache that was fresh at the validation time you used stays valid
+expires: a cache that was fresh at the validation time you used stays valid
 for *that* validation time, which is the whole point of pinning it. Nothing is
 ever deleted from the cache; pruning is your retention policy, not the tool's.
 
 Nothing in the cache is ever overwritten either. Files are created relative to
-an opened directory descriptor, so a symlink in the path — or standing where a
-cache file would go — is refused rather than followed, and an existing file is
+an opened directory descriptor, so a symlink in the path (or standing where a
+cache file would go) is refused rather than followed, and an existing file is
 never truncated: if a name already holds exactly the artefact being cached the
 write is skipped, which is also what two runs caching the same thing at once
 look like, and if it holds anything else the run reports
@@ -689,7 +838,7 @@ openszigno verify dossier.es3 --online --online-proxy http://proxy.internal:3128
 **deliberately ignored**. A verifier that silently routed its revocation
 traffic through whatever the environment happened to set would hand anyone who
 can write that variable a way to feed it chosen bytes. Those bytes would still
-have to verify — that is the point of checking everything offline — but the
+have to verify (that is the point of checking everything offline), but the
 ambiguity is not worth accepting, and a proxy is the sort of thing an operator
 should have to say out loud.
 

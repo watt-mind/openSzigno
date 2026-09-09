@@ -78,6 +78,14 @@ configuration is missing `client_id` (`csc_config_invalid`, exit 4). Nothing
 is contacted in either. The paths that do sign are covered by
 `crates/openszigno-cli/tests/sign.rs` and `csc.rs`.
 
+`tests/golden/timestamp/` captures one `timestamp` refusal, for the same
+reason: a successful run needs a timestamp authority, and nothing in this
+matrix touches the network. `timestamp.document-not-found` asks for
+`--scope document --document '#7'` on `tests/fixtures/created.es3`, which is
+resolved before a socket would be opened (`document_not_found`, exit 4). The
+paths that do write a timestamp are covered by
+`crates/openszigno-cli/tests/timestamp.rs`.
+
 `create --encrypt-for` is deliberately **not** in the matrix. Every encrypted
 document carries a fresh random content-encryption key, initialisation
 vector, and key-transport padding, so no two runs produce the same bytes and
@@ -88,8 +96,8 @@ instead: `crates/openszigno-cli/tests/create_encrypt.rs` and
 The commands captured over a fixture are `inspect`, `list`,
 `validate-structure`, `verify` and `extract` in JSON mode, `inspect`,
 `list`, `validate-structure` and `verify` in human mode, and
-`extract --stdout`; `create` and `sign`
-are captured in both modes by the two groups above. `extract` writes into a
+`extract --stdout`; `create`, `sign` and `timestamp`
+are captured in both modes by the three groups above. `extract` writes into a
 throwaway directory under the
 system temporary directory; the script fails the run if that directory's path
 ever appears in captured output, because the envelope must never carry an
@@ -97,7 +105,7 @@ absolute path.
 
 Both streams are captured, each case writing a stdout golden, a
 `<case>.stderr.txt` and a `<case>.exit`. In JSON mode stdout is the whole
-envelope, warnings included, and stderr is expected to be empty — the empty
+envelope, warnings included, and stderr is expected to be empty: the empty
 `.stderr.txt` beside each `.json` is what makes "JSON mode says nothing on
 stderr" a checked contract rather than a habit. In human mode warnings and
 errors go to stderr instead, so a human golden for a fixture that only fails
@@ -109,7 +117,7 @@ was least likely to be on; that check now runs over both.
 `extract.stdout` is the one case whose stdout is not an envelope at all:
 `extract --stdout --document '#0'` writes the first document's payload bytes
 and nothing else. Where that document decodes, the golden is the payload;
-where it does not — an encrypted document, an unparseable dossier — the
+where it does not (an encrypted document, an unparseable dossier), the
 golden is the refusal in `.stderr.txt` and the status in `.exit`. It passes no
 `--output`, so no temporary path is involved.
 

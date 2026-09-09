@@ -11,7 +11,9 @@
 
 use roxmltree::Node;
 
+use crate::text::sanitize_display;
 use crate::{
+    MAX_INVENTORIED_CLAIMED_ROLE_CHARS, MAX_INVENTORIED_CLAIMED_ROLES,
     MAX_INVENTORIED_DIGEST_METHODS, MAX_INVENTORIED_REFERENCE_URIS, MAX_INVENTORIED_SIGNATURES,
     MAX_INVENTORIED_TIMESTAMPS, MAX_INVENTORIED_XADES_PROPERTIES, SignatureEvidence,
     SignaturePlacement, SignatureSummary, StructuralWarning, StructuralWarningCode,
@@ -138,6 +140,7 @@ fn signature_summary<'a, 'input>(
     let mut xades_properties: Vec<String> = Vec::new();
     let mut evidence = SignatureEvidence::default();
     let mut claimed_signing_time = None;
+    let mut claimed_roles: Vec<String> = Vec::new();
     walk_own(signature, &mut |node| {
         let Some(local) = xades_local_name(node) else {
             return;
@@ -153,6 +156,18 @@ fn signature_summary<'a, 'input>(
             "ArchiveTimeStamp" => evidence.archive_timestamps += 1,
             "SigningTime" if claimed_signing_time.is_none() => {
                 claimed_signing_time = plain_time(&direct_text(node));
+            }
+            // `xades:ClaimedRole` under either `SignerRole` (XAdES 1.3.2) or
+            // `SignerRoleV2` (EN 319 132-1). Hungarian AVDH material states
+            // the authenticated citizen here, so a reader that dropped it
+            // would lose the only claim the structure makes about who the
+            // state authenticated the document for.
+            "ClaimedRole" if claimed_roles.len() < MAX_INVENTORIED_CLAIMED_ROLES => {
+                if let Some(role) = plain_text(&direct_text(node))
+                    && !claimed_roles.contains(&role)
+                {
+                    claimed_roles.push(role);
+                }
             }
             _ => {}
         }
@@ -177,6 +192,7 @@ fn signature_summary<'a, 'input>(
         reference_uris,
         xades_namespace,
         xades_properties,
+        claimed_roles,
         evidence,
         claimed_signing_time,
         key_info_certificates,
@@ -368,6 +384,15 @@ fn plain_time(value: &str) -> Option<String> {
             character.is_ascii_alphanumeric() || matches!(character, '-' | ':' | '+' | '.')
         });
     plain.then(|| value.to_owned())
+}
+
+/// A claimed role is free text, not a name: it is echoed with the display
+/// sanitiser, which drops the characters a terminal acts on rather than
+/// shows, and bounded so untrusted XML cannot flood a line. An empty value
+/// is left out.
+fn plain_text(value: &str) -> Option<String> {
+    let text = sanitize_display(value, MAX_INVENTORIED_CLAIMED_ROLE_CHARS);
+    (!text.trim().is_empty()).then_some(text)
 }
 
 /// A same-document reference, and nothing else.

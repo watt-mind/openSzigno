@@ -1,0 +1,17 @@
+{
+  "command": "csc-login",
+  "data": null,
+  "errors": [
+    {
+      "code": "csc_config_invalid",
+      "message": "the --csc configuration is missing `client_id`"
+    }
+  ],
+  "input": {
+    "bytes": null,
+    "format": null
+  },
+  "ok": false,
+  "schema_version": 1,
+  "warnings": []
+}
