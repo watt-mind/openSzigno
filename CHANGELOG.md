@@ -32,6 +32,16 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
   library target to depend on, so what is fuzzed is the real source.
   `decode_payload` now also drives the two `encrypt` chains with no
   decryption key, through `decode_document_with`.
+- The golden output contract captures stderr. `scripts/golden.py` kept only
+  stdout, so every human-mode golden for a fixture that fails was an empty
+  file: the wording of every error and warning an operator actually reads was
+  pinned nowhere, and the "no golden may carry a machine-local path" check
+  never looked at the stream those messages go to. Each case now writes a
+  `<case>.stderr.txt` beside its stdout golden and its `.exit`, the leak check
+  runs over both streams, and an `extract --stdout` case pins the one output
+  that is not an envelope at all. This adds files and changes none: every
+  golden committed before this ran is byte-identical after it. The matrix is
+  run by both the CI `golden` job and the release smoke test, unchanged.
 
 ### Fixed
 

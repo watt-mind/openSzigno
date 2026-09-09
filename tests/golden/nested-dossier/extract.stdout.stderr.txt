@@ -1,0 +1,1 @@
+error [stdout_requires_single_document]: the selected document embeds a dossier; pass --no-recursive to write its raw payload, or extract to a directory

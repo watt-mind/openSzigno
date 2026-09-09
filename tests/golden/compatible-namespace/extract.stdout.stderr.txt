@@ -1,0 +1,2 @@
+warning [dangling_objref]: SignatureProfile OBJREF does not resolve to any XML ID
+warning [document_without_profile]: Document at source position 1 has no DocumentProfile and was skipped
