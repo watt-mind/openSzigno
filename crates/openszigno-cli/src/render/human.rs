@@ -371,6 +371,15 @@ pub(crate) fn write_human_success(command: &str, response: &Response) -> io::Res
                 } else {
                     " | no timestamp"
                 });
+                // Which backend held the key. A remote one also names the
+                // credential, because that is what says whose certificate
+                // signed; the token that reached it never appears anywhere.
+                if let Some(who) = signature["signer"].as_str() {
+                    line.push_str(&format!(" | signer={who}"));
+                }
+                if let Some(credential) = signature["credential_id"].as_str() {
+                    line.push_str(&format!(" | credential={credential}"));
+                }
                 writeln!(out, "{line}")?;
             }
             writeln!(

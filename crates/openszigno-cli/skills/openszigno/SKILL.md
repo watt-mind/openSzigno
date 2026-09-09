@@ -363,6 +363,42 @@ openszigno sign IN.es3 --output SIGNED.es3 \
   read `indeterminate` as a failure.
 - Check the result by verifying it: run `verify` with the user's own trust
   material and report what it says.
+
+#### Sign with a remote qualified certificate
+
+`--csc CONFIG.toml` replaces `--key`/`--cert` with a Cloud Signature
+Consortium API v2 service, so a qualified certificate held by a remote
+signature creation device, or in an EUDI Wallet, signs the dossier. Only the
+digest of the canonicalised `ds:SignedInfo` leaves the machine.
+
+```sh
+openszigno sign IN.es3 --output SIGNED.es3 --csc csc.toml \
+  [--csc-credential cred-1a2b3c] [--tsa URL --tsa-cert tsa-ca.pem] --json
+```
+
+- The configuration file holds `base_url`, `client_id`, and a bearer token
+  the user obtained out of band (`access_token` or `access_token_file`),
+  optionally `credential_id` and a `pin_file`. **Never print, echo, log or
+  quote the token, the PIN or the one-time password.** Do not read the
+  configuration file to the user.
+- `--csc` is mutually exclusive with `--key`, `--cert`, `--passphrase-file`
+  and `--algorithm`: the credential's own key decides the algorithm.
+- `--chain` is not needed: the chain the service publishes is written into
+  `xades:CertificateValues` for you.
+- `csc_credential_ambiguous` (exit 4) means the account holds several
+  credentials; the message lists them, so ask the user which one and pass
+  `--csc-credential`.
+- `csc_authorization_required` (exit 4) means the credential needs a browser
+  round this build does not run. Report it and stop; do not try to work
+  around it.
+- `csc_signature_invalid` (exit 5) means the service returned a signature
+  that does not verify against its own certificate. Nothing was written.
+  Report it as a service failure, never retry silently.
+- A signature written this way reports `"signer": "csc"` in
+  `data.signatures[]`, with `credential_id` and `csc_specs`. Producing a
+  signature through a qualified provider still does not let you call the
+  result a qualified signature: report what `verify` checked, and nothing
+  more.
 - Every successful run warns `signed_dossier_unverified`. Pass that on.
 - **This is not a qualified electronic signature.** A qualified signature
   needs a key on a qualified device, which is not a key this process can
@@ -401,6 +437,8 @@ openszigno create --output OUT.es3 --title T --document PATH[::TITLE[::MIME]] \
   [--zip] [--embed DOSSIER.es3] [--created RFC3339] --json
 openszigno sign IN.es3 --output OUT.es3 --key K --cert C [--chain CA] \
   [--scope dossier] [--tsa URL --tsa-cert CA] [--signing-time RFC3339] --json
+openszigno sign IN.es3 --output OUT.es3 --csc csc.toml [--csc-credential ID] \
+  [--tsa URL --tsa-cert CA] --json
 openszigno verify FILE --json --trust-store DIR [--trust-list TL --lotl LOTL \
   --trust-list-signer CERT] [--online --online-cache DIR | --revocation-store DIR] \
   [--at TIME] [--allow-legacy-algorithms]

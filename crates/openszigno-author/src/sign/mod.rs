@@ -23,6 +23,7 @@
 //! | `dsig` | `ds:SignedInfo`, its references, and the canonicalized octets each one digests. |
 //! | `xades` | `xades:QualifyingProperties`: the signed properties, and the evidence in the unsigned half. |
 //! | `signer` | The [`Signer`] trait and [`SoftwareSigner`], the local-key implementation. |
+//! | `csc` | Cloud Signature Consortium API v2 request bodies and response readers, for a hash-only remote backend. Pure: the sockets are the CLI's. |
 //! | `tsa` | RFC 3161 requests and responses, as bytes in and bytes out. |
 //!
 //! # How a signature is filled in
@@ -43,6 +44,7 @@
 //! signature's references name its own document's profile, that document's
 //! payload object, and two objects inside itself.
 
+pub mod csc;
 mod dsig;
 mod error;
 mod signer;

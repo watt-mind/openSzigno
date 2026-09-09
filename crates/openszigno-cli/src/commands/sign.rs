@@ -2,10 +2,21 @@
 //! verifies.
 //!
 //! This module owns everything `openszigno-author` deliberately does not: the
-//! files, the key material, the clock, and the one socket a run may open, to a
-//! timestamp authority the caller named. The signing itself — what a signature
-//! covers, where the element sits, and what it digests — belongs to the author
-//! crate, and is reached through one call.
+//! files, the key material, the clock, and the sockets a run may open — to a
+//! timestamp authority the caller named, and to the Cloud Signature Consortium
+//! service `--csc` names. The signing itself — what a signature covers, where
+//! the element sits, and what it digests — belongs to the author crate, and is
+//! reached through one call.
+//!
+//! # Two backends behind one seam
+//!
+//! `--key` loads a `SoftwareSigner`, which holds a private key in this
+//! process. `--csc` opens a [`CscSigner`], whose key is
+//! held by a remote qualified signature creation device and which is sent one
+//! digest per signature and nothing else. The two are mutually exclusive, the
+//! author crate cannot tell them apart, and the XAdES structure written is the
+//! same either way. The JSON envelope says which one signed, because that is
+//! the one difference a caller has to be able to see.
 //!
 //! Nothing here checks anything. The run warns `signed_dossier_unverified` on
 //! every success, because producing a signature is not evidence about it:
@@ -16,7 +27,7 @@ use std::io::Write as _;
 use std::path::Path;
 
 use openszigno_author::sign::{
-    SignError, SignRequest, SignScope, SignatureAlgorithm, SoftwareSigner, parse_certificates,
+    SignRequest, SignScope, SignatureAlgorithm, SoftwareSigner, parse_certificates,
     sign as sign_dossier, timestamp_request,
 };
 use openszigno_core::ParseOptions;
@@ -24,6 +35,7 @@ use openszigno_verify::{Clock, SystemClock, format_rfc3339};
 use serde_json::json;
 
 use crate::args::SignArgs;
+use crate::csc::{CscRequest, CscSigner};
 use crate::extract::output_dir::OutputDir;
 use crate::input::valid_input;
 use crate::key_material::{passphrase, read_file};
@@ -42,10 +54,37 @@ pub(crate) fn sign(args: &SignArgs) -> CliResult {
     run(args, &options, &bytes).map_err(|error| failure(valid_input(bytes.len()), error))
 }
 
+/// Which backend produced the signatures, and what the report says about it.
+enum Backend {
+    Software(SoftwareSigner),
+    Csc(Box<CscSigner>),
+}
+
+impl Backend {
+    fn signer(&self) -> &dyn openszigno_author::sign::Signer {
+        match self {
+            Self::Software(signer) => signer,
+            Self::Csc(signer) => signer.as_ref(),
+        }
+    }
+
+    const fn name(&self) -> &'static str {
+        match self {
+            Self::Software(_) => "software",
+            Self::Csc(_) => "csc",
+        }
+    }
+}
+
 fn run(args: &SignArgs, options: &ParseOptions, bytes: &[u8]) -> Result<Success, CliError> {
-    // The key is loaded before the dossier is touched, so unusable material
-    // fails the run without anything having been signed.
-    let signer = load_signer(args)?;
+    // The signing material is resolved before the dossier is touched, so
+    // unusable material — a key that will not load, a service that refuses the
+    // credential — fails the run without anything having been signed. For the
+    // CSC backend that is also where the signing certificate comes from: the
+    // XAdES signed properties digest it, so it has to exist before there is
+    // anything to sign.
+    let (backend, notices) = load_backend(args)?;
+    let signer = backend.signer();
     let request = SignRequest {
         scope: if args.scope_is_dossier() {
             SignScope::Dossier
@@ -57,11 +96,11 @@ fn run(args: &SignArgs, options: &ParseOptions, bytes: &[u8]) -> Result<Success,
             || format_rfc3339(SystemClock.unix_time()),
             |time| time.0.clone(),
         ),
-        certificate_values: certificate_values(args)?,
+        certificate_values: certificate_values(args, &backend)?,
     };
 
     let signed = match args.tsa.as_deref() {
-        None => sign_dossier(bytes, options, &request, &signer, None),
+        None => sign_dossier(bytes, options, &request, signer, None),
         Some(url) => {
             let fetcher = Fetcher::new(args.online_proxy.as_deref(), args.online_allow_private)
                 .map_err(|message| CliError::invalid("online_options_invalid", message))?;
@@ -76,26 +115,43 @@ fn run(args: &SignArgs, options: &ParseOptions, bytes: &[u8]) -> Result<Success,
                     MAX_TIMESTAMP_BYTES,
                 )
             };
-            sign_dossier(bytes, options, &request, &signer, Some(&mut stamp))
+            sign_dossier(bytes, options, &request, signer, Some(&mut stamp))
         }
     }
-    .map_err(CliError::signing)?;
+    .map_err(CliError::from_sign)?;
 
     write_new_file(&args.output, &signed.bytes)?;
     let signatures: Vec<serde_json::Value> = signed
         .signatures
         .iter()
         .map(|signature| {
-            json!({
+            let mut value = json!({
                 "id": signature.id,
                 "scope": signature.scope.as_str(),
                 "document_index": signature.document_index,
                 "algorithm": signature.algorithm.as_str(),
                 "signing_time": signature.signing_time,
                 "timestamped": signature.timestamped,
-            })
+                "signer": backend.name(),
+            });
+            // Which credential at which service produced this signature, so a
+            // run against a remote QSCD is reproducible from its own report.
+            // Neither value is a secret: the token is what is secret, and it
+            // never appears here.
+            if let Backend::Csc(csc) = &backend {
+                value["credential_id"] = json!(csc.credential_id());
+                value["csc_specs"] = json!(csc.specs());
+            }
+            value
         })
         .collect();
+    let mut warnings = notices;
+    warnings.push(Notice {
+        code: "signed_dossier_unverified".to_owned(),
+        message:
+            "this run produced a signature and verified nothing; run verify with your own trust material to judge it"
+                .to_owned(),
+    });
     Ok(Success {
         input: valid_input(bytes.len()),
         data: json!({
@@ -103,20 +159,34 @@ fn run(args: &SignArgs, options: &ParseOptions, bytes: &[u8]) -> Result<Success,
             "bytes": signed.bytes.len(),
             "signatures": signatures,
         }),
-        warnings: vec![Notice {
-            code: "signed_dossier_unverified".to_owned(),
-            message:
-                "this run produced a signature and verified nothing; run verify with your own trust material to judge it"
-                    .to_owned(),
-        }],
+        warnings,
         payload: None,
         exit: 0,
     })
 }
 
+/// Resolve the signing backend, and whatever the run should warn about while
+/// doing it.
+fn load_backend(args: &SignArgs) -> Result<(Backend, Vec<Notice>), CliError> {
+    let Some(path) = args.csc.as_deref() else {
+        return Ok((Backend::Software(load_signer(args)?), Vec::new()));
+    };
+    let (signer, notices) = CscSigner::open(&CscRequest {
+        config: path,
+        credential: args.csc_credential.as_deref(),
+        proxy: args.online_proxy.as_deref(),
+        allow_private: args.online_allow_private,
+    })?;
+    Ok((Backend::Csc(Box::new(signer)), notices))
+}
+
 /// Load the signing key and the certificate that names it.
 fn load_signer(args: &SignArgs) -> Result<SoftwareSigner, CliError> {
-    let key = read_file(&args.key, "signing key")?;
+    let path = args
+        .key
+        .as_deref()
+        .ok_or_else(|| CliError::invalid("invalid_signing_key", "no signing key was given"))?;
+    let key = read_file(path, "signing key")?;
     let certificate = args
         .cert
         .as_deref()
@@ -138,21 +208,31 @@ fn load_signer(args: &SignArgs) -> Result<SoftwareSigner, CliError> {
         certificate.as_deref().map(|bytes| &bytes[..]),
         algorithm,
     )
-    .map_err(CliError::signing)
+    .map_err(CliError::from_sign)
 }
 
 /// The certificates that go into `xades:CertificateValues`: the signer's
 /// issuing CAs and the timestamp authority's, so a verifier can build both
 /// paths from the dossier alone.
-fn certificate_values(args: &SignArgs) -> Result<Vec<Vec<u8>>, CliError> {
+/// The CSC chain joins them, because a remote service publishes the issuing
+/// certificates alongside the signing one and asking the caller to pass what
+/// the service already handed over would be the tool doing less than it can.
+fn certificate_values(args: &SignArgs, backend: &Backend) -> Result<Vec<Vec<u8>>, CliError> {
     let mut values = Vec::new();
+    if let Backend::Csc(csc) = backend {
+        for certificate in csc.chain() {
+            if !values.contains(certificate) {
+                values.push(certificate.clone());
+            }
+        }
+    }
     for (paths, what) in [
         (&args.chain, "chain certificate"),
         (&args.tsa_cert, "TSA certificate"),
     ] {
         for path in paths {
             let bytes = read_file(path, what)?;
-            for certificate in parse_certificates(&bytes).map_err(CliError::signing)? {
+            for certificate in parse_certificates(&bytes).map_err(CliError::from_sign)? {
                 if !values.contains(&certificate) {
                     values.push(certificate);
                 }
@@ -215,19 +295,6 @@ fn write_new_file(path: &Path, bytes: &[u8]) -> Result<(), CliError> {
     Ok(())
 }
 
-impl CliError {
-    /// A refusal from the author crate's signing library. The code and exit
-    /// status are the library's own, so the CLI adds no policy of its own to
-    /// what "unusable signing material" means.
-    fn signing(error: SignError) -> Self {
-        Self {
-            code: error.code().as_str(),
-            message: error.message().to_owned(),
-            exit: error.code().exit(),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -262,7 +329,7 @@ mod tests {
 
     #[test]
     fn a_signing_refusal_keeps_the_library_code_and_exit_status() {
-        let error = CliError::signing(
+        let error = CliError::from_sign(
             SoftwareSigner::load(b"not a key", None, Some(b"not a certificate"), None)
                 .expect_err("neither loads"),
         );

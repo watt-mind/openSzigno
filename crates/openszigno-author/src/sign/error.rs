@@ -21,6 +21,24 @@ pub enum SignErrorCode {
     DocumentAlreadySigned,
     TsaFailed,
     SignFailed,
+    /// The `--csc` configuration file cannot be used, or the service it names
+    /// speaks a protocol version this build does not implement.
+    CscConfigInvalid,
+    /// Nothing was contacted, or the exchange did not complete.
+    CscUnreachable,
+    /// The service answered, and what it answered cannot be used. The message
+    /// carries the HTTP status and the CSC `error` string, never the token.
+    CscRejected,
+    /// The account holds several signing credentials and none was named.
+    CscCredentialAmbiguous,
+    /// The named credential cannot produce a signature this build writes.
+    CscCredentialUnusable,
+    /// The credential is authorised through a browser flow this round does
+    /// not implement.
+    CscAuthorizationRequired,
+    /// The returned signature does not verify against the returned
+    /// certificate. Nothing is written.
+    CscSignatureInvalid,
 }
 
 impl SignErrorCode {
@@ -35,6 +53,13 @@ impl SignErrorCode {
             Self::DocumentAlreadySigned => "document_already_signed",
             Self::TsaFailed => "tsa_failed",
             Self::SignFailed => "sign_failed",
+            Self::CscConfigInvalid => "csc_config_invalid",
+            Self::CscUnreachable => "csc_unreachable",
+            Self::CscRejected => "csc_rejected",
+            Self::CscCredentialAmbiguous => "csc_credential_ambiguous",
+            Self::CscCredentialUnusable => "csc_credential_unusable",
+            Self::CscAuthorizationRequired => "csc_authorization_required",
+            Self::CscSignatureInvalid => "csc_signature_invalid",
         }
     }
 
@@ -45,7 +70,11 @@ impl SignErrorCode {
     /// as producing signature material and then could not finish is exit 5.
     pub const fn exit(self) -> u8 {
         match self {
-            Self::TsaFailed | Self::SignFailed => 5,
+            Self::TsaFailed
+            | Self::SignFailed
+            | Self::CscUnreachable
+            | Self::CscRejected
+            | Self::CscSignatureInvalid => 5,
             _ => 4,
         }
     }
@@ -78,6 +107,21 @@ impl SignError {
         Self::new(SignErrorCode::InvalidSigningCertificate, message)
     }
 
+    /// A refusal from a remote signing backend that lives outside this crate.
+    ///
+    /// The `Signer` seam is the point of the design: a Cloud Signature
+    /// Consortium client is a caller, not a member of this crate, and it has to
+    /// be able to report the `csc_*` categories under the same type everything
+    /// else reports under. Only those codes are constructed this way; the rest
+    /// are this crate's own statements about the request it was given.
+    pub fn remote(code: SignErrorCode, message: impl Into<String>) -> Self {
+        debug_assert!(
+            code.as_str().starts_with("csc_"),
+            "only the remote-backend codes are constructed from outside this crate"
+        );
+        Self::new(code, message)
+    }
+
     pub(crate) fn failed(message: impl Into<String>) -> Self {
         Self::new(SignErrorCode::SignFailed, message)
     }
@@ -107,6 +151,13 @@ mod tests {
             SignErrorCode::DocumentAlreadySigned,
             SignErrorCode::TsaFailed,
             SignErrorCode::SignFailed,
+            SignErrorCode::CscConfigInvalid,
+            SignErrorCode::CscUnreachable,
+            SignErrorCode::CscRejected,
+            SignErrorCode::CscCredentialAmbiguous,
+            SignErrorCode::CscCredentialUnusable,
+            SignErrorCode::CscAuthorizationRequired,
+            SignErrorCode::CscSignatureInvalid,
         ] {
             let text = code.as_str();
             assert!(!text.is_empty());
@@ -118,6 +169,18 @@ mod tests {
         }
         assert_eq!(SignErrorCode::TsaFailed.exit(), 5);
         assert_eq!(SignErrorCode::InvalidSigningKey.exit(), 4);
+        // A refusal about the caller's own material is exit 4; a run that
+        // reached the service and could not finish is exit 5.
+        assert_eq!(SignErrorCode::CscConfigInvalid.exit(), 4);
+        assert_eq!(SignErrorCode::CscAuthorizationRequired.exit(), 4);
+        assert_eq!(SignErrorCode::CscSignatureInvalid.exit(), 5);
+    }
+
+    #[test]
+    fn a_remote_backend_reports_a_csc_code_under_the_same_type() {
+        let error = SignError::remote(SignErrorCode::CscUnreachable, "nothing answered");
+        assert_eq!(error.code(), SignErrorCode::CscUnreachable);
+        assert_eq!(error.code().exit(), 5);
     }
 
     #[test]

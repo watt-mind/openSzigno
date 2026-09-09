@@ -147,6 +147,17 @@ impl FailureClass {
     }
 }
 
+/// What one HTTP answer was, when the caller has to read a non-`200` body.
+///
+/// The revocation path has no use for this — a CRL that came back as a `404`
+/// is simply a failed fetch — but a CSC service reports a refusal *in* the
+/// body, as a JSON `error` string next to the status, and a refusal a user
+/// cannot read is a refusal they cannot act on.
+pub struct Answer {
+    pub status: u16,
+    pub body: Vec<u8>,
+}
+
 /// A request body and the media types that describe it.
 ///
 /// RFC 6960 Appendix A.1 for OCSP and RFC 3161 section 3.4 for timestamping
@@ -157,6 +168,12 @@ pub struct Post<'a> {
     media_type: &'a str,
     accept: &'a str,
     bytes: &'a [u8],
+    /// The value of the `Authorization` header, when the peer needs one. It is
+    /// a bearer token for a CSC service and `None` for everything else, and it
+    /// exists here rather than at a call site because a header is the *only*
+    /// place this tool ever puts one: never in a URL, never in a body, never in
+    /// a log line and never in the JSON envelope.
+    authorization: Option<&'a str>,
 }
 
 /// The transport, configured once so that every fetch in a run is bounded the
@@ -238,9 +255,44 @@ impl Fetcher {
                 media_type,
                 accept,
                 bytes: body,
+                authorization: None,
             }),
             limit,
         )
+        .map_err(FailureClass::describe)
+    }
+
+    /// One bounded `POST` of a JSON request body under a bearer token, which
+    /// is what a Cloud Signature Consortium operation is.
+    ///
+    /// It differs from [`Fetcher::post_der`] in exactly two ways, and both are
+    /// the CSC protocol's doing. The token travels in the `Authorization`
+    /// header and nowhere else. And the status is returned rather than turned
+    /// into a failure, because a CSC service answers a refusal with a JSON
+    /// body naming it and the caller has to read that body to say why the run
+    /// stopped. Everything else — the destination policy, the pinned
+    /// addresses, the timeouts, the redirect rules and the size cap — is the
+    /// same transport `verify --online` goes through.
+    pub fn post_json(
+        &self,
+        url: &str,
+        bearer: &str,
+        body: &str,
+        limit: u64,
+    ) -> Result<Answer, String> {
+        let authorization = format!("Bearer {bearer}");
+        self.request(
+            url,
+            Some(Post {
+                media_type: "application/json",
+                accept: "application/json",
+                bytes: body.as_bytes(),
+                authorization: Some(&authorization),
+            }),
+            limit,
+            true,
+        )
+        .map(|(status, body)| Answer { status, body })
         .map_err(FailureClass::describe)
     }
 
@@ -252,6 +304,19 @@ impl Fetcher {
         body: Option<Post<'_>>,
         limit: u64,
     ) -> Result<Vec<u8>, FailureClass> {
+        self.request(url, body, limit, false)
+            .map(|(_, bytes)| bytes)
+    }
+
+    /// The fetch itself. `any_status` says whether a non-`200` answer is a
+    /// failure class or a body the caller wants to read.
+    fn request(
+        &self,
+        url: &str,
+        body: Option<Post<'_>>,
+        limit: u64,
+        any_status: bool,
+    ) -> Result<(u16, Vec<u8>), FailureClass> {
         let origin = host_of(url).ok_or(FailureClass::Invalid)?;
         let mut current = url.to_owned();
         for _ in 0..=MAX_REDIRECTS {
@@ -279,13 +344,18 @@ impl Fetcher {
                 // peer has to infer is the shape that behaves differently on
                 // different platforms. RFC 6960 Appendix A.1 describes exactly
                 // this: a `POST` of the DER request with its content type.
-                Some(post) => self
-                    .agent
-                    .post(&current)
-                    .header("content-type", post.media_type)
-                    .header("accept", post.accept)
-                    .header("content-length", post.bytes.len().to_string())
-                    .send(post.bytes),
+                Some(post) => {
+                    let mut request = self
+                        .agent
+                        .post(&current)
+                        .header("content-type", post.media_type)
+                        .header("accept", post.accept)
+                        .header("content-length", post.bytes.len().to_string());
+                    if let Some(value) = post.authorization {
+                        request = request.header("authorization", value);
+                    }
+                    request.send(post.bytes)
+                }
                 None => self.agent.get(&current).call(),
             };
             let mut response = response.map_err(classify_transport)?;
@@ -309,7 +379,7 @@ impl Fetcher {
                 current = next;
                 continue;
             }
-            if status != 200 {
+            if status != 200 && !any_status {
                 return Err(FailureClass::HttpStatus(status));
             }
             // `limit` is enforced by the reader, so a server that lies about
@@ -323,7 +393,7 @@ impl Fetcher {
                     ureq::Error::BodyExceedsLimit(_) => FailureClass::TooLarge(limit),
                     other => classify_transport(other),
                 })?;
-            return Ok(bytes);
+            return Ok((status, bytes));
         }
         Err(FailureClass::Redirect)
     }

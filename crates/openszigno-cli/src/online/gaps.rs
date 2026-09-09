@@ -244,6 +244,7 @@ impl Fetcher {
                             media_type: "application/ocsp-request",
                             accept: "application/ocsp-response",
                             bytes: &request,
+                            authorization: None,
                         }),
                         MAX_OCSP_BYTES,
                     ) {

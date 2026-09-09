@@ -12,6 +12,32 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
 
 ### Added
 
+- `openszigno sign --csc CONFIG.toml`, a second signing backend: the digest of
+  the canonicalised `ds:SignedInfo` is signed by a Cloud Signature Consortium
+  API v2 service, so a qualified certificate held by a remote signature
+  creation device, or in an EUDI Wallet, produces the same XAdES structure the
+  software signer does. Only the digest ever leaves the machine. The run does
+  `info`, `credentials/list` when no credential is named, `credentials/info`
+  with `certificates: "chain"`, then per signature `credentials/authorize`
+  with the real hash and `numSignatures: 1` and `signatures/signHash`; the
+  returned signature is verified locally against the returned certificate
+  before anything is written. Discovery is read from `info` rather than
+  compiled in, the algorithm comes from the credential's own `key/algo` list,
+  and the chain the service publishes becomes `xades:CertificateValues` so
+  `--chain` stays optional. `--csc-credential ID` picks one credential; the
+  requests go through the same bounded transport `verify --online` uses, and
+  the bearer token travels in the `Authorization` header and nowhere else.
+  This round is non-interactive: an `oauth2`-mode credential is
+  `csc_authorization_required`, and the OAuth 2.0 rounds it needs are the
+  follow-up `openszigno csc login`. See
+  [Signing through a CSC service](docs/architecture.md#signing-through-a-csc-service).
+- Stable codes for that backend: the errors `csc_config_invalid`,
+  `csc_unreachable`, `csc_rejected`, `csc_credential_ambiguous`,
+  `csc_credential_unusable`, `csc_authorization_required` and
+  `csc_signature_invalid`, and the warnings `csc_config_permissive` and
+  `csc_key_unused`. `sign`'s JSON `data.signatures[]` entries gain `signer`
+  (`software` or `csc`), and a `csc` entry also carries `credential_id` and
+  `csc_specs`.
 - `docs/remote-signing.md`, research for the planned `create` and `sign`
   commands: the Cloud Signature Consortium API versions and the hash-signing
   flow a client would run, the EUDI Wallet rQES reference components and how

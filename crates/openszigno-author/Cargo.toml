@@ -38,6 +38,8 @@ pkcs8.workspace = true
 rand_core.workspace = true
 rsa.workspace = true
 serde.workspace = true
+# The CSC API v2 bodies in `sign/csc.rs` are JSON in both directions.
+serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
 unicode-normalization.workspace = true
@@ -50,4 +52,3 @@ zip.workspace = true
 rand_chacha.workspace = true
 rand_core.workspace = true
 rcgen = { workspace = true, features = ["x509-parser"] }
-serde_json.workspace = true
