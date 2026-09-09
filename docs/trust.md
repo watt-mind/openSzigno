@@ -257,7 +257,7 @@ OCSP response fails the run (`revocation_store_invalid`, exit 3) — "no
 revocation data" is itself an answer that changes a verdict, so a store that
 quietly dropped half its contents would be worse than no store at all.
 
-### Where the data comes from, in priority order
+### Where the data comes from, and which answer wins
 
 1. The signature's own validation data — `CRLValues` and `OCSPValues` — from
    **either** placement: directly under
@@ -269,8 +269,27 @@ quietly dropped half its contents would be worse than no store at all.
    1.3.2-namespaced values under a 1.4.1-namespaced container.
 2. `--revocation-store DIR`.
 
-Within each tier OCSP is asked first, because it answers about *this*
+Within each tier OCSP is read first, because it answers about *this*
 certificate rather than about a list.
+
+That order is about where the tool looks first, **not** about what it
+believes. Every source is asked about every certificate, and the answers are
+then weighed:
+
+- A revocation from any source beats `good` from any other. The signature's own
+  `RevocationValues` are supplied by the signer, so an older embedded OCSP
+  `good` that is still inside its own `nextUpdate` cannot hide the newer CRL in
+  your store that revokes the same certificate.
+- Among answers that say the same thing, the one speaking for the later instant
+  is reported: the later `producedAt` where the source stated one, otherwise the
+  later `thisUpdate`. `chain[].revocation.source` says which source that was.
+- Freshness is unchanged: a stale source answers nothing at all, whatever it
+  says.
+
+When the usable sources did not agree, `revocation_sources_disagree` (`info`)
+says so and names both sides, and the same sentence appears in that
+certificate's `chain[].revocation.detail`. It never blocks: the disagreement is
+already settled by the rules above.
 
 ### What real dossiers actually embed, and what you still have to fetch
 
@@ -350,9 +369,9 @@ had already chosen to trust.
 
 ### One unusable answer is not the end
 
-Sources are consulted in the priority order above, and a source that is found
-but refused does not stop the search: the next tier is tried, and only when
-they are all exhausted is the certificate reported as uncovered. An OCSP
+A source that is found but refused does not stop the search: every other source
+is still read, and only when they are all exhausted is the certificate reported
+as uncovered. An OCSP
 response this build cannot authorise, followed by the CA's own CRL, ends as
 `good` from the CRL.
 

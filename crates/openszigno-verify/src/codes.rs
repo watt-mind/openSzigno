@@ -182,6 +182,7 @@ check_codes! {
     RevocationDataStale => "revocation_data_stale",
     RevocationDataInvalid => "revocation_data_invalid",
     OcspResponderTrusted => "ocsp_responder_trusted",
+    RevocationSourcesDisagree => "revocation_sources_disagree",
     OnlineFetchFailed => "online_fetch_failed",
 
     // Trusted lists (ETSI TS 119 612).
