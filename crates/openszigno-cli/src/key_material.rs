@@ -45,7 +45,7 @@ pub(crate) fn read_file(path: &Path, what: &str) -> Result<Zeroizing<Vec<u8>>, C
             BoundedReadError::Inspect => {
                 CliError::io(format!("the {what} file could not be inspected"))
             }
-            BoundedReadError::NotRegular => {
+            BoundedReadError::NotRegular { .. } => {
                 CliError::io(format!("the {what} path is not a regular file"))
             }
             BoundedReadError::TooLarge { .. } => {

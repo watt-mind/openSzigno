@@ -669,3 +669,99 @@ fn a_csc_redirect_off_the_configured_host_is_refused_and_the_target_sees_nothing
     );
     assert!(!everything_printed(&output).contains(TOKEN));
 }
+
+// ---------------------------------------------------------------------------
+// Nothing a service says reaches a terminal unfiltered
+// ---------------------------------------------------------------------------
+
+/// A credential identifier the service chose, carrying an ANSI erase-line
+/// sequence and a right-to-left override, JSON-escaped because the mock
+/// quotes the identifiers it is given verbatim into its answer.
+const HOSTILE_CREDENTIAL: &str = r"cred\u001b[2K\u202edrowssap\u202c-1";
+
+/// What is left of it once the display sanitiser has run: the visible
+/// characters, and nothing a terminal would act on.
+const HOSTILE_CREDENTIAL_SANITIZED: &str = "cred[2Kdrowssap-1";
+
+/// One `sign --csc` run in human mode, so what a terminal receives is exactly
+/// what this asserts on.
+fn sign_human(fixture: &Fixture) -> Output {
+    run(&[
+        "sign",
+        &fixture.text("input.es3"),
+        "--output",
+        &fixture.text("signed.es3"),
+        "--csc",
+        &fixture.text("csc.toml"),
+        "--signing-time",
+        AT,
+        "--online-allow-private",
+    ])
+}
+
+/// A credential identifier is service-supplied text. It reaches the JSON
+/// envelope, human output and an error message only through the sanitiser, so
+/// no service can move a cursor, repaint a line, or reverse the reading order
+/// of what is printed around it.
+#[test]
+fn a_hostile_credential_identifier_never_reaches_a_terminal_intact() {
+    let mut mock = Mock::new(Flavour::Eudi);
+    mock.credential_ids = vec![HOSTILE_CREDENTIAL.to_owned()];
+    let reported = fixture(mock);
+    let output = sign(&reported, &[]);
+    assert!(output.status.success(), "{output:?}");
+    let report = json(&output);
+    assert_eq!(
+        report["data"]["signatures"][0]["credential_id"],
+        HOSTILE_CREDENTIAL_SANITIZED
+    );
+    let printed = everything_printed(&output);
+    assert!(!printed.contains('\u{1b}'), "an escape reached the output");
+    assert!(
+        !printed.contains('\u{202e}'),
+        "an override reached the output"
+    );
+
+    let mut mock = Mock::new(Flavour::Eudi);
+    mock.credential_ids = vec![HOSTILE_CREDENTIAL.to_owned()];
+    let human = fixture(mock);
+    let output = sign_human(&human);
+    assert!(output.status.success(), "{output:?}");
+    let printed = everything_printed(&output);
+    assert!(
+        printed.contains(&format!("credential={HOSTILE_CREDENTIAL_SANITIZED}")),
+        "the credential is still named: {printed}"
+    );
+    assert!(
+        !printed.contains('\u{1b}'),
+        "an escape reached the terminal"
+    );
+    assert!(
+        !printed.contains('\u{202e}'),
+        "an override reached the terminal"
+    );
+}
+
+/// The same holds for the refusal that lists the credentials on offer, which
+/// is the one place several service-chosen strings are joined together.
+#[test]
+fn a_hostile_credential_identifier_is_sanitized_in_an_error_message() {
+    let mut mock = Mock::new(Flavour::Eudi);
+    mock.credential_ids = vec![HOSTILE_CREDENTIAL.to_owned(), "cred-other".to_owned()];
+    let fixture = fixture(mock);
+    let output = sign(&fixture, &[]);
+    assert!(!output.status.success());
+    let report = json(&output);
+    assert_eq!(report["errors"][0]["code"], "csc_credential_ambiguous");
+    let message = report["errors"][0]["message"].as_str().expect("a message");
+    assert!(
+        message.contains(HOSTILE_CREDENTIAL_SANITIZED) && message.contains("cred-other"),
+        "both credentials are still listed: {message}"
+    );
+    let printed = everything_printed(&output);
+    assert!(!printed.contains('\u{1b}'), "an escape reached the output");
+    assert!(
+        !printed.contains('\u{202e}'),
+        "an override reached the output"
+    );
+}
