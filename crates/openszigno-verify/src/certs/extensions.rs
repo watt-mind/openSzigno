@@ -116,6 +116,15 @@ impl ParsedCertificate {
         self.extension::<KeyUsage>()
     }
 
+    /// The `basicConstraints` extension, distinguishing absent from malformed.
+    ///
+    /// [`ParsedCertificate::is_certificate_authority`] answers "is this a CA",
+    /// which is all a path build needs. A rule about the extension being
+    /// present and saying `CA=false` needs to tell the two apart.
+    pub(crate) fn basic_constraints(&self) -> Result<Option<BasicConstraints>, ()> {
+        self.extension::<BasicConstraints>()
+    }
+
     /// The ETSI EN 319 412-5 / RFC 3739 `QCStatements` this certificate
     /// asserts, as the OIDs of the statements it carries.
     ///

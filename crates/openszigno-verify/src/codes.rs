@@ -215,6 +215,8 @@ check_codes! {
     TrustListUnverified => "trust_list_unverified",
     TrustListSignatureOk => "trust_list_signature_ok",
     TrustListSignatureInvalid => "trust_list_signature_invalid",
+    TrustListSignerMismatch => "trust_list_signer_mismatch",
+    TrustListSignerUnqualified => "trust_list_signer_unqualified",
     TrustListServiceNotGranted => "trust_list_service_not_granted",
     CertificateQualified => "certificate_qualified",
     CertificateNotQualified => "certificate_not_qualified",
