@@ -563,6 +563,18 @@ and `MAX_REVOCATION_ITEM_BYTES` (16 MiB) for one CRL or OCSP response. Each
 caller words its own refusal, with the code that path already used, and no
 message names the file, because the path may be private.
 
+A store is a directory, so it is bounded twice: per file, and in total. A
+`--trust-store` may hold 1024 files per directory and **64 MiB across the whole
+store**; a `--revocation-store` may hold 4096 files per directory and **256 MiB
+across the whole store**. The total spans both of a store's directories
+(`anchors/` and `intermediates/`, `crls/` and `ocsp/`), so a store cannot be
+padded out by splitting it, and every file is read before any of it is parsed,
+so a store over the total is refused for its size rather than for whatever the
+file that crossed the line happened to contain. Exceeding either total is
+`trust_store_invalid` or `revocation_store_invalid` — the store's own code,
+exit 3 — and it is a refusal, never a truncation: a partially loaded store
+would silently change what "trusted" or "not revoked" means.
+
 An input that is not a regular file, a directory most often, is `io_error`
 (exit 3) with `input.bytes` reported as `null` on every operating system. A
 directory has a length of its own on some filesystems and none on others, and
@@ -977,9 +989,9 @@ I/O and extraction policy.
 | `document_ambiguous` | CLI | 4 | A `--document` `object_ref` selector matches more than one document. Unreachable through a parsed dossier, whose XML IDs are unique. |
 | `stdout_requires_single_document` | CLI | 4 | `--stdout` did not resolve to exactly one document, or the one it resolved to embeds a dossier while recursion is on. |
 | `document_not_extractable` | CLI | 5 | The document `--stdout` selected is encrypted or uses an unsupported transform chain. |
-| `trust_store_invalid` | CLI | 3 | `--trust-store` does not name a readable directory, holds a file that is not PEM or DER certificate data, or holds no trust anchor. A partially loaded store would silently change what "trusted" means, so the run fails instead. |
+| `trust_store_invalid` | CLI | 3 | `--trust-store` does not name a readable directory, holds more files than the loader will read, holds a file larger than 4 MiB or more than 64 MiB in total, holds a file that is not PEM or DER certificate data, or holds no trust anchor. A partially loaded store would silently change what "trusted" means, so the run fails instead. |
 | `trust_list_invalid` | CLI | 3 | A `--trust-list`, `--lotl`, or `--trust-list-signer` file could not be read or parsed. A trusted list that loaded only in part would silently change what "trusted" means, so the run fails instead. |
-| `revocation_store_invalid` | CLI | 3 | `--revocation-store` does not name a readable directory, holds more files than the loader will read, holds a file larger than `MAX_REVOCATION_ITEM_BYTES`, or holds a file that is neither a CRL nor an OCSP response. |
+| `revocation_store_invalid` | CLI | 3 | `--revocation-store` does not name a readable directory, holds more files than the loader will read, holds a file larger than `MAX_REVOCATION_ITEM_BYTES` or more than 256 MiB in total, or holds a file that is neither a CRL nor an OCSP response. |
 | `online_options_invalid` | CLI | 3 or 4 | The network transport could not be built, which today means `--online-proxy` is not a usable proxy URL. `verify --online` reports it as exit 3; `sign --tsa` and `sign --csc` report it as exit 4. |
 | `online_cache_invalid` | CLI | 3 | The `--online-cache` directory could not be opened safely, or a cache file could not be written. A name inside it that already holds something else is not this error; that is one `online_fetch_failed` with the class `cache_collision`, and the run continues. |
 | `unsafe_output_directory` | CLI | 5 | The output path contains a symlink or reparse point, or is not a real directory. |

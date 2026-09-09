@@ -52,6 +52,13 @@ Every file is parsed at load time. One malformed entry fails the whole store
 (`trust_store_invalid`, exit 3), because a half-loaded store would silently
 change what "trusted" means.
 
+The store is bounded twice: 4 MiB per file, 1024 files per directory, and
+**64 MiB across the whole store**, counting `anchors/` and `intermediates/`
+together so a store cannot be padded out by splitting it. Every file is read
+before any of it is parsed, so a store over the total is refused for its size,
+not for whatever the file that crossed the line held. Exceeding it is the same
+`trust_store_invalid` refusal, and a refusal it stays: nothing is truncated.
+
 ### Where the Hungarian roots come from
 
 Microsec publishes its CA certificates at
@@ -271,6 +278,13 @@ not by where it sits or what it is called. A file that is neither a CRL nor an
 OCSP response fails the run (`revocation_store_invalid`, exit 3) — "no
 revocation data" is itself an answer that changes a verdict, so a store that
 quietly dropped half its contents would be worse than no store at all.
+
+The store is bounded twice: `MAX_REVOCATION_ITEM_BYTES` (16 MiB) per file,
+4096 files per directory, and **256 MiB across the whole store**, counting
+`crls/` and `ocsp/` together. Every file is read before any of it is
+classified, so a store over the total is refused for its size rather than for
+the contents of whichever file crossed the line, with the same
+`revocation_store_invalid` code.
 
 ### Where the data comes from, and which answer wins
 

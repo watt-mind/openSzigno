@@ -112,6 +112,17 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
   `ß` to `ss`. It errs towards more names comparing equal than any one
   filesystem merges, which costs a deduplicated name and a warning rather than
   a document.
+- A `--trust-store` and a `--revocation-store` are bounded in total, not only
+  file by file. Each file had a cap (4 MiB and 16 MiB) and each directory a
+  file count (1024 and 4096), which still let a store of a thousand
+  just-under-cap files ask the loader for gigabytes before it decided anything.
+  The aggregate caps are 64 MiB for a trust store and 256 MiB for a revocation
+  store, counted across both of a store's directories so splitting a store does
+  not double them, and refused with the store's own code
+  (`trust_store_invalid`, `revocation_store_invalid`, exit 3). Every file is
+  now read before any of it is parsed or classified, so a store over the total
+  is refused for its size rather than for whatever the file that crossed the
+  line happened to contain.
 
 ## [0.7.1] - 2026-09-09
 
