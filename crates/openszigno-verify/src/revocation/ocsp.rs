@@ -328,7 +328,15 @@ fn responder_authorised(
     if anchors.is_empty() {
         return None;
     }
-    let pool = crate::certs::dedup(offered.iter().chain(candidates.iter()).cloned().collect());
+    // The run's own candidates first, then the certificates the response
+    // carried. Order is load-bearing: `validate_path_at` considers only the
+    // first `max_certificates` of the pool, so a response padded up to that
+    // bound with certificates an attacker chose could push the issuing CA the
+    // run actually holds out of path building and turn a valid response into
+    // an unauthorised one. The response's own certificates are the untrusted
+    // half of this pool, so they fill whatever room the run's material leaves
+    // rather than claiming it first.
+    let pool = crate::certs::dedup(candidates.iter().chain(offered.iter()).cloned().collect());
     // A path search is the most expensive thing this function can do, and what
     // it answers is a question about a *key*: whether the caller's anchors
     // vouch for whoever holds the key that signed this response. Two

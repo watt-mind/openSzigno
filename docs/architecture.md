@@ -2267,6 +2267,17 @@ with a new serial, say — ask it once. Without either bound, a response packed
 with re-issues of one responder certificate that no anchor vouches for drove
 one full path search per certificate.
 
+The bound cuts the response's certificates, never the run's own. Path building
+for the trusted model considers at most `max_certificates` candidates, so the
+pool it is handed puts the certificates the run already held — the signature's
+`ds:KeyInfo` and `xades:CertificateValues`, and the trust store — ahead of the
+certificates the response carried. The other order let a response padded up to
+the bound push the responder's own issuing CA out of path building, so a
+central responder the caller genuinely trusts came back unauthorised because
+an attacker-supplied list had filled the pool first. The response's
+certificates are the untrusted half of that pool, so they fill whatever room
+the run's material leaves.
+
 #### Which answer wins
 
 The reading order above is a preference about where to look first, not about
