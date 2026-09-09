@@ -10,6 +10,21 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
 
 ## [Unreleased]
 
+### Changed
+
+- `openszigno-verify`'s reported vocabulary is now open. `CheckCode`,
+  `CheckStatus`, `Verdict`, `TrustAnchorOrigin`, and `RevocationPolicy` are
+  `#[non_exhaustive]`, so a release that learns to check something new can add
+  a code without a semver-breaking change; adding `CheckCode::OcspResponderTrusted`
+  is what forced the 0.7.1 retarget to 0.8.0. `CheckCode::ALL` still lists
+  every code the linked build knows and the test pinning it is unchanged.
+  **This is itself a breaking change for downstream Rust code**: an existing
+  `match` on any of the five enums without a wildcard arm stops compiling, so
+  it needs a 0.9.0 release rather than a patch. Nothing in the JSON envelope
+  changes and `schema_version` stays `1`; the documented rule that a consumer
+  must treat an unrecognised code as blocking unless its status is `passed` is
+  now enforced by the type system as well as by the documentation.
+
 ### Fixed
 
 - `online_options_invalid` (an unusable `--online-proxy` value) now exits

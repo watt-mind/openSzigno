@@ -70,6 +70,12 @@ does that in memory. The CLI owns all
 filesystem policy and serialisation. This keeps the parser testable and makes
 future library use possible without weakening CLI safety.
 
+`openszigno-verify`'s reported vocabulary is open, not closed. `CheckCode`,
+`CheckStatus`, `Verdict`, `TrustAnchorOrigin`, and `RevocationPolicy` are
+`#[non_exhaustive]`, so a release may add a variant to any of them without a
+breaking change and a consumer must handle one it does not recognise. See
+[Consumers must handle unknown codes](#consumers-must-handle-unknown-codes).
+
 `openszigno-verify` is a separate crate, not a module, so that the crypto
 dependency tree stays out of anyone who only wants parsing, and so that the
 verification code can be audited as a unit. It performs no I/O of its own:
@@ -2876,6 +2882,27 @@ Notes on the shape:
   evidence than the minimum, which is precisely backwards.
 - `info` is the only non-blocking status; everything else that is not `passed`
   keeps the verdict below `valid`.
+
+#### Consumers must handle unknown codes
+
+The set of check codes grows: a release that learns to check something new
+emits a new code for it, and the JSON envelope keeps `schema_version` at `1`
+when it does, because an added code is additive (see
+[Golden output contract](../CONTRIBUTING.md#golden-output-contract)). A
+consumer that treats the list of codes as closed therefore breaks on an
+ordinary release, not on a breaking one.
+
+- **JSON consumers** must accept a `code` string they do not recognise, and
+  must treat it as blocking unless its `status` is `passed`. The same holds
+  for `status` and for `verdict`: an unrecognised status is not a passing one,
+  and an unrecognised verdict is not `valid`.
+- **Rust consumers** of `openszigno-verify` see this in the type system.
+  `CheckCode`, `CheckStatus`, `Verdict`, `TrustAnchorOrigin`, and
+  `RevocationPolicy` are `#[non_exhaustive]`, so every `match` on one needs a
+  wildcard arm and adding a variant is no longer a semver-breaking change.
+  `CheckCode::ALL` lists every code the linked build knows, and
+  `CheckCode::as_str` gives the stable string; do not derive a closed set from
+  either and assume it will hold across versions.
 
 The three checks that are still `skipped`, and why each is a required check
 that was not performed: `xades_absent` (no signed statement of which
