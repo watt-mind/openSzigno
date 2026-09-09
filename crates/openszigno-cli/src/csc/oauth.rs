@@ -36,7 +36,7 @@
 //! PKCE exists to prevent.
 
 use std::io::{Read as _, Write as _};
-use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
+use std::net::{Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::time::{Duration, Instant};
 
 use openszigno_author::sign::{SignError, SignErrorCode};
@@ -441,6 +441,14 @@ fn read_head(stream: &mut TcpStream) -> Option<String> {
 /// Answer the browser in plain text. Nothing about the run reaches the page:
 /// the browser is somebody's ordinary browser, and a page that echoed a code
 /// or a token would put it in a history entry.
+///
+/// The write side is shut down explicitly once the answer is out, before the
+/// stream is dropped. That is what makes the answer *arrive*: the listener
+/// stops the moment it has served the redirect, so the socket is closed a
+/// microsecond later, and on a BSD-derived stack closing a socket that still
+/// holds unread inbound data sends an RST that discards whatever is still in
+/// the send buffer. An explicit `shutdown` sends a FIN first, which is the
+/// end-of-response marker a `Connection: close` answer relies on.
 fn respond(stream: &mut TcpStream, status: &str, body: &str) {
     let head = format!(
         "HTTP/1.1 {status}\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n",
@@ -449,6 +457,7 @@ fn respond(stream: &mut TcpStream, status: &str, body: &str) {
     let _ = stream.write_all(head.as_bytes());
     let _ = stream.write_all(body.as_bytes());
     let _ = stream.flush();
+    let _ = stream.shutdown(Shutdown::Write);
 }
 
 #[cfg(test)]
