@@ -41,6 +41,10 @@ pub fn document_signature(certificates: Vec<Vec<u8>>) -> SigSpec {
         certificate_values: Vec::new(),
         signing_certificate: None,
         signature_policy_implied: false,
+        signature_policy: None,
+        claimed_roles: Vec::new(),
+        signer_role_v2: false,
+        commitment_type_ids: Vec::new(),
         timestamp: None,
         archive_timestamp: false,
         extra_unsigned_property: None,
@@ -78,6 +82,10 @@ pub fn dossier_signature(certificates: Vec<Vec<u8>>) -> SigSpec {
         certificate_values: Vec::new(),
         signing_certificate: None,
         signature_policy_implied: false,
+        signature_policy: None,
+        claimed_roles: Vec::new(),
+        signer_role_v2: false,
+        commitment_type_ids: Vec::new(),
         timestamp: None,
         archive_timestamp: false,
         extra_unsigned_property: None,
@@ -196,6 +204,32 @@ pub fn canonical_signature_value(xml: &str, spec: &SigSpec) -> Vec<u8> {
     RoxmltreeC14n
         .canonicalize(source.text(), &NodeSet::subtree(value), algorithm, &[])
         .expect("canonicalizes")
+}
+
+/// An explicit `xades:SignaturePolicyIdentifier`, with the policy hash when
+/// the spec carries one.
+fn render_signature_policy(spec: &SignaturePolicySpec) -> String {
+    let mut out = String::from(
+        "<xades:SignaturePolicyIdentifier><xades:SignaturePolicyId><xades:SigPolicyId>",
+    );
+    out.push_str(&format!(
+        "<xades:Identifier>{}</xades:Identifier>",
+        spec.identifier
+    ));
+    if let Some(description) = &spec.description {
+        out.push_str(&format!(
+            "<xades:Description>{description}</xades:Description>"
+        ));
+    }
+    out.push_str("</xades:SigPolicyId>");
+    if let Some((algorithm, value)) = &spec.digest {
+        out.push_str(&format!(
+            "<xades:SigPolicyHash><ds:DigestMethod Algorithm=\"{algorithm}\"/>\
+<ds:DigestValue>{value}</ds:DigestValue></xades:SigPolicyHash>"
+        ));
+    }
+    out.push_str("</xades:SignaturePolicyId></xades:SignaturePolicyIdentifier>");
+    out
 }
 
 /// The `xades:SigningCertificate` or `SigningCertificateV2` property.
@@ -488,13 +522,45 @@ pub(super) fn render_signature(spec: &SigSpec, namespace: &str) -> String {
             "<xades:SignaturePolicyIdentifier><xades:SignaturePolicyImplied/></xades:SignaturePolicyIdentifier>",
         );
     }
+    if let Some(policy) = &spec.signature_policy {
+        signed_properties.push_str(&render_signature_policy(policy));
+    }
+    if !spec.claimed_roles.is_empty() {
+        let element = if spec.signer_role_v2 {
+            "SignerRoleV2"
+        } else {
+            "SignerRole"
+        };
+        signed_properties.push_str(&format!("<xades:{element}><xades:ClaimedRoles>"));
+        for role in &spec.claimed_roles {
+            signed_properties.push_str(&format!("<xades:ClaimedRole>{role}</xades:ClaimedRole>"));
+        }
+        signed_properties.push_str(&format!("</xades:ClaimedRoles></xades:{element}>"));
+    }
+    // `xades:SignedDataObjectProperties` is a sibling of the signature
+    // properties inside `xades:SignedProperties`, so a commitment type is
+    // signed exactly as the signing time is.
+    let data_object_properties = if spec.commitment_type_ids.is_empty() {
+        String::new()
+    } else {
+        let mut properties = String::from("<xades:SignedDataObjectProperties>");
+        for identifier in &spec.commitment_type_ids {
+            properties.push_str(&format!(
+                "<xades:CommitmentTypeIndication><xades:CommitmentTypeId>\
+<xades:Identifier>{identifier}</xades:Identifier></xades:CommitmentTypeId>\
+<xades:AllSignedDataObjects/></xades:CommitmentTypeIndication>"
+            ));
+        }
+        properties.push_str("</xades:SignedDataObjectProperties>");
+        properties
+    };
 
     let xades_object = if spec.include_xades {
         format!(
             "<ds:Object Id=\"xadesobj-{tag}\"><xades:QualifyingProperties xmlns:xades=\"{}\" Target=\"#{}\">\
 <xades:SignedProperties Id=\"sp-{tag}\"><xades:SignedSignatureProperties>\
 {signed_properties}\
-</xades:SignedSignatureProperties></xades:SignedProperties>{unsigned}\
+</xades:SignedSignatureProperties>{data_object_properties}</xades:SignedProperties>{unsigned}\
 </xades:QualifyingProperties></ds:Object>",
             spec.xades_namespace, spec.id
         )

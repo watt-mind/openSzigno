@@ -12,6 +12,35 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
 
 ### Added
 
+- AVDH-authenticated documents keep being recognised for what they are. AVDH
+  (*azonositasra visszavezetett dokumentumhitelesites*) was the Hungarian
+  state service that sealed a document on behalf of an identified citizen;
+  citizen AVDH ended on 2025-01-01 and the service was withdrawn after
+  2025-10-31, but section 634(15) of the Code of Civil Procedure grandfathers
+  every document authenticated up to 2024-12-31 indefinitely, so a reader
+  keeps meeting these structures. Nothing on the read path may treat one as
+  obsolete or unsupported, and three signed claims such a signature carries
+  are now reported instead of being dropped or named only in passing:
+  `signatures[].xades.signature_policy_digest` (the `SigPolicyHash` an
+  explicit signature policy declares, as `algorithm` and `value`),
+  `signatures[].xades.claimed_roles` (the `xades:ClaimedRole` values of
+  `SignerRole` and `SignerRoleV2`, which is where AVDH states the identified
+  citizen), and `signatures[].xades.commitment_type_ids`. The unverified
+  signature inventory `inspect` and `list` print gains the same roles as
+  `signature_inventory.signatures[].claimed_roles`, bounded to 8 values of
+  128 displayable characters, and the human inventory line names them.
+  Every one of these is a **claim**, reported and applied to nothing: the
+  signature policy stays informational, no policy document is fetched, and
+  no role is looked up anywhere. None of them may cost a signature its
+  verdict, and unknown qualifying properties stay `xades_not_validated`
+  (`info`). A PAdES signature inside a PDF payload is still out of scope for
+  `verify`, and `inspect`, `list` and `validate-structure` describe such a
+  document and warn about nothing while `extract` sniffs it as `pdf`. Every
+  new JSON member is additive and appears only when the signature carries the
+  property, so `schema_version` stays `1` and no golden changes.
+  `docs/architecture.md` gains an "AVDH-authenticated documents" subsection,
+  `docs/trust.md` records what could and could not be established about the
+  seal's issuer, and `docs/references.md` cites the sources.
 - Trusted lists are read in **both** published versions of ETSI TS 119 612.
   The EU cut over from TLv5 to TLv6 on 2026-04-29 with no transition period,
   so a verifier needs both: TLv6 for anything published from that date, TLv5

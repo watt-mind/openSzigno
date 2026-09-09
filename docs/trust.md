@@ -77,6 +77,23 @@ plain-HTTP direct links, verify the fingerprints against the ones the page
 publishes, and record where and when you fetched them. `docs/references.md`
 lists the URLs and the checksums of the copies in the gitignored `refs/` cache.
 
+Documents authenticated with AVDH, the Hungarian state's identification-based
+document authentication service, are signed by a state seal rather than by the
+citizen, and section 634(15) of the Code of Civil Procedure keeps the ones
+issued up to 31 December 2024 in circulation indefinitely. The published
+service description says the seal is an advanced electronic seal on a
+**qualified certificate**, accompanied by a qualified timestamp
+([SZEUSZ](https://szeusz.gov.hu/szeusz/avdh-dhsz)), which means its chain ends
+at a Hungarian qualified trust service provider on the national trusted list,
+and loading the Hungarian trusted list is therefore the way to validate one.
+**Which** provider issued the seal certificate could not be established from a
+public source: the service's own terms of service were not reachable from this
+environment, and no published certificate profile was found. Read the issuer
+off a document you actually hold rather than assuming a root here. Nothing in
+openSzigno special-cases such a certificate; it is path-validated like any
+other, and what the read path does with the rest of the structure is described
+in [architecture.md](architecture.md#avdh-authenticated-documents).
+
 ## Trusted lists
 
 An ETSI TS 119 612 trusted list is how an EU member state says which CAs are

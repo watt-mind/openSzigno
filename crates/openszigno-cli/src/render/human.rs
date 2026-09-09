@@ -47,6 +47,13 @@ fn write_signature_inventory(out: &mut impl Write, inventory: &Value) -> io::Res
         if !properties.is_empty() {
             line.push_str(&format!(", xades={properties}"));
         }
+        // Claimed roles, when the signature states any. An AVDH-authenticated
+        // dossier carries the citizen's asserted identity here, and it is a
+        // claim like every other line: nothing on it was checked.
+        let roles = join_json_strings(&signature["claimed_roles"]);
+        if !roles.is_empty() {
+            line.push_str(&format!(", claimed roles={roles}"));
+        }
         let evidence = &signature["evidence"];
         line.push_str(&format!(
             ", certificates={}, crls={}, ocsp={}, signature-timestamps={}, archive-timestamps={}",
