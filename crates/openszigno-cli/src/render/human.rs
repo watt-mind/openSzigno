@@ -421,6 +421,15 @@ fn display_source_size(value: &Value) -> String {
         .map_or_else(|| "?".to_owned(), |size| size.to_string())
 }
 
+/// One string field of the envelope, as a human line shows it.
+///
+/// The value is printed as it stands, because the envelope it comes from was
+/// already sanitised: every command that reads a dossier runs
+/// [`crate::sanitize::data`] over its `data` before the response is built, so
+/// what arrives here carries no `Cc` or `Cf` character and is already bounded.
+/// Filtering again here would be a second filter to keep in step with the
+/// first; the one pass covers both channels precisely because this renderer
+/// reads the same value the JSON envelope does.
 fn display_json_string(value: &Value) -> String {
     value.as_str().unwrap_or("<missing>").to_owned()
 }

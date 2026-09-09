@@ -12,6 +12,7 @@ mod online;
 mod render;
 mod response;
 mod revocation_store;
+mod sanitize;
 mod trust;
 
 use std::process::ExitCode;
@@ -120,7 +121,7 @@ fn main() -> ExitCode {
                 command,
                 input: success.input,
                 data: success.data,
-                warnings: success.warnings,
+                warnings: notices(success.warnings),
                 errors: Vec::new(),
             };
             let written = if json_mode {
@@ -154,7 +155,7 @@ fn main() -> ExitCode {
                 warnings: Vec::new(),
                 errors: vec![Notice {
                     code: failure.error.code.to_owned(),
-                    message: failure.error.message.clone(),
+                    message: sanitize::message(&failure.error.message),
                 }],
             };
             let written = if json_mode {
@@ -162,7 +163,7 @@ fn main() -> ExitCode {
             } else {
                 write_diagnostic(&format!(
                     "error [{}]: {}",
-                    failure.error.code, failure.error.message
+                    response.errors[0].code, response.errors[0].message
                 ));
                 Ok(())
             };
@@ -172,6 +173,22 @@ fn main() -> ExitCode {
             }
         }
     }
+}
+
+/// Sanitise the text of every warning on its way into the envelope.
+///
+/// A warning is a sentence this tool wrote, but the fragments inside one can
+/// come from the input, so the same filter that covers `data` covers the
+/// diagnostics beside it. Both output channels read the sanitised notice: the
+/// human summary prints these very values.
+fn notices(warnings: Vec<Notice>) -> Vec<Notice> {
+    warnings
+        .into_iter()
+        .map(|warning| Notice {
+            message: sanitize::message(&warning.message),
+            ..warning
+        })
+        .collect()
 }
 
 /// Report a `clap` parse failure.
