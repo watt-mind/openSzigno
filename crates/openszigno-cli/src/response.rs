@@ -90,6 +90,19 @@ impl CliError {
         }
     }
 
+    /// A caller-supplied option is unusable on its own terms, independent of
+    /// any dossier or key material — for example an `--online-proxy` value
+    /// that cannot be parsed as a proxy URL. Exit 3 is the input/output
+    /// error status: something about how this run was invoked cannot be
+    /// used, not something wrong with the dossier or key material it names.
+    pub(crate) fn option_invalid(code: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            message: message.into(),
+            exit: 3,
+        }
+    }
+
     pub(crate) fn unsafe_output(code: &'static str, message: impl Into<String>) -> Self {
         Self {
             code,
@@ -140,6 +153,10 @@ mod tests {
     fn cli_errors_carry_the_documented_exit_status() {
         assert_eq!(CliError::io("x").exit, 3);
         assert_eq!(CliError::invalid("input_too_large", "x").exit, 4);
+        assert_eq!(
+            CliError::option_invalid("online_options_invalid", "x").exit,
+            3
+        );
         assert_eq!(CliError::unsafe_output("output_exists", "x").exit, 5);
         assert_eq!(CliError::io("x").code, "io_error");
 
