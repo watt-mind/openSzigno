@@ -883,3 +883,66 @@ fn a_dossier_with_unusual_but_valid_values_signs_to_the_mandated_shape() {
     assert_check(&report, "signature_value_ok", "passed");
     assert_check(&report, "reference_scope_complete", "passed");
 }
+
+/// An existing signature whose reference resolves to the element the new
+/// signature would go into, or to anything containing it, is a refusal.
+///
+/// Adding a `ds:Signature` changes the canonical form of its container and of
+/// every ancestor of it, so such a reference stops matching. Only `URI=""`
+/// and dossier-level cover used to be detected, which left an `es:Document`
+/// with an `Id` of its own, referenced by `URI="#doc0"`, silently broken.
+#[test]
+fn a_signature_that_would_break_an_existing_reference_is_refused() {
+    let pki = pki();
+    let cases: [(&str, &str, Vec<&str>); 3] = [
+        ("the es:Document it would be written into", "#doc0", vec![]),
+        (
+            "the es:Dossier it would be written into",
+            "#root0",
+            vec!["--scope", "dossier"],
+        ),
+        ("something this tool cannot resolve", "#nowhere", vec![]),
+    ];
+    for (what, uri, extra) in cases {
+        let fixture = fixture(&pki, 1);
+        patch_input(
+            &fixture,
+            &[
+                (
+                    "<es:Dossier ".to_owned(),
+                    "<es:Dossier Id=\"root0\" ".to_owned(),
+                ),
+                (
+                    "<es:Document>".to_owned(),
+                    "<es:Document Id=\"doc0\">".to_owned(),
+                ),
+            ],
+        );
+        // One signature, written by this tool, then aimed at a target it
+        // would never choose itself.
+        assert_eq!(sign(&fixture, &[])["ok"], Value::Bool(true));
+        let signed = String::from_utf8(
+            std::fs::read(fixture.path("signed.es3")).expect("the signed dossier is read"),
+        )
+        .expect("it is UTF-8");
+        assert!(signed.contains("URI=\"#obj0\""), "{what}");
+        std::fs::write(
+            fixture.path("input.es3"),
+            signed.replace("URI=\"#obj0\"", &format!("URI=\"{uri}\"")),
+        )
+        .expect("the patched dossier is written");
+        std::fs::remove_file(fixture.path("signed.es3")).expect("the output is removed");
+
+        let output = sign_output(&fixture, &extra);
+        let report = json(&output);
+        assert_eq!(
+            report["errors"][0]["code"], "document_already_signed",
+            "{what}: {report}"
+        );
+        assert_eq!(output.status.code(), Some(4), "{what}");
+        assert!(
+            !fixture.path("signed.es3").exists(),
+            "{what}: nothing may be written"
+        );
+    }
+}

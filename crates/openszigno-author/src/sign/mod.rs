@@ -312,6 +312,29 @@ fn refuse_unsafe_placement(lookup: &dsig::Lookup<'_>, scope: SignScope) -> Resul
     Ok(())
 }
 
+/// Refuse to write into an element an existing signature already covers.
+///
+/// [`refuse_unsafe_placement`] catches the two cases that can be judged
+/// without knowing where the element goes. This one needs the insertion
+/// point, so it runs once that is resolved: an existing `ds:Reference` whose
+/// target is the insertion point itself or an ancestor of it would stop
+/// matching the moment anything is added there.
+fn refuse_broken_cover(
+    lookup: &dsig::Lookup<'_>,
+    insertion: openszigno_core::roxmltree::Node<'_, '_>,
+) -> Result<(), SignError> {
+    if lookup.covers_ancestor_or_self(insertion) {
+        return Err(SignError::new(
+            SignErrorCode::DocumentAlreadySigned,
+            "this dossier cannot have a signature added to it: an existing \
+             signature references the element the new signature would be written \
+             into, or something containing it, so adding it would break that \
+             signature",
+        ));
+    }
+    Ok(())
+}
+
 /// Resolve every signature this run writes: its identifiers, its references,
 /// and where the element goes.
 fn plan_signatures(
@@ -333,6 +356,7 @@ fn plan_signatures(
             let documents = lookup.dossier_child_id(namespace, "Documents")?;
             names::check_id("Id", &profile)?;
             names::check_id("Id", &documents)?;
+            refuse_broken_cover(lookup, lookup.root())?;
             plans.push(build_plan(
                 lookup,
                 PlanSpec {
@@ -385,6 +409,7 @@ fn plan_signatures(
                     )
                 })?;
                 names::check_id("Id", &profile)?;
+                refuse_broken_cover(lookup, container)?;
                 plans.push(build_plan(
                     lookup,
                     PlanSpec {

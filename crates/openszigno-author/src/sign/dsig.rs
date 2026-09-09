@@ -273,6 +273,39 @@ impl<'input> Lookup<'input> {
             .any(|node| node.attribute("URI").unwrap_or_default().is_empty())
     }
 
+    /// Whether an existing signature already covers the element a new
+    /// signature would be written into, or anything containing it.
+    ///
+    /// Adding a `ds:Signature` changes the canonical form of the element it
+    /// goes into and of every ancestor of that element, so any existing
+    /// reference resolving to one of them would stop matching. Only the
+    /// same-document `#id` form is resolved; a reference this module cannot
+    /// resolve may name anything, so it is treated as covering rather than
+    /// assumed harmless.
+    pub(crate) fn covers_ancestor_or_self(&self, insertion: Node<'_, 'input>) -> bool {
+        let chain: Vec<openszigno_core::roxmltree::NodeId> =
+            insertion.ancestors().map(|node| node.id()).collect();
+        self.signatures().into_iter().any(|signature| {
+            signature
+                .descendants()
+                .filter(|node| {
+                    node.is_element()
+                        && node.tag_name().name() == "Reference"
+                        && node.tag_name().namespace() == Some(XMLDSIG_NS)
+                })
+                .any(|reference| {
+                    match reference
+                        .attribute("URI")
+                        .and_then(|uri| uri.strip_prefix('#'))
+                        .and_then(|id| self.by_id(id))
+                    {
+                        Some(target) => chain.contains(&target.id()),
+                        None => true,
+                    }
+                })
+        })
+    }
+
     /// Whether something at the dossier level already covers `es:Documents`.
     ///
     /// A dossier-level `ds:Signature` and a dossier-level `es:TimeStamp` both
