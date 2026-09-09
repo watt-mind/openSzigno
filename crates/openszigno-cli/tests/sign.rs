@@ -684,3 +684,60 @@ fn two_rsa_pkcs1_runs_over_the_same_inputs_write_the_same_bytes() {
     let second = std::fs::read(fixture.path("signed.es3")).expect("the output exists");
     assert_eq!(first, second);
 }
+
+// ---------------------------------------------------------------------------
+// 8. The dossier's own text is never mistaken for the signer's scaffolding
+// ---------------------------------------------------------------------------
+
+/// A document title that reads exactly like one of the signer's internal
+/// placeholders is content: it is signed, and it comes back out unchanged.
+///
+/// It used to be substituted along with the placeholder it resembled, after
+/// the digest over it had been taken, so the run reported success and `verify`
+/// then reported `reference_digest_mismatch`.
+#[test]
+fn a_title_that_reads_like_a_placeholder_is_signed_and_listed_unchanged() {
+    let pki = pki();
+    let fixture = fixture(&pki, 2);
+    let titles = [
+        "@@openszigno-digest:ref-sig-doc0-object@@".to_owned(),
+        "@@openszigno-value:sig-doc0@@".to_owned(),
+    ];
+    let input = fixture.path("input.es3");
+    let mut text = String::from_utf8(std::fs::read(&input).expect("the dossier is read"))
+        .expect("it is UTF-8");
+    for (index, title) in titles.iter().enumerate() {
+        text = text.replace(&format!("note{index}.txt"), title);
+    }
+    std::fs::write(&input, text).expect("the patched dossier is written");
+
+    let signed = sign(&fixture, &[]);
+    assert_eq!(signed["ok"], Value::Bool(true));
+
+    let report = json(&verify(&fixture, &[]));
+    assert_check(&report, "reference_digest_ok", "passed");
+    assert_check(&report, "signature_value_ok", "passed");
+    assert!(
+        !blocking(&report).contains(&"reference_digest_mismatch".to_owned()),
+        "nothing may be rewritten under the signature: {:?}",
+        checks(&report)
+    );
+
+    let listed = json(&binary_run(&[
+        "list",
+        &fixture.text("signed.es3"),
+        "--json",
+    ]));
+    let listed: Vec<String> = listed["data"]["documents"]
+        .as_array()
+        .expect("an array of documents")
+        .iter()
+        .map(|document| {
+            document["title"]
+                .as_str()
+                .expect("a title is a string")
+                .to_owned()
+        })
+        .collect();
+    assert_eq!(listed, titles);
+}
