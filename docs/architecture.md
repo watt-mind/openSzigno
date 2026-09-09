@@ -1519,7 +1519,7 @@ Reported verbatim under `data.limits` in `verify --json`.
 | `max_signatures` | 64 | `ds:Signature` elements examined per dossier. |
 | `max_references_per_signature` | 32 | `ds:Reference` elements per signature. |
 | `max_transforms_per_reference` | 8 | Transforms in one reference's chain. |
-| `max_certificates` | 64 | Certificates admitted into path building. |
+| `max_certificates` | 64 | Certificates admitted into path building, and the largest `certs` list read from one OCSP response. |
 | `max_timestamps_per_signature` | 8 | `xades:SignatureTimeStamp` elements processed per signature. |
 | `max_chain_length` | 8 | Certificates in one candidate path, inclusive: a path of exactly this many certificates that ends at an anchor is accepted. |
 | `max_paths` | 32 | Completed candidate paths explored. |
@@ -2177,6 +2177,17 @@ afterwards said it while it still was.
 `ocsp_responder_trusted` (`info`) is emitted when the third model was used, so
 a reader can tell an answer that rests on the issuing CA from one that rests on
 their own trust store. It reports rather than decides, so it never blocks.
+
+The work one response can ask for is bounded, because the response is an
+untrusted input. A `BasicOCSPResponse` carries an unbounded `certs` field, so
+at most `max_certificates` of them are read and the list is deduplicated by DER
+before anything is verified. The trusted-responder path search is then run at
+most **once per distinct responder public key**: the question that search
+answers is whether the caller's anchors vouch for whoever holds the key that
+signed the response, so two certificates over one key — a responder re-issued
+with a new serial, say — ask it once. Without either bound, a response packed
+with re-issues of one responder certificate that no anchor vouches for drove
+one full path search per certificate.
 
 #### Which answer wins
 

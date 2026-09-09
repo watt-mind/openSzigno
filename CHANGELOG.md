@@ -49,6 +49,14 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
 
 ### Fixed
 
+- An OCSP response can no longer make `verify` do unbounded work. The `certs`
+  field of a `BasicOCSPResponse` is attacker-supplied and was read in full, and
+  every certificate in it naming the responder drove a signature verification
+  and, under the trusted-responder model, a whole certification-path search.
+  At most `max_certificates` certificates are now read from a response, the
+  list is deduplicated by DER, and the path search runs at most once per
+  distinct responder public key. No verdict changes: the same responses are
+  authorised by the same models, and `schema_version` stays `1`.
 - Text a dossier chose no longer reaches a terminal or the JSON envelope
   unfiltered. The dossier title, document titles, MIME type halves, the
   declared extension and character set, object references, transform names and

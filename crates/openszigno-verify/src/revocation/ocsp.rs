@@ -4,6 +4,8 @@
 //! response produced for someone else's request; freshness and the `certID`
 //! binding carry the weight instead.
 
+use std::collections::BTreeSet;
+
 use const_oid::ObjectIdentifier;
 use der::{Decode, Encode};
 use serde::Serialize;
@@ -265,8 +267,20 @@ fn responder_authorised(
     // to hand. A central responder's own certificate usually travels with the
     // response; its issuing CA usually does not, and comes from the dossier's
     // `CertificateValues` or the trust store instead.
+    //
+    // The list is bounded and deduplicated *before* anything is verified. A
+    // `BasicOCSPResponse` carries an unbounded `certs` field, every entry of
+    // which naming the responder drives a public-key operation and, under the
+    // trusted model below, a whole path search; the same bound the rest of the
+    // crate puts on an offered certificate set applies here too.
     let mut offered: Vec<ParsedCertificate> = Vec::new();
-    for certificate in basic.certs.as_deref().unwrap_or_default() {
+    for certificate in basic
+        .certs
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .take(limits.max_certificates)
+    {
         if let Ok(der) = certificate.to_der()
             && let Some(parsed) =
                 ParsedCertificate::from_der(&der, crate::certs::CertificateSource::OcspResponse)
@@ -274,6 +288,7 @@ fn responder_authorised(
             offered.push(parsed);
         }
     }
+    let offered = crate::certs::dedup(offered);
     let named: Vec<&ParsedCertificate> = offered
         .iter()
         .chain(candidates.iter())
@@ -302,6 +317,13 @@ fn responder_authorised(
     if anchors.is_empty() {
         return None;
     }
+    let pool = crate::certs::dedup(offered.iter().chain(candidates.iter()).cloned().collect());
+    // A path search is the most expensive thing this function can do, and what
+    // it answers is a question about a *key*: whether the caller's anchors
+    // vouch for whoever holds the key that signed this response. Two
+    // certificates over one key — a responder re-issued with a new serial, say
+    // — ask that question once, so it is asked once.
+    let mut searched: BTreeSet<Vec<u8>> = BTreeSet::new();
     for parsed in &named {
         if !parsed.has_ocsp_signing_eku() {
             continue;
@@ -309,14 +331,22 @@ fn responder_authorised(
         if verify_der_signature(&parsed.certificate, algorithm, &message, signature).is_err() {
             continue;
         }
-        let pool: Vec<ParsedCertificate> = offered
-            .iter()
-            .chain(candidates.iter())
-            .cloned()
-            .collect::<Vec<_>>();
+        let Ok(key) = parsed
+            .certificate
+            .tbs_certificate
+            .subject_public_key_info
+            .to_der()
+        else {
+            continue;
+        };
+        if !searched.insert(key) {
+            continue;
+        }
+        #[cfg(test)]
+        PATH_SEARCHES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let outcome = crate::certs::validate_path_at(
             parsed,
-            &crate::certs::dedup(pool),
+            &pool,
             anchors,
             status,
             produced_at,
@@ -329,6 +359,15 @@ fn responder_authorised(
     }
     None
 }
+
+/// How many trusted-responder path searches this process has run.
+///
+/// A test-only counter: the bound on the certificate list and the
+/// per-public-key deduplication above are about *work*, and work is not
+/// visible in a report. Nothing outside the crate's own tests reads it.
+#[cfg(test)]
+pub(super) static PATH_SEARCHES: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
 
 /// Whether a `ResponderID` names this certificate, by subject name or by the
 /// SHA-1 hash of its public key that RFC 6960 prescribes.

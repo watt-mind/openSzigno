@@ -65,6 +65,8 @@
 
 mod crl;
 mod ocsp;
+#[cfg(test)]
+mod tests;
 mod tiers;
 
 pub use ocsp::{ResponderModel, ocsp_cert_id, ocsp_request};
