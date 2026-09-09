@@ -23,6 +23,7 @@ use crate::extract::write::Writer;
 use crate::input::{InputInfo, load, valid_input};
 use crate::key_material::{passphrase, read_file};
 use crate::response::{CliError, CliResult, Success, failure};
+use crate::sanitize;
 
 pub(crate) fn extract<'a>(
     path: &Path,
@@ -120,15 +121,20 @@ pub(crate) fn extract<'a>(
         return Err(failure(input, error));
     }
 
+    // The object references a dossier chose reach the envelope here; the
+    // output filenames beside them are already bounded and stripped by the
+    // extraction name rules, and `sanitize` leaves them exactly as written.
+    let mut data = json!({
+        "extracted": writer.extracted,
+        "extracted_count": writer.extracted.len(),
+        "skipped_count": plan.skipped,
+        "nested_dossiers_extracted": plan.nested_dossiers,
+        "selected": selected_json
+    });
+    sanitize::data(&mut data);
     Ok(Success {
         input,
-        data: json!({
-            "extracted": writer.extracted,
-            "extracted_count": writer.extracted.len(),
-            "skipped_count": plan.skipped,
-            "nested_dossiers_extracted": plan.nested_dossiers,
-            "selected": selected_json
-        }),
+        data,
         warnings: plan.warnings,
         payload: None,
         exit: 0,
@@ -209,18 +215,20 @@ fn extract_to_stdout(
 
     let selected_json = json!([{ "index": index, "object_ref": document.object_ref }]);
     let detected = openszigno_core::sniff(&decoded.bytes);
+    let mut data = json!({
+        "extracted": [],
+        "extracted_count": 0,
+        "skipped_count": 0,
+        "nested_dossiers_extracted": 0,
+        "selected": selected_json,
+        "stdout_bytes": decoded.bytes.len(),
+        "detected_type": detected.as_str(),
+        "decrypted": decoded.decrypted
+    });
+    sanitize::data(&mut data);
     Ok(Success {
         input,
-        data: json!({
-            "extracted": [],
-            "extracted_count": 0,
-            "skipped_count": 0,
-            "nested_dossiers_extracted": 0,
-            "selected": selected_json,
-            "stdout_bytes": decoded.bytes.len(),
-            "detected_type": detected.as_str(),
-            "decrypted": decoded.decrypted
-        }),
+        data,
         warnings: dossier_warnings_with(dossier, decrypt.key.is_some()),
         payload: Some(decoded.bytes),
         exit: 0,

@@ -8,13 +8,14 @@ use serde_json::json;
 use crate::commands::{dossier_overview, dossier_warnings};
 use crate::input::{load, valid_input};
 use crate::response::{CliResult, Success};
+use crate::sanitize;
 
 pub(crate) fn inspect(path: &Path, options: &ParseOptions) -> CliResult {
     let (bytes, dossier) = load(path, options)?;
     let warnings = dossier_warnings(&dossier);
-    Ok(Success {
-        input: valid_input(bytes.len()),
-        data: json!({
+    // Everything a dossier chose is bounded and stripped here, once, so the
+    // envelope and the human summary rendered from it are both covered.
+    let mut data = json!({
             "dossier": dossier_overview(&dossier),
             "limits": options.limits,
             "capabilities": {
@@ -24,7 +25,11 @@ pub(crate) fn inspect(path: &Path, options: &ParseOptions) -> CliResult {
                 "encrypted_extraction": "with_key",
                 "cryptographic_verification": false
             }
-        }),
+    });
+    sanitize::data(&mut data);
+    Ok(Success {
+        input: valid_input(bytes.len()),
+        data,
         warnings,
         payload: None,
         exit: 0,
