@@ -333,7 +333,11 @@ Concretely, building the inventory:
   dereferenced, on the document or off it;
 - parses no claimed timestamp. `claimed_signing_time` is the
   `xades:SigningTime` text with surrounding whitespace removed and nothing
-  else done to it.
+  else done to it. `claimed_roles` is read the same way: the
+  `xades:ClaimedRole` text of `xades:SignerRole` or `SignerRoleV2`, with the
+  characters a terminal acts on rather than shows removed and the value
+  bounded to 128 characters. A role is a claim, not an identity: nothing looks
+  it up anywhere.
 
 Placement is structural. A `ds:Signature` inside an `es:Document` is
 `document` and names the document index; a direct child of the root
@@ -353,6 +357,7 @@ Everything is bounded, because a dossier is untrusted input:
 | `reference_uris` per signature | 16 | The rest are not listed. |
 | `xades_properties` per signature | 32 | The rest are not listed. |
 | `digest_methods` per signature | 16 | The rest are not listed. |
+| `claimed_roles` per signature | 8 | The rest are not listed. |
 
 In human mode `inspect` prints the inventory after its existing lines, one
 line per signature and one per container timestamp, each prefixed with
@@ -854,6 +859,7 @@ importantly, for what it does not mean.
 | `reference_uris` | array | Same-document reference URIs only, at most 16. |
 | `xades_namespace` | string or null | The namespace of `xades:QualifyingProperties`, when it is a recognised XAdES namespace. |
 | `xades_properties` | array | Local names of the signed and unsigned qualifying properties present, in document order, at most 32. |
+| `claimed_roles` | array | The `xades:ClaimedRole` values of `xades:SignerRole` or `SignerRoleV2`, at most 8 of at most 128 displayable characters each. **Absent from the JSON** when the signature claims no role. |
 | `evidence` | object | `certificates`, `crls`, `ocsp_responses`, `signature_timestamps`, `archive_timestamps`: element counts. |
 | `claimed_signing_time` | string or null | The `xades:SigningTime` text, trimmed and otherwise unparsed. |
 | `key_info_certificates` | number | `ds:X509Certificate` elements under `ds:KeyInfo`. |
@@ -1214,7 +1220,7 @@ The split is internal; the crate's public API is unchanged.
 | `countersign` | Countersignature detection, the binding check, and the reported role, parent and `countersigns` set. |
 | `signature` | The per-signature driver (stages A and B): `structure.rs` checks XMLDSig cardinality and order before anything is read by name, `signed_info.rs` parses `ds:SignedInfo` and applies the signature-level algorithm policy, `collect.rs` gathers the timestamp tokens and the octets each one covers, and `mod.rs` keeps signer selection and `ds:SignatureValue` verification. |
 | `coverage` | What a signature's resolved references cover, and the per-document coverage report and its dossier-level checks. |
-| `xades` | Stage C: the XAdES qualifying properties and the signed `SigningCertificate` binding. |
+| `xades` | Stage C: `mod.rs` parses the qualifying properties and holds the signed `SigningCertificate` binding, `claims.rs` reads the signed claims that are reported and applied to nothing (the policy hash, the claimed roles, the commitment types), and `validation_data.rs` harvests the encapsulated CRLs and OCSP responses of XAdES-XL. |
 | `certs` | Stage D: `extensions.rs` decodes a certificate's extensions, `purpose.rs` holds the `extendedKeyUsage` policy per `PathPurpose`, `names.rs` implements RFC 5280 name constraints, `path.rs` builds and validates a path, and `mod.rs` keeps the public types, `check_path` and public-key signature verification. |
 | `revocation` | Stage E: `crl.rs` validates and looks up CRLs, `ocsp.rs` validates OCSP responses and the RFC 6960 responder-authorisation models, `tiers.rs` holds the source priority, coverage and fallback rules with the summaries and messages they produce, and `mod.rs` keeps the public API and `check_path`. |
 | `tsa` | Stage F: `token.rs` holds the RFC 3161 wire formats and the CMS signed-attribute checks, `imprint.rs` the digest allowlist and the imprint recomputation, `path.rs` the TSA certificate's purpose and its path at `genTime`, and `mod.rs` the token driver and `verify_signature_timestamps`. |
@@ -1653,14 +1659,62 @@ The rules:
 
 `SignaturePolicyIdentifier` is reported and never applied:
 `xades_signature_policy_implied` or `xades_signature_policy_explicit`, both
-`unknown`, with the explicit form's identifier in
-`signatures[].xades.signature_policy_id`. No policy document is fetched,
-parsed, or enforced. Any other qualifying property (`CompleteCertificateRefs`,
-`RevocationValues`, `SignerRole`, `DataObjectFormat`, and the rest) is named
-in `signatures[].xades.unvalidated_properties` and reported once as
+`info`, with the explicit form's identifier in
+`signatures[].xades.signature_policy_id` and its declared `SigPolicyHash` in
+`signatures[].xades.signature_policy_digest` (`algorithm` and `value`, absent
+when the policy declares no hash). No policy document is fetched, parsed, or
+enforced, so neither form can contribute a `passed` and neither may cost a
+signature its verdict: a declared policy is a statement about how a signature
+was made, not a question this build failed to answer.
+
+Two further signed claims are reported for the same reason and with the same
+force, which is none: `signatures[].xades.claimed_roles` carries the
+`xades:ClaimedRole` values of `SignerRole` or `SignerRoleV2`, and
+`signatures[].xades.commitment_type_ids` the identifiers of
+`CommitmentTypeIndication`. Both are covered by the signature, so they are not
+forgeable after the fact; neither is a fact this build can check, and both are
+left out of the JSON entirely when the signature carries none. Any other
+qualifying property (`CompleteCertificateRefs`, `RevocationValues`,
+`DataObjectFormat`, and the rest, `SignerRole` and `CommitmentTypeIndication`
+included, because reporting a claim is not validating it) is named in
+`signatures[].xades.unvalidated_properties` and reported once as
 `xades_not_validated`. `ArchiveTimeStamp` gets its own
 `archive_timestamp_present`, `skipped`: it covers a much larger,
 version-dependent set of data and is out of scope.
+
+#### AVDH-authenticated documents
+
+AVDH, *azonositasra visszavezetett dokumentumhitelesites*, was the Hungarian
+state service that authenticated a document on behalf of an identified citizen:
+the citizen proved who they were on the government portal, and the state sealed
+the document for them. Citizen AVDH ended on 1 January 2025 and the service was
+withdrawn entirely after 31 October 2025, but section 634(15) of the Code of
+Civil Procedure grandfathers documents authenticated up to 31 December 2024
+indefinitely, and they keep full probative force. **A reader therefore keeps
+meeting these structures for good, and nothing on the read path may treat one
+as obsolete, unsupported, or suspect.** See
+[remote-signing.md section 5](remote-signing.md#5-hungarian-acceptance) for the
+legal timeline.
+
+Technically there is no new format to support. What such a signature carries,
+and what this build does with each part:
+
+| What it carries | What happens here |
+| --- | --- |
+| A signer who is the state's seal rather than the citizen | Nothing special. The certificate is path-validated like any other, and the report names the subject it actually found. |
+| A `SigningTime`, usually with a qualified timestamp over the signature | The ordinary claim, and the ordinary timestamp verification. |
+| A `SignaturePolicyIdentifier`, often with a `SigPolicyHash` | Reported by identifier and hash, `info`, applied to nothing. |
+| `SignerRole`/`SignerRoleV2` claimed roles naming the identified citizen | Reported in the inventory as `claimed_roles` and in `verify` as `xades.claimed_roles`. A claim, never an identity check. |
+| A `CommitmentTypeIndication` | Reported as `xades.commitment_type_ids`. |
+| A separate "hitelesitesi zaradek" clause document beside the authenticated one | An ordinary `es:Document`. Its coverage is reported like any other document's: a clause document no signature covers makes the dossier `indeterminate` and the covering signature stays `valid`. |
+| Anything else in the qualifying properties | `xades_not_validated`, `info`. Unknown qualifying properties are tolerated, never rejected. |
+| A PAdES signature inside a PDF payload, when AVDH signed the PDF itself | Out of scope for `verify`, which checks XMLDSig only. `inspect`, `list` and `validate-structure` still describe the document and warn about nothing, and `extract` sniffs the payload as `pdf`. A PDF payload is a document, not a failure. |
+
+The support boundary is the point: this build does not implement AVDH-specific
+processing, and it does not need to, because there is nothing AVDH-specific to
+implement on the read path. What it must not do is let a policy identifier, a
+claimed role, a commitment type, or an unsigned clause document turn into a
+finding against a signature that is otherwise sound.
 
 ### Signature timestamps
 
@@ -2784,6 +2838,7 @@ verify anything.
           "signature_policy": "implied",
           "signature_policy_id": null,
           "signature_timestamps": 1,
+
           "archive_timestamps": 0,
           "unvalidated_properties": []
         },
@@ -3011,7 +3066,7 @@ verify), and `revocation_not_checked` (the caller switched revocation off).
 | `xades_signing_certificate_absent` | `unknown` | The signature carries no such property in the signed properties its own references cover, so nothing signed says which certificate signed it. |
 | `xades_extra_qualifying_properties` | `info` | More than one `xades:QualifyingProperties` belongs to this signature; the one its own references cover is read and the others are ignored. Informational: an unreferenced `ds:Object` is open content the schema allows, so an extra one says nothing about the signature and must not be able to block it. |
 | `xades_signature_policy_implied` | `info` | An implied signature policy is declared. Informational: a declared policy describes how the signature was made and says nothing about whether it is sound, so it does not block. No policy is processed. |
-| `xades_signature_policy_explicit` | `info` | An explicit signature policy is declared. Its identifier is reported; no policy document is fetched or applied. Informational for the same reason. |
+| `xades_signature_policy_explicit` | `info` | An explicit signature policy is declared. Its identifier and, when it declares one, its `SigPolicyHash` are reported; no policy document is fetched or applied. Informational for the same reason. |
 | `signing_certificate_available` | `passed` | A usable certificate was found in `ds:KeyInfo`. |
 | `signing_certificate_missing` | `failed` | None was. |
 | `signing_time_present` | `info` | Reports whether a claimed `xades:SigningTime` was read. Informational: the claim is unauthenticated whether it is there or not, so its presence decides nothing. |
