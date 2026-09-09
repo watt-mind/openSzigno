@@ -136,7 +136,7 @@ impl CscSigner {
         if credential.auth_mode == AuthMode::OAuth2 {
             return Err(SignError::remote(
                 SignErrorCode::CscAuthorizationRequired,
-                "this credential is authorised through an OAuth 2.0 round with scope=credential, which needs a browser; this build signs only with an explicit-mode credential authorised by a PIN or a one-time password. Complete the credential authorisation with the provider's own flow, or wait for `openszigno csc login`",
+                "this credential is authorised through an OAuth 2.0 round with scope=credential, which needs a browser; this build signs only with an explicit-mode credential authorised by a PIN or a one-time password. Complete the credential authorisation with the provider's own flow, or wait for the interactive `openszigno csc login` flow",
             ));
         }
         let algorithm = csc::choose_algorithm(&credential, &info)?;

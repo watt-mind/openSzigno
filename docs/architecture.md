@@ -107,6 +107,10 @@ crates/openszigno-cli/src/
                       #   extract, verify, create, sign, skill
   key_material.rs     # where a key, a certificate and a passphrase may come
                       #   from, shared by `extract --decrypt-key` and `sign`
+  csc/                # `sign --csc`: the remote signing backend
+    mod.rs            #   the flow and the Signer implementation
+    config.rs         #   the --csc file: what it may say, and its secrets
+    client.rs         #   one bounded POST per CSC operation
   extract/            # select.rs (--document), plan.rs (decode, names, nesting),
                       #   names.rs (filename safety), write.rs (writing and
                       #   rollback), output_dir.rs (race-resistant output)
@@ -168,6 +172,8 @@ crates/openszigno-author/src/
               #   octets each reference digests), xades.rs (the qualifying
               #   properties), signer.rs (the Signer seam and SoftwareSigner),
               #   tsa.rs (RFC 3161 requests and responses, bytes in and out),
+              #   csc.rs (CSC API v2 request bodies, response readers and the
+              #     algorithm mapping; no I/O),
               #   error.rs (the codes a refused signing run reports)
   title.rs    # the title rules extraction and authoring both apply
   archive.rs  # the one-member ZIP a `zip -> base64` document carries
@@ -495,18 +501,20 @@ These flags apply to every command that reads a dossier:
 | Flag | Meaning |
 | --- | --- |
 | `-o`, `--output <FILE>` | The signed dossier to write. Required. An existing file is never overwritten. |
-| `--key <FILE>` | The signing key: PKCS#8, DER or PEM, plain or passphrase-protected, RSA or NIST P-256. Required, and never taken from `argv`. |
-| `--cert <FILE>` | The certificate belonging to `--key`, PEM or DER. Optional when the key file is PEM and carries the certificate too. |
+| `--key <FILE>` | The signing key: PKCS#8, DER or PEM, plain or passphrase-protected, RSA or NIST P-256. Required unless `--csc` is given, and never taken from `argv`. |
+| `--cert <FILE>` | The certificate belonging to `--key`, PEM or DER. Optional when the key file is PEM and carries the certificate too. Not accepted with `--csc`. |
+| `--csc <FILE>` | Sign through a Cloud Signature Consortium API v2 service instead of a local key. The file is a small TOML table naming the service and a bearer token obtained out of band. Mutually exclusive with `--key`, `--cert`, `--passphrase-file` and `--algorithm`. See [Signing through a CSC service](#signing-through-a-csc-service). |
+| `--csc-credential <ID>` | The CSC credential to sign with, overriding the configuration file. Without one the service must offer exactly one. Requires `--csc`. |
 | `--passphrase-file <FILE>` | Read the passphrase of an encrypted `--key` from this file. It takes precedence over `OPENSZIGNO_DECRYPT_PASSPHRASE`. |
 | `--chain <FILE>` | A certificate for `xades:CertificateValues`, so a verifier can build the signer's path without a store of its own. Repeatable; a PEM bundle may hold several. |
 | `--scope <document\|dossier>` | What the signature covers. `document` (the default) writes one signature per selected document; `dossier` writes one over the whole dossier. |
 | `--document <SELECTOR>` | Sign only the named documents, by `object_ref` or as `#<index>`. Repeatable. Without it every document is signed. See [Selecting documents](#selecting-documents). |
-| `--tsa <URL>` | Ask this RFC 3161 timestamp authority for a token over each signature value. The only thing that makes `sign` open a socket. |
+| `--tsa <URL>` | Ask this RFC 3161 timestamp authority for a token over each signature value. With `--csc`, one of the two things that make `sign` open a socket. |
 | `--tsa-cert <FILE>` | A timestamp authority certificate for `xades:CertificateValues`. Repeatable. |
 | `--signing-time <TIME>` | The `xades:SigningTime` to write, RFC 3339, normalised to UTC seconds. Without it the current time is used. |
-| `--algorithm <NAME>` | `rsa-sha256` (default for an RSA key), `rsa-pss-sha256`, or `ecdsa-p256-sha256` (default for a P-256 key). |
-| `--online-allow-private` | Permit `--tsa` to contact loopback, private, link-local and unique-local addresses. Requires `--tsa`. |
-| `--online-proxy <URL>` | Route the `--tsa` request through this proxy. Requires `--tsa`. |
+| `--algorithm <NAME>` | `rsa-sha256` (default for an RSA key), `rsa-pss-sha256`, or `ecdsa-p256-sha256` (default for a P-256 key). Not accepted with `--csc`, where the credential's own `key/algo` list decides. |
+| `--online-allow-private` | Permit `--tsa` and `--csc` to contact loopback, private, link-local and unique-local addresses, and permit a plain `http` CSC service. Requires `--tsa` or `--csc`. |
+| `--online-proxy <URL>` | Route the `--tsa` and `--csc` requests through this proxy. Requires `--tsa` or `--csc`. |
 
 In JSON mode, stdout contains exactly one JSON object and diagnostics go to
 stderr. Document ordering is the source XML order. No command writes XML
@@ -681,7 +689,7 @@ writes one compact line; this is pretty-printed:
 | `extract` | `extracted` (array of `document_index`, `dossier_path`, `filename`, `path`, `bytes`, `detected_type`, `declared_type`, `decrypted`), `extracted_count`, `skipped_count`, `nested_dossiers_extracted`, `selected`. |
 | `validate-structure` | `valid_structure`, `documents`, `conformance_warnings`, `cryptographic_verification_performed` (always `false`). |
 | `create` | `output`, `bytes`, `created`, and `documents`: an array in the order written with `index`, `title`, `mime_type`, `source_size`, `transforms`, `nested_dossier`, and `object_ref`. See [The create command](#the-create-command). |
-| `sign` | `output`, `bytes`, and `signatures`: an array in the order written with `id`, `scope`, `document_index`, `algorithm`, `signing_time`, and `timestamped`. See [The sign command](#the-sign-command). |
+| `sign` | `output`, `bytes`, and `signatures`: an array in the order written with `id`, `scope`, `document_index`, `algorithm`, `signing_time`, `timestamped`, and `signer` (`software` or `csc`). A `csc` entry also carries `credential_id` and `csc_specs`, the `specs` version the service reported. Neither is a secret; the bearer token never appears. See [The sign command](#the-sign-command). |
 | `verify` | `verdict`, `verification_time`, `policy`, `limits`, `counts`, `checks`, `documents`, `signatures`, `timestamps`. `documents` is the per-document coverage inventory and `timestamps` the container `es:TimeStamp` reports; both are always present, as empty arrays when there is nothing to report. See [The `verify` command](#the-verify-command). |
 
 `valid_structure` stays `true` whenever parsing succeeded;
@@ -887,6 +895,13 @@ I/O and extraction policy.
 | `document_not_signable` | author | 4 | A selected document has no payload `ds:Object` or no `es:DocumentProfile` with an `Id`, so the mandated reference set cannot be written for it. |
 | `document_already_signed` | author | 4 | Adding this signature would invalidate one the dossier already carries. See [Signing a dossier that is already signed](#signing-a-dossier-that-is-already-signed). |
 | `tsa_failed` | author, CLI | 5 | The `--tsa` request could not be made, was refused by the destination policy, or the answer was not a granted RFC 3161 response carrying a token over the requested imprint. The message names the reason. |
+| `csc_config_invalid` | CLI, author | 4 | The `--csc` configuration file cannot be used — a missing or empty key, an unknown key, a value outside the accepted TOML subset, a `redirect_uri` that is not a loopback URI, or a plain `http` `base_url` without `--online-allow-private` — or the service it names does not report a CSC API v2 `specs` version or will not sign a data-to-be-signed representation. Nothing is contacted and nothing is written. |
+| `csc_unreachable` | CLI | 5 | A CSC operation could not be carried out at all. The message names the operation and the transport's own failure class (`timeout`, `destination_refused: …`, `http status …`, `too large`, `redirect`, `invalid`, `transport`). |
+| `csc_rejected` | CLI, author | 5 | The service answered and what it answered cannot be used. The message carries the operation, the HTTP status and the service's own `error` string, bounded and stripped of control characters. `error_description` is never quoted, and neither is the bearer token. |
+| `csc_credential_ambiguous` | author | 4 | The account holds several signing credentials and none was named. The message lists the identifiers; pass one as `--csc-credential`. |
+| `csc_credential_unusable` | author | 4 | The named credential cannot produce a signature this build writes: its key or certificate is not enabled or valid, it published no certificate or no algorithm, its certificate is unreadable, or its `key/algo` list offers nothing this build writes — including RSASSA-PSS with no `signAlgoParams`, which would mean guessing the salt length. |
+| `csc_authorization_required` | author | 4 | The credential's authorisation mode is `oauth2`, which needs a second OAuth 2.0 round with `scope=credential` and therefore a browser. This build is non-interactive; see [Signing through a CSC service](#signing-through-a-csc-service). |
+| `csc_signature_invalid` | author | 5 | The signature the service returned does not verify against the certificate it published. Nothing is written. A hash-only service signs a digest it never sees the document behind, so this is the one check that tells a right signature from a well-formed wrong one. |
 | `sign_failed` | author | 5 | Signing could not be completed: an identifier the signature needs is already used in the dossier, an element could not be canonicalized, or the key refused to sign. |
 | `invalid_output_path` | CLI | 4 | The `create --output` or `sign --output` path does not name a file. |
 | `unsafe_output_name` | CLI | 5 | A document title or declared extension cannot be used as a filename, or the derived `<file>.d` directory name would be too long. |
@@ -926,6 +941,8 @@ Warning codes. Warnings never change the exit status by themselves:
 | `recipient_certificate_expired` | `create` | An `--encrypt-for` certificate has already expired; the document was encrypted for it anyway, because decryption never consults a recipient certificate's validity. The message names the recipient by its position on the command line. |
 | `created_dossier_unsigned` | `create` | The dossier that was written carries no signature and no timestamp. Every successful `create` reports it, last. |
 | `signed_dossier_unverified` | `sign` | A signature was produced and nothing was checked. Every successful `sign` reports it. |
+| `csc_config_permissive` | `sign --csc` | The `--csc` configuration file is readable by other users on this machine and may hold a bearer token. The mode is never enforced, only reported. Unix only. |
+| `csc_key_unused` | `sign --csc` | The configuration names `redirect_uri`, `client_secret` or `client_secret_file`, which belong to the interactive `csc login` flow and are not used by this run. |
 | `nested_dossier_invalid` | `extract` | An embedded dossier could not be parsed; the raw payload was kept and the run continued. |
 
 ## The `verify` command
@@ -3037,13 +3054,17 @@ openszigno sign FILE.es3 --output SIGNED.es3 --key KEY.pem --cert CERT.pem \
   [--document SELECTOR]... [--tsa URL] [--tsa-cert CERT]... \
   [--signing-time RFC3339] [--algorithm NAME] \
   [--online-allow-private] [--online-proxy URL] [--json]
+
+openszigno sign FILE.es3 --output SIGNED.es3 --csc CONFIG.toml \
+  [--csc-credential ID] [the same --scope/--document/--tsa/... flags] [--json]
 ```
 
 The signing itself lives in `openszigno-author`, which reads no file and opens
 no socket: the CLI reads the dossier and the key material, reaches the private
 key through the `Signer` trait, and carries every RFC 3161 request to the
 timestamp authority itself. That split is what makes a remote signing backend
-a matter of implementing one trait; see
+a matter of implementing one trait, and `--csc` is the second implementation
+of it; see [Signing through a CSC service](#signing-through-a-csc-service) and
 [remote-signing.md](remote-signing.md).
 
 ### What it writes
@@ -3190,6 +3211,143 @@ a verified one: only `verify` checks a timestamp's signature, its authority's
 A signing time later than the token's `genTime` is worth avoiding: `verify`
 reports `timestamp_before_signing_time` for it, which leaves the token
 unverified. `--signing-time` should not be in the future.
+
+### Signing through a CSC service
+
+`--csc CONFIG.toml` replaces the local key with a Cloud Signature Consortium
+API v2 service, so a qualified certificate held by a remote signature creation
+device, or in an EUDI Wallet, signs the same XAdES structure the software
+signer produces. **Only the digest ever leaves the machine.** The dossier, the
+payloads and the titles stay where they are; what is sent is one base64
+SHA-256 digest of the canonicalised `ds:SignedInfo` per signature, the
+credential identifier, and a bearer token in an `Authorization` header.
+
+The backend is a second implementation of the same `Signer` trait
+`SoftwareSigner` implements, and it reports `prefers_digest() == true`, so the
+author crate hands it the digest instead of the octets. Nothing about what a
+signature covers, where the element sits, or what it digests changes.
+
+#### The request sequence
+
+Discovery runs before the dossier is touched, because the signing certificate
+has to exist before a `ds:SignedInfo` can be built: `xades:SigningCertificateV2`
+digests it, so there is nothing to sign until it is in hand.
+
+| Step | Request | What it settles |
+| --- | --- | --- |
+| 1 | `POST info` | `specs`, `methods`, `supportsRar`, `supportedHashTypes` and `signAlgorithms`. A `1.x` service, or one that will not sign a data-to-be-signed representation, stops the run here. |
+| 2 | `POST credentials/list` | Only when no credential was named. Exactly one is taken; several is `csc_credential_ambiguous` with the identifiers. |
+| 3 | `POST credentials/info` | With `certificates: "chain"` and `certInfo: true`: the signing certificate, the rest of the chain, the key's algorithms and the authorisation mode. |
+| 4 | `POST credentials/authorize` | Once per signature, with `numSignatures: 1`, the real digest, `hashAlgorithmOID` `2.16.840.1.101.3.4.2.1`, and `PIN`/`OTP` from the files the configuration names. Answers with Signature Activation Data. |
+| 5 | `POST signatures/signHash` | The credential, the SAD, the same hash, and `signAlgo` with `signAlgoParams` where the scheme needs them. |
+
+The real hashes go into step 4, never placeholders, and `numSignatures` is the
+count actually being produced: a SAD that is not bound to the data it covers
+authorises signing anything for its lifetime.
+
+The chain from step 3 becomes `xades:CertificateValues`, so `--chain` stays
+optional for a CSC run: the service already published what a verifier needs to
+build the path.
+
+#### Discovery is read, never assumed
+
+The three deployments surveyed in
+[remote-signing.md](remote-signing.md#35-sandboxes-reached-directly) disagree
+on every discovery field: `supportedHashTypes` is the keyword `dtbsr` on one
+service and the SHA-256 OID on another, `supportsRar` is true on one and false
+on the next, and `specs` ranges over `2.1.0.1` and `2.2.0.0`. No vendor profile
+is compiled in. `supportedHashTypes` is accepted when it is `dtbsr`, when it is
+the SHA-256 OID, and when it is absent — an early v2 service signed digests and
+nothing else.
+
+The algorithm is chosen from the credential's own `key/algo` list, because
+`ds:SignatureMethod` in the document has to agree with what the service
+actually did and only the credential knows that. A scheme OID beats a bare key
+OID; RSASSA-PSS is last of the RSA candidates for the same reason PKCS#1 v1.5
+is the local default, and is refused outright when the service published no
+`signAlgoParams` for it.
+
+| Credential `key/algo` | Written as | `signAlgo` sent |
+| --- | --- | --- |
+| `1.2.840.113549.1.1.11` sha256WithRSA | `rsa-sha256` | the same OID |
+| `1.2.840.113549.1.1.1` rsaEncryption | `rsa-sha256` | the same OID |
+| `1.2.840.10045.4.3.2` ecdsa-with-SHA256 | `ecdsa-p256-sha256` | the same OID |
+| `1.2.840.10045.2.1` ecPublicKey | `ecdsa-p256-sha256` | `1.2.840.10045.4.3.2` |
+| `1.2.840.113549.1.1.10` RSASSA-PSS | `rsa-pss-sha256` | the same OID, with `signAlgoParams` |
+
+An ECDSA signature comes back as either the DER `SEQUENCE` or the fixed-width
+`r || s` pair, depending on the vendor; both are accepted and XMLDSig's raw
+pair is what gets written.
+
+#### The returned signature is verified before anything is written
+
+A service in `dtbsr` mode signs the digest it was handed and never sees the
+document, so a canonicalisation mistake yields a syntactically perfect
+signature over the wrong bytes, and that failure is invisible until somebody
+verifies it. So the returned signature is checked locally against the
+certificate the service published, before the signed dossier reaches the
+filesystem. A signature that does not verify is `csc_signature_invalid` and no
+file is written. This is not a courtesy check; it is the reason a CSC run can
+be trusted to have produced what it says it produced.
+
+#### The transport
+
+Every request goes through the same `online` transport `verify --online`
+fetches revocation data with: the same destination policy, the same address
+pinning, the same connect and total timeouts, the same refusal to follow a
+redirect to another host, a 256 KiB response cap, and no proxy from the
+environment. `https` is required unless `--online-allow-private` is given,
+because the bearer token travels in a request header and plaintext hands it to
+anyone on the path; that same flag is what permits a loopback service, which
+is how this project's own test suite serves a mock.
+
+The token is put in the `Authorization` header and nowhere else. It is not in
+a URL, not in a body, not in a message, not in a warning and not in the JSON
+envelope. A refusal quotes the HTTP status and the service's own `error`
+string; `error_description` is free text a provider writes and is never
+printed.
+
+#### The configuration file
+
+A small, flat TOML table. openSzigno reads a deliberately narrow subset —
+comments, blank lines, and `key = "value"` with a basic or literal string —
+and refuses a table header, an array, a number or a bare value by name rather
+than ignoring it.
+
+```toml
+base_url = "https://qtsp.example/csc/v2"
+client_id = "openszigno-cli"
+access_token_file = "token"   # or access_token = "..."
+credential_id = "cred-1a2b3c" # optional; --csc-credential overrides it
+pin_file = "pin"              # explicit-mode authorisation
+```
+
+| Key | Meaning |
+| --- | --- |
+| `base_url` | Required. The CSC API base, ending in `/csc/v2`. One trailing slash is trimmed. |
+| `client_id` | Required. The OAuth 2.0 client the token was issued to. |
+| `access_token`, `access_token_file` | Exactly one is required: the `scope=service` bearer token, obtained out of band. |
+| `credential_id` | Optional. `--csc-credential` overrides it. |
+| `pin_file`, `otp_file` | Optional. Read only for an `explicit`-mode credential. |
+| `client_secret`, `client_secret_file`, `redirect_uri` | Accepted and reserved for the interactive `csc login` flow; each earns a `csc_key_unused` warning. A `redirect_uri` that is not a loopback URI is refused. |
+
+A relative secret path is resolved against the configuration file's own
+directory, and one trailing line ending is stripped. Permissions are not
+enforced — a mode this tool refused would be a mode somebody worked around —
+but a world-readable file earns `csc_config_permissive`.
+
+#### What is not implemented
+
+A credential whose authorisation mode is `oauth2` needs a second OAuth 2.0
+authorization-code round with `scope=credential`, which needs a browser and a
+loopback redirect listener. This round is deliberately non-interactive, so such
+a credential is `csc_authorization_required` and the message names the flow to
+complete. RFC 9396 `authorization_details`, which `supportsRar` advertises,
+belongs to that same interactive flow: it is read from `info` and reported, and
+building it is part of the follow-up `openszigno csc login` work.
+
+CSC v1 is not supported. `info` reports `specs`, so a v1 service is detected
+and refused with a clear message rather than half-supported.
 
 ### Signing a dossier that is already signed
 

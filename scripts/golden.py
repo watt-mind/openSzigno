@@ -3,7 +3,7 @@
 
 Runs a fixed command matrix over every fixture in `tests/fixtures/**/*.es3`,
 plus one `create` case that builds a dossier from `tests/fixtures/create/` and
-one `sign` refusal,
+two `sign` refusals,
 normalises the two time values that cannot be stable, and compares the result
 against the committed files under `tests/golden/`.
 
@@ -153,6 +153,28 @@ def sign_cases(temp):
             "signed.es3",
             "--key",
             "no-such-key.pem",
+        ]
+        if not name.endswith(".human"):
+            argv.append("--json")
+        yield name, argv, cwd
+    # `--csc` is the same story with a second backend: no run against a real
+    # service can be a golden, and the refusal is the stable part. A
+    # configuration missing `client_id` is refused before a socket is opened,
+    # so the case needs no network and no key, and the envelope names the key
+    # that is missing without echoing the file's contents.
+    for name in ("sign.csc-config-invalid", "sign.csc-config-invalid.human"):
+        cwd = temp / "sign" / name
+        cwd.mkdir(parents=True, exist_ok=True)
+        (cwd / "csc.toml").write_text(
+            'base_url = "https://qtsp.example/csc/v2"\n', encoding="utf-8"
+        )
+        argv = [
+            "sign",
+            str(FIXTURES / "created.es3"),
+            "--output",
+            "signed.es3",
+            "--csc",
+            "csc.toml",
         ]
         if not name.endswith(".human"):
             argv.append("--json")

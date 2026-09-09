@@ -148,7 +148,7 @@ the URLs the certificates themselves publish.
 | `extract FILE --output DIR` | Decode supported payloads into `DIR`, expanding embedded dossiers, never overwriting a file. `--document SEL --stdout` writes one payload to stdout instead. | 0, 2, 3, 4, 5 |
 | `verify FILE` | Verify every `ds:Signature` against the trust material you supply and report a per-signature verdict of `valid`, `invalid`, or `indeterminate`. | 0, 2, 3, 4, 6, 7 |
 | `create --output FILE --title TITLE` | Build one new, unsigned dossier from files on disk, with `--document`, `--zip`, `--embed`, `--encrypt-for`, and `--created`. Never overwrites the output. | 0, 2, 3, 4, 5 |
-| `sign FILE --output FILE --key KEY` | Write a signed copy of a dossier: one enveloped XMLDSig/XAdES signature per document, or one over the dossier with `--scope dossier`, optionally timestamped with `--tsa`. Never overwrites the output. | 0, 2, 3, 4, 5 |
+| `sign FILE --output FILE --key KEY` | Write a signed copy of a dossier: one enveloped XMLDSig/XAdES signature per document, or one over the dossier with `--scope dossier`, optionally timestamped with `--tsa`, and with `--csc` instead of `--key` signed by a remote qualified certificate. Never overwrites the output. | 0, 2, 3, 4, 5 |
 | `skill` | Write the embedded agent skill (`SKILL.md`) to stdout and nothing else. Takes no `FILE` and no `--json`. | 0, 2, 3 |
 
 `create` is the writing side: it builds a new dossier from files on disk,
@@ -197,6 +197,12 @@ openszigno sign dossier.es3 --output signed.es3 \
   --key signer.p8 --cert signer.crt --chain issuing-ca.pem \
   --tsa https://tsa.example/tsa --signing-time 2026-01-02T00:00:00Z
 ```
+
+`--csc CONFIG.toml` signs through a Cloud Signature Consortium API v2 service
+instead of a local key, so a qualified certificate held by a remote signature
+creation device signs the same structure and only the digest ever leaves the
+machine; see
+[Signing through a CSC service](docs/architecture.md#signing-through-a-csc-service).
 
 **Signing is not verification.** `sign` produces a signature and checks
 nothing — not the key, not the certificate, not the chain — and says so on

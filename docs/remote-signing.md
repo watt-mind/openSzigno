@@ -2,10 +2,14 @@
 
 Research date: 2026-09-09. Ticket: LAB-287.
 
-This document surveys the remote signature ecosystem openSzigno would have to
-join once the planned `create` and `sign` commands exist. It is research, not
-a specification: nothing here is implemented, and nothing here asserts that
-any signature, certificate, or dossier produced by a listed service is valid.
+Sections 1 to 6 survey the remote signature ecosystem openSzigno would have to
+join once the planned `create` and `sign` commands exist. They are research,
+not a specification, and nothing in them asserts that any signature,
+certificate, or dossier produced by a listed service is valid.
+
+[Section 7](#7-using-openszigno-with-a-csc-service) is different: it documents
+`sign --csc`, which implements the recommendation in section 6.1 and now
+exists.
 
 Every external link in this document is also recorded in
 [references.md](references.md#remote-signing-and-cloud-signature-apis).
@@ -22,6 +26,7 @@ Claims that could not be confirmed from a primary source are marked
 - [4. Timestamp authorities](#4-timestamp-authorities)
 - [5. Hungarian acceptance](#5-hungarian-acceptance)
 - [6. Recommendation](#6-recommendation)
+- [7. Using openszigno with a CSC service](#7-using-openszigno-with-a-csc-service)
 - [What was not verified](#what-was-not-verified)
 
 ## Why remote signing at all
@@ -1243,6 +1248,151 @@ natural persons will actually hold.
 | Timestamping is a second dependency | Without it there is no XAdES-T, and without XAdES-T there is no company-registry filing; production Hungarian timestamping needs a client certificate or an account | Decide the TSA before the signer, not after |
 | Trusted list format change | EU trusted lists move to TLv6 on 2026-04-29 with no transition, and the Hungarian list moves to HTTPS | Track it as a verify-path item independent of signing; see section 5.1 |
 | Legacy AVDH structures persist | Documents authenticated with AVDH up to 2024-12-31 keep full probative force indefinitely | Nothing on the read path may treat AVDH structures as obsolete |
+
+## 7. Using openszigno with a CSC service
+
+`openszigno sign --csc CONFIG.toml` implements the hash-only backend
+[section 6.1](#61-build-one-backend-csc-api-v2-hash-signing-only) recommends:
+CSC API v2, `signatures/signHash`, and nothing else. Only the digest of the
+canonicalised `ds:SignedInfo` leaves the machine. The command's own contract —
+every flag, every error code, the algorithm mapping and the JSON it writes —
+is in
+[architecture.md](architecture.md#signing-through-a-csc-service); what follows
+is how to point it at a real service.
+
+### 7.1 The configuration file
+
+```toml
+# The CSC API base, ending in /csc/v2.
+base_url = "https://qtsp.example/csc/v2"
+# The OAuth 2.0 client the token was issued to.
+client_id = "openszigno-cli"
+# The scope=service bearer token, obtained out of band. `access_token = "..."`
+# works too; a file keeps it out of the configuration and lets the two carry
+# different permissions.
+access_token_file = "token"
+# Optional. Without it the service must offer exactly one credential.
+credential_id = "cred-1a2b3c"
+# The PIN or one-time password an explicit-mode credential is authorised with.
+pin_file = "pin"
+# otp_file = "otp"
+```
+
+It is read as a flat table of quoted strings: comments, blank lines, and
+`key = "value"` with a basic or literal string. A table header, an array, a
+number or a bare value is refused by name. A relative secret path is resolved
+against the configuration file's own directory, and one trailing line ending is
+stripped.
+
+`client_secret`, `client_secret_file` and `redirect_uri` are accepted and
+recorded for the interactive login below, and each earns a `csc_key_unused`
+warning today. Permissions are not enforced, but a world-readable file earns
+`csc_config_permissive`: keep it at `chmod 600`, since it may hold a token.
+
+### 7.2 The non-interactive limitation
+
+`sign --csc` runs no browser and binds no redirect listener. That is a
+deliberate boundary for this round, and it has one consequence worth stating
+plainly: **only an `explicit`-mode credential can be signed with.**
+
+Section 1.2 sets out the two credential authorisation modes. Under `explicit`
+the client calls `credentials/authorize` with the credential, the hashes,
+`numSignatures`, and a PIN or one-time password, and gets Signature Activation
+Data back — one call, no user agent, which is what `--csc` does. Under `oauth2`
+the client has to run a second OAuth 2.0 authorization-code round with
+`scope=credential`, and the resulting token plays the SAD role. That round
+needs a consent screen, and a consent screen needs a browser.
+
+So a credential whose `credentials/info` reports `authMode: "oauth2"` stops the
+run with `csc_authorization_required`, before the dossier is touched, and the
+message names the flow to complete. It is not a bug and there is no flag that
+works around it.
+
+Two further gaps belong to the same follow-up:
+
+- **The service access token.** `--csc` takes a `scope=service` bearer token
+  that the user obtained elsewhere. It does not run the first OAuth 2.0 round
+  either (section 1.3, steps 2 and 5), and it does not refresh a token that has
+  expired: an expired token surfaces as `csc_rejected` with the service's own
+  `error` string.
+- **RFC 9396 rich authorization requests.** `supportsRar` is read from `info`
+  and reported, and `authorization_details` is not built, because the only
+  place it would be used is the browser round. Both the structured form and the
+  plain `scope=credential&credentialID=…&numSignatures=1&hash=…` query form are
+  needed, since PrimeSign answers `true` and Cleverbase answers `false`
+  (section 3.5).
+
+All three are the follow-up `openszigno csc login` work recorded in
+[roadmap.md](roadmap.md#m5-authoring--in-progress): a loopback redirect
+listener on `127.0.0.1` in the RFC 8252 style, PKCE with S256, both scopes, and
+`authorization_details` where the service supports it. `redirect_uri` in the
+configuration file is reserved for it, which is why a value that is not a
+loopback URI is refused now rather than later.
+
+### 7.3 Obtaining a token, as far as the research established
+
+Neither of the two reachable sandboxes issues a token to an unregistered
+client, and this is a finding rather than an omission: section 6.4 records that
+the EUDI reference host has no dynamic client registration and that its
+authorize endpoint rejects an unknown `client_id`. So every target below needs
+credentials obtained out of band, from the vendor, before any token exists.
+
+**The EUDI reference QTSP.** The deployment at
+`walletcentric.signer.eudiw.dev` answers `info` without credentials — that is
+where the response quoted in section 1.3 came from — and its `authType` is
+`oauth2code` only, so there is no `auth/login` path to a token. The practical
+route is the one section 6.3 recommends: run the reference QTSP locally from
+[eudi-srv-web-walletdriven-rpcentric-signer-qtsp-java](https://github.com/eu-digital-identity-wallet/eudi-srv-web-walletdriven-rpcentric-signer-qtsp-java)
+with `docker compose`, where the client registration and the credentials are
+yours to create. It is Apache-2.0 and inspectable when something disagrees,
+which is exactly what is wanted the first time a signature fails to verify. Its
+credentials are `oauth2`-mode, so completing a signature against it needs the
+interactive flow above.
+
+**PrimeSign.** The test host `qs.primesign-test.com` answers `info` without
+credentials (section 3.5) and reports `oauth2` at
+`https://id.primesign-test.com/realms/qs-staging/`. Access codes are requested
+from the vendor; no self-service registration was found.
+
+**Cleverbase.** The testbed `signing.lab.cleverbase.io` answers `info` without
+credentials and advertises `oauth2/pushed_authorize` alongside the standard
+methods. Onboarding is through the vendor and its extent was not established.
+
+Once a `scope=service` token is in hand from any of them, put it in
+`access_token_file` and the discovery half of `sign --csc` — `info`,
+`credentials/list`, `credentials/info` — runs against the real service and
+reports what it found. That is worth doing on its own before any signature is
+attempted: it is the cheapest way to see a deployment's actual `specs`,
+`supportsRar`, `supportedHashTypes` and credential mode, and section 6.5 lists
+discovery drift as a standing risk.
+
+**Testing without a vendor.** The repository's own suite serves three mock
+services shaped like the three surveyed deployments, from `127.0.0.1`, in
+`crates/openszigno-cli/tests/csc_support`. `--online-allow-private` is what
+permits a loopback destination and a plain `http` base URL, and it exists for
+exactly this and for an operator's own network.
+
+### 7.4 Verify what was signed
+
+Section 6.5 names the first risk as a canonicalisation error under `dtbsr`:
+the service signs the digest it was handed, never sees the document, and a
+mistake produces a syntactically perfect signature over the wrong bytes.
+
+`sign --csc` closes that loop twice. It verifies the returned signature against
+the certificate the service published before the output file is created, so a
+wrong signature is `csc_signature_invalid` and nothing is written. And the
+signed dossier is still only a signature until `openszigno verify` judges it
+against trust material the caller supplies. Run it:
+
+```sh
+openszigno verify signed.es3 --json \
+  --trust-store ./trust --revocation-store ./revocation
+```
+
+Without a `--tsa` timestamp the best verdict a signed dossier reaches is
+`indeterminate` with `signature_timestamp_absent`, which is section 6.2's point
+in a different form: a CSC credential alone is not enough, and the timestamp is
+half the feature.
 
 ## What was not verified
 
