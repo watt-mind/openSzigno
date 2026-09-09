@@ -34,9 +34,11 @@ with the code-level detail, is
   writes an unsigned dossier and `sign` signs one, optionally with a
   `xades:SignatureTimeStamp`; the rest is
   [M5](#m5-authoring--in-progress).
-- Signing with a key this process does not hold. `sign` takes a software key,
-  which cannot produce a qualified electronic signature; a remote backend is
-  LAB-291, and [remote-signing.md](remote-signing.md) has the research.
+- A qualified electronic signature. `sign --key` holds a software key, which
+  cannot produce one; `sign --csc` signs through a service that holds the key
+  instead, but whether the result is qualified is the provider's statement and
+  never this tool's. The interactive login an `oauth2`-mode credential needs is
+  LAB-296. See [remote-signing.md](remote-signing.md).
 
 Outside the plan altogether:
 
@@ -469,13 +471,14 @@ dependency tree of a caller who only reads stays as it is, and so that
 
 | Ticket | Scope | State |
 | --- | --- | --- |
+| LAB-287 | Research for the authoring milestone: the Cloud Signature Consortium API versions and the hash-signing flow, remote QSCD providers, RFC 3161 timestamp authorities, and what Hungarian courts and the company registry accept. Written up as [remote-signing.md](remote-signing.md). | Done |
 | LAB-288 | `create`: build an unsigned dossier from files on disk, deterministically, bounded by the same limits, never overwriting the output. | Done |
 | LAB-289 | `--encrypt-for`: write a document as `encrypt -> base64` for one or more recipient certificates, the forward direction of `extract --decrypt-key`. AES-256-CBC content encryption, RSAES-OAEP with SHA-256 key transport by default and RSAES-PKCS1-v1_5 under `--legacy-key-transport`. | Done |
 | LAB-290 | `sign` with a software key: XMLDSig over the dossier's own reference scope, with the XAdES signed properties `verify` already checks, and an optional `--tsa` RFC 3161 timestamp. | Done |
-| LAB-291 | A CSC (Cloud Signature Consortium) remote signing backend, so the key never reaches this process at all. `sign --csc` runs the non-interactive half of CSC API v2: discovery, credential resolution, `credentials/authorize` with a PIN or one-time password, and `signatures/signHash` over the digest alone. An `oauth2`-mode credential is refused with `csc_authorization_required`. | Done, less the interactive login |
-| follow-up | `openszigno csc login`: the OAuth 2.0 authorization-code rounds `--csc` cannot run: a loopback redirect listener, PKCE, `scope=service` and `scope=credential`, and RFC 9396 `authorization_details` where `supportsRar` is true. It is what makes an `oauth2`-mode credential usable, and it is the one thing LAB-291 deliberately left out. To be filed. | Planned |
-| LAB-292 | Timestamping what was signed. The `xades:SignatureTimeStamp` half shipped with LAB-290; what is left is the container `es:TimeStamp`, and timestamping a dossier without signing it. | Partly done |
-| LAB-293 | An e-Szignó interop check: everything this milestone writes is opened by the Microsec reference tool, and every difference is recorded rather than assumed away. | Planned |
+| LAB-291 | A CSC (Cloud Signature Consortium) remote signing backend, so the key never reaches this process at all. `sign --csc` runs the non-interactive half of CSC API v2: discovery, credential resolution, `credentials/authorize` with a PIN or one-time password, and `signatures/signHash` over the digest alone. An `oauth2`-mode credential is refused with `csc_authorization_required`; the interactive login it needs is LAB-296. | Done |
+| LAB-292 | Timestamping what was signed. The `xades:SignatureTimeStamp` half shipped with LAB-290; what is left is the container `es:TimeStamp`, and timestamping a dossier without signing it. | Waiting on the maintainer |
+| LAB-293 | An e-Szignó interop check: everything this milestone writes is opened by the Microsec reference tool, and every difference is recorded rather than assumed away. | In progress |
+| LAB-296 | `openszigno csc login`: the OAuth 2.0 authorization-code rounds `--csc` cannot run: a loopback redirect listener, PKCE, `scope=service` and `scope=credential`, and RFC 9396 `authorization_details` where `supportsRar` is true. It is what makes an `oauth2`-mode credential usable, and it is the one thing LAB-291 deliberately left out. | Planned |
 
 Open questions this milestone must answer rather than assume:
 
