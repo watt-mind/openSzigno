@@ -5,6 +5,10 @@ members = ["cargo:."]
 # `dist init --yes` or `dist generate` after changing anything here.
 [dist]
 # The preferred dist version to use in CI (Cargo.toml SemVer syntax)
+# release.yml is hand-edited in one place (the "Install dist" steps call a
+# checksum-verifying composite action); `dist plan` must not treat that as
+# drift. See docs/releasing.md, "Installing dist in CI".
+allow-dirty = ["ci"]
 cargo-dist-version = "0.32.0"
 # CI backends to support
 ci = "github"
