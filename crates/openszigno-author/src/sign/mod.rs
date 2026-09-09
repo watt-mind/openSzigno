@@ -445,64 +445,6 @@ struct PlanSpec {
     timestamped: bool,
 }
 
-/// How many signatures may share one base identifier.
-///
-/// A dossier that already holds this many co-signatures of one document is
-/// refused rather than searched further; nothing legitimate reaches it.
-const MAX_SHARED_IDENTIFIERS: usize = 64;
-
-/// Every `Id` one signature would introduce, given the `Id` of the signature
-/// itself.
-fn identifiers(id: &str, reference_names: &[&str]) -> Vec<String> {
-    let mut used = vec![
-        id.to_owned(),
-        format!("signed-props-{id}"),
-        format!("xades-{id}"),
-        format!("sigprof-{id}"),
-        xades::signature_profile_object_id(id),
-    ];
-    used.extend(
-        reference_names
-            .iter()
-            .map(|name| format!("ref-{id}-{name}")),
-    );
-    used
-}
-
-/// The `Id` this signature gets.
-///
-/// Every identifier is derived from the document index, so a document this
-/// tool has already signed would collide with itself. Co-signing is
-/// something the format allows and this tool supports, so a base identifier
-/// already in the dossier is disambiguated (`sig-doc0-2`,
-/// `signed-props-sig-doc0-2`, and so on) rather than refused. The first
-/// signature is not read, not rewritten and not removed; the second one is a
-/// sibling of it.
-fn allocate_id(
-    lookup: &dsig::Lookup<'_>,
-    base: &str,
-    reference_names: &[&str],
-) -> Result<String, SignError> {
-    for attempt in 1..=MAX_SHARED_IDENTIFIERS {
-        let candidate = if attempt == 1 {
-            base.to_owned()
-        } else {
-            format!("{base}-{attempt}")
-        };
-        if identifiers(&candidate, reference_names)
-            .iter()
-            .all(|id| lookup.by_id(id).is_none())
-        {
-            return Ok(candidate);
-        }
-    }
-    Err(SignError::new(
-        SignErrorCode::DocumentAlreadySigned,
-        "this dossier already holds every identifier a signature here could be \
-         given",
-    ))
-}
-
 /// Assemble one signature's references and its XML.
 fn build_plan(
     lookup: &dsig::Lookup<'_>,
@@ -521,7 +463,7 @@ fn build_plan(
     } = spec;
     let mut names: Vec<&str> = covered.iter().map(|(name, _, _)| *name).collect();
     names.extend(["signature-profile", "signed-properties"]);
-    let id = allocate_id(lookup, &id, &names)?;
+    let id = names::allocate_id(lookup, &id, &names)?;
     let signed_properties_id = format!("signed-props-{id}");
     let profile_object_id = xades::signature_profile_object_id(&id);
 

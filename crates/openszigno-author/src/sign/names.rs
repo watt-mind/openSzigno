@@ -1,4 +1,5 @@
-//! What a dossier is allowed to contribute to the XML this module signs.
+//! The names a signature writes, and what a dossier is allowed to contribute
+//! to the XML this module signs.
 //!
 //! A signature is assembled as text, and several of the values in it come
 //! from the dossier being signed rather than from this crate: the `OBJREF`
@@ -13,8 +14,13 @@
 //! operator's key ends up signing; the escaping is the guarantee that no
 //! dossier-derived string can reach signature XML unescaped, whatever a later
 //! change adds to the rendering.
+//!
+//! The identifiers a signature introduces live here too, because choosing
+//! them is the other half of the same question: which names end up in the
+//! document, and which of them the dossier has already claimed.
 
 use super::error::{SignError, SignErrorCode};
+use super::{dsig, xades};
 
 /// The longest identifier this module will write into a reference.
 ///
@@ -128,6 +134,64 @@ pub(crate) fn check_namespace(value: &str) -> Result<(), SignError> {
     Ok(())
 }
 
+/// How many signatures may share one base identifier.
+///
+/// A dossier that already holds this many co-signatures of one document is
+/// refused rather than searched further; nothing legitimate reaches it.
+const MAX_SHARED_IDENTIFIERS: usize = 64;
+
+/// Every `Id` one signature would introduce, given the `Id` of the signature
+/// itself.
+fn identifiers(id: &str, reference_names: &[&str]) -> Vec<String> {
+    let mut used = vec![
+        id.to_owned(),
+        format!("signed-props-{id}"),
+        format!("xades-{id}"),
+        format!("sigprof-{id}"),
+        xades::signature_profile_object_id(id),
+    ];
+    used.extend(
+        reference_names
+            .iter()
+            .map(|name| format!("ref-{id}-{name}")),
+    );
+    used
+}
+
+/// The `Id` this signature gets.
+///
+/// Every identifier is derived from the document index, so a document this
+/// tool has already signed would collide with itself. Co-signing is
+/// something the format allows and this tool supports, so a base identifier
+/// already in the dossier is disambiguated (`sig-doc0-2`,
+/// `signed-props-sig-doc0-2`, and so on) rather than refused. The first
+/// signature is not read, not rewritten and not removed; the second one is a
+/// sibling of it.
+pub(crate) fn allocate_id(
+    lookup: &dsig::Lookup<'_>,
+    base: &str,
+    reference_names: &[&str],
+) -> Result<String, SignError> {
+    for attempt in 1..=MAX_SHARED_IDENTIFIERS {
+        let candidate = if attempt == 1 {
+            base.to_owned()
+        } else {
+            format!("{base}-{attempt}")
+        };
+        if identifiers(&candidate, reference_names)
+            .iter()
+            .all(|id| lookup.by_id(id).is_none())
+        {
+            return Ok(candidate);
+        }
+    }
+    Err(SignError::new(
+        SignErrorCode::DocumentAlreadySigned,
+        "this dossier already holds every identifier a signature here could be \
+         given",
+    ))
+}
+
 /// Escape an attribute value, the same escaper the unsigned writer uses.
 pub(crate) fn attribute(value: &str) -> String {
     crate::render::attribute(value)
@@ -194,6 +258,42 @@ mod tests {
         ] {
             let error = check_namespace(bad).expect_err("refused");
             assert_eq!(error.code(), SignErrorCode::DocumentNotSignable);
+        }
+    }
+
+    /// A base identifier already in the dossier is disambiguated, and so is
+    /// one whose derived identifiers alone are taken.
+    #[test]
+    fn an_identifier_already_in_the_dossier_is_disambiguated() {
+        let names = ["object", "signed-properties"];
+        let working = dsig::Working::parse(
+            "<a xmlns=\"urn:x\"><b Id=\"sig-doc0\"/><c Id=\"ref-sig-doc0-2-object\"/></a>",
+        )
+        .expect("this parses");
+        working
+            .with_tree(|lookup| {
+                // `sig-doc0` is taken, and so is one identifier `sig-doc0-2`
+                // would introduce, so the third candidate wins.
+                assert_eq!(allocate_id(lookup, "sig-doc0", &names)?, "sig-doc0-3");
+                assert_eq!(allocate_id(lookup, "sig-doc1", &names)?, "sig-doc1");
+                Ok(())
+            })
+            .expect("an identifier is available");
+    }
+
+    #[test]
+    fn every_identifier_a_signature_introduces_is_accounted_for() {
+        let used = identifiers("sig-doc0", &["object", "signed-properties"]);
+        for expected in [
+            "sig-doc0",
+            "signed-props-sig-doc0",
+            "xades-sig-doc0",
+            "sigprof-sig-doc0",
+            "profile-sig-doc0",
+            "ref-sig-doc0-object",
+            "ref-sig-doc0-signed-properties",
+        ] {
+            assert!(used.iter().any(|id| id == expected), "{expected} is used");
         }
     }
 

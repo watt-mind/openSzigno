@@ -773,14 +773,21 @@ fn patch_input(fixture: &Fixture, replacements: &[(String, String)]) {
 /// both of which `verify` would then accept.
 #[test]
 fn markup_in_a_dossier_never_reaches_the_signature_it_would_shape() {
+    /// One planted value, and the extra flags the run needs to reach it.
+    struct HostileCase {
+        what: &'static str,
+        replacements: Vec<(String, String)>,
+        extra: Vec<String>,
+    }
+
     // Each of these parses to a value holding `"`, `<`, `>` and `&`.
     const HOSTILE: &str = "a&quot;b&lt;c&gt;d&amp;e";
     let hostile_namespace = format!("urn:openszigno:test:{HOSTILE}");
     let pki = pki();
-    let cases: Vec<(&str, Vec<(String, String)>, Vec<String>)> = vec![
-        (
-            "the payload OBJREF and the object it names",
-            vec![
+    let cases = vec![
+        HostileCase {
+            what: "the payload OBJREF and the object it names",
+            replacements: vec![
                 (
                     "OBJREF=\"obj0\"".to_owned(),
                     format!("OBJREF=\"{HOSTILE}\""),
@@ -790,39 +797,44 @@ fn markup_in_a_dossier_never_reaches_the_signature_it_would_shape() {
                     format!("<ds:Object Id=\"{HOSTILE}\">"),
                 ),
             ],
-            Vec::new(),
-        ),
-        (
-            "the document profile Id",
-            vec![("Id=\"profile0\"".to_owned(), format!("Id=\"{HOSTILE}\""))],
-            Vec::new(),
-        ),
-        (
-            "the declared media type",
-            vec![("type=\"text\"".to_owned(), format!("type=\"{HOSTILE}\""))],
-            Vec::new(),
-        ),
-        (
-            "the declared subtype",
-            vec![(
+            extra: Vec::new(),
+        },
+        HostileCase {
+            what: "the document profile Id",
+            replacements: vec![("Id=\"profile0\"".to_owned(), format!("Id=\"{HOSTILE}\""))],
+            extra: Vec::new(),
+        },
+        HostileCase {
+            what: "the declared media type",
+            replacements: vec![("type=\"text\"".to_owned(), format!("type=\"{HOSTILE}\""))],
+            extra: Vec::new(),
+        },
+        HostileCase {
+            what: "the declared subtype",
+            replacements: vec![(
                 "subtype=\"plain\"".to_owned(),
                 format!("subtype=\"{HOSTILE}\""),
             )],
-            Vec::new(),
-        ),
-        (
-            "the dossier namespace",
-            vec![(
+            extra: Vec::new(),
+        },
+        HostileCase {
+            what: "the dossier namespace",
+            replacements: vec![(
                 format!("xmlns:es=\"{ESZIGNO_NAMESPACE}\""),
                 format!("xmlns:es=\"{hostile_namespace}\""),
             )],
-            vec![
+            extra: vec![
                 "--allow-namespace".to_owned(),
                 "urn:openszigno:test:a\"b<c>d&e".to_owned(),
             ],
-        ),
+        },
     ];
-    for (what, replacements, extra) in cases {
+    for HostileCase {
+        what,
+        replacements,
+        extra,
+    } in cases
+    {
         let fixture = fixture(&pki, 1);
         patch_input(&fixture, &replacements);
         let borrowed: Vec<&str> = extra.iter().map(String::as_str).collect();
