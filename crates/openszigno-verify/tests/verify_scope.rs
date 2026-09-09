@@ -11,7 +11,7 @@ mod common;
 
 use common::{
     C14N_EXC, CounterSignatureSpec, DossierSpec, RefSpec, SIGNED_PROPERTIES_TYPE, XSLT_URI,
-    assert_check, assert_no_failures, build, countersignature, document_signature,
+    assert_check, assert_no_failures, build, codes, countersignature, document_signature,
     dossier_signature, run, run_without_trust, simple_pki,
 };
 use openszigno_verify::Verdict;
@@ -316,4 +316,134 @@ fn resolved_to_is_reported_even_when_the_policy_stage_fails() {
         references[0].resolved_to.as_deref(),
         Some("Dossier/Documents/Document/Object")
     );
+}
+
+// ---------------------------------------------------------------------------
+// Decoy `ds:Object` children (LAB-308)
+// ---------------------------------------------------------------------------
+//
+// The scope rule asks whether the signature covers *its* `SignedProperties`.
+// A `ds:Object` is open content the schema allows any number of, and nothing
+// requires a reference to cover one, so an inserted decoy carrying an unsigned
+// `SignedProperties` must not be able to add a requirement the real signature
+// was never going to meet.
+
+/// A sound document signature, with `decoys` prepended to its own objects.
+fn signed_dossier_with_decoys(pki: &common::Pki, decoys: Vec<String>) -> String {
+    let mut signature = document_signature(pki.chain.clone());
+    signature.decoy_objects = decoys;
+    let spec = DossierSpec {
+        document_signature: Some(signature),
+        ..Default::default()
+    };
+    build(&spec, &[("doc", &pki.signer_key)])
+}
+
+/// Before the fix the *first* `SignedProperties` under the signature was the
+/// one the scope rule demanded coverage of. A decoy object holding one
+/// therefore turned a sound signature into `reference_scope_incomplete`, and
+/// its document into `documents_uncovered`: a denial-of-verification anyone
+/// who could append bytes could mount.
+#[test]
+fn a_decoy_signed_properties_adds_no_coverage_requirement() {
+    let pki = simple_pki();
+    let decoy = format!(
+        "<ds:Object Id=\"decoy-doc\"><xades:SignedProperties xmlns:xades=\"{}\" Id=\"sp-decoy\"/></ds:Object>",
+        common::XADES_NS
+    );
+    let before = run(
+        &signed_dossier_with_decoys(&pki, Vec::new()),
+        vec![pki.root_der.clone()],
+        "2020-06-01T00:00:00Z",
+    );
+    let after = run(
+        &signed_dossier_with_decoys(&pki, vec![decoy]),
+        vec![pki.root_der.clone()],
+        "2020-06-01T00:00:00Z",
+    );
+
+    assert_check(
+        &after,
+        CheckCode::ReferenceScopeComplete,
+        CheckStatus::Passed,
+    );
+    assert_no_failures(&after);
+    // A decoy that carries no `QualifyingProperties` of its own does not even
+    // earn the informational notice: the check lists are identical.
+    assert_eq!(codes(&after), codes(&before));
+    assert_eq!(after.verdict, before.verdict);
+}
+
+/// The same decoy wrapped in its own `xades:QualifyingProperties`, which is
+/// what such an object looks like in the wild. The one difference permitted is
+/// the informational notice that more than one is present.
+#[test]
+fn a_decoy_qualifying_properties_adds_no_coverage_requirement() {
+    let pki = simple_pki();
+    let decoy = format!(
+        "<ds:Object Id=\"decoy-doc\"><xades:QualifyingProperties xmlns:xades=\"{}\" Target=\"#sig-doc\">\
+<xades:SignedProperties Id=\"sp-decoy\"/></xades:QualifyingProperties></ds:Object>",
+        common::XADES_NS
+    );
+    let before = run(
+        &signed_dossier_with_decoys(&pki, Vec::new()),
+        vec![pki.root_der.clone()],
+        "2020-06-01T00:00:00Z",
+    );
+    let after = run(
+        &signed_dossier_with_decoys(&pki, vec![decoy]),
+        vec![pki.root_der.clone()],
+        "2020-06-01T00:00:00Z",
+    );
+
+    assert_check(
+        &after,
+        CheckCode::ReferenceScopeComplete,
+        CheckStatus::Passed,
+    );
+    assert_no_failures(&after);
+    assert_check(
+        &after,
+        CheckCode::XadesExtraQualifyingProperties,
+        CheckStatus::Info,
+    );
+    let extra = (CheckCode::XadesExtraQualifyingProperties, CheckStatus::Info);
+    let seen: Vec<_> = codes(&after)
+        .into_iter()
+        .filter(|entry| *entry != extra)
+        .collect();
+    assert_eq!(seen, codes(&before));
+    assert_eq!(after.verdict, before.verdict);
+}
+
+/// The requirement itself is unchanged: a signature that covers *no*
+/// `SignedProperties` of its own still fails, decoy or not, and stage C then
+/// treats the signed properties as absent rather than believing them.
+#[test]
+fn a_signature_covering_no_signed_properties_still_fails_scope() {
+    let pki = simple_pki();
+    let mut signature = document_signature(pki.chain.clone());
+    // Point the SignedProperties reference at the payload object instead, so
+    // nothing the signature digests contains its `xades:SignedProperties`.
+    signature.references[3] = RefSpec::to("#obj0");
+    let spec = DossierSpec {
+        document_signature: Some(signature),
+        ..Default::default()
+    };
+    let xml = build(&spec, &[("doc", &pki.signer_key)]);
+    let report = run(&xml, vec![pki.root_der], "2020-06-01T00:00:00Z");
+
+    assert_check(
+        &report,
+        CheckCode::ReferenceScopeIncomplete,
+        CheckStatus::Failed,
+    );
+    let message = report.signatures[0]
+        .checks
+        .iter()
+        .find(|check| check.code == CheckCode::ReferenceScopeIncomplete)
+        .map(|check| check.message.clone())
+        .expect("the check was emitted");
+    assert!(message.contains("xades:SignedProperties"), "{message}");
+    assert_eq!(report.verdict, Verdict::Invalid);
 }

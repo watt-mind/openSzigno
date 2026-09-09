@@ -27,7 +27,7 @@ use crate::dsig::{
     Context, decode_base64, direct_child, direct_children, id_of, inclusive_prefixes, text_of,
 };
 use crate::policy::SignatureScheme;
-use crate::references::{digest_reference, report_reference};
+use crate::references::{digest_reference, effective_node_sets, report_reference};
 use crate::report::{ReferenceReport, SignatureReport, SignatureRole, SignatureScope};
 use crate::scope::{placement_of, reference_scope_check};
 use crate::xades::{self, StageC, stage_c_binding, stage_c_presence};
@@ -83,36 +83,23 @@ pub fn verify_signature(
 
     let placement = placement_of(context, signature);
     let scope = placement.scope;
-    let properties = xades::parse(signature);
-    let mut header = Header {
-        index,
-        scope,
-        parent_signature_index: match scope {
-            SignatureScope::Countersignature => placement.enclosing_index,
-            _ => None,
-        },
-        role: SignatureRole::Signature,
-        countersigns: Vec::new(),
-        document_index: document_index_of(context, signature),
-        signature_id: id_of(signature).map(str::to_owned),
-        signing_time: properties.signing_time.clone(),
-    };
     let unsupported_nesting_parent = match scope {
         SignatureScope::Unknown => placement.enclosing_index,
         _ => None,
     };
-    let claimed_signing_time = properties
-        .signing_time
-        .as_deref()
-        .and_then(crate::trust::parse_rfc3339);
 
     // --- Stage A1: structure ------------------------------------------------
     let structure = match signed_info::parse(context, signature) {
         Ok(structure) => structure,
         Err(check) => {
+            // No reference was parsed, let alone resolved, so *which*
+            // qualifying properties this signature covers is not a question
+            // this run can answer. The properties are read for reporting only;
+            // the signing-certificate binding is never evaluated on this path.
+            let properties = xades::parse(signature);
             checks.push(check);
             return finish(
-                header.clone(),
+                header_of(context, signature, index, &placement, &properties),
                 stage_c_presence(&properties),
                 checks,
                 references_report,
@@ -120,7 +107,7 @@ pub fn verify_signature(
                 Vec::new(),
                 None,
                 Vec::new(),
-                claimed_signing_time,
+                claimed_signing_time(&properties),
                 unsupported_nesting_parent,
             );
         }
@@ -170,6 +157,19 @@ pub fn verify_signature(
         resolved,
     } = signed_info::algorithm_policy(context, &structure, &mut checks);
 
+    // What each reference actually digests, computed once: the scope rule, the
+    // XAdES property selection below and the countersignature binding all
+    // decide coverage from it, so they cannot disagree.
+    let scopes = effective_node_sets(signature, &references, &resolved);
+
+    // --- Stage C's input: the qualifying properties this signature covers ---
+    // Selected by coverage rather than by document position, because a
+    // `ds:Object` is open content: an inserted, unreferenced one must not be
+    // able to decide what stage C reads.
+    let properties = xades::parse_covered(signature, &scopes);
+    let mut header = header_of(context, signature, index, &placement, &properties);
+    let claimed_signing_time = claimed_signing_time(&properties);
+
     // --- Stage A9: reference scope ------------------------------------------
     checks.push(reference_scope_check(
         context,
@@ -177,7 +177,7 @@ pub fn verify_signature(
         &placement,
         properties.qualifying_properties,
         &references,
-        &resolved,
+        &scopes,
     ));
 
     // --- Stage A10: the countersignature binding ----------------------------
@@ -389,6 +389,39 @@ pub fn verify_signature(
         claimed_signing_time,
         unsupported_nesting_parent,
     )
+}
+
+/// The identity of one signature, from its placement and the properties this
+/// run decided it is evaluated against.
+fn header_of(
+    context: &Context<'_, '_, '_>,
+    signature: Node<'_, '_>,
+    index: usize,
+    placement: &crate::scope::Placement<'_, '_>,
+    properties: &xades::XadesProperties<'_, '_>,
+) -> Header {
+    Header {
+        index,
+        scope: placement.scope,
+        parent_signature_index: match placement.scope {
+            SignatureScope::Countersignature => placement.enclosing_index,
+            _ => None,
+        },
+        role: SignatureRole::Signature,
+        countersigns: Vec::new(),
+        document_index: document_index_of(context, signature),
+        signature_id: id_of(signature).map(str::to_owned),
+        signing_time: properties.signing_time.clone(),
+    }
+}
+
+fn claimed_signing_time(
+    properties: &xades::XadesProperties<'_, '_>,
+) -> Option<crate::trust::UnixTime> {
+    properties
+        .signing_time
+        .as_deref()
+        .and_then(crate::trust::parse_rfc3339)
 }
 
 #[allow(clippy::too_many_arguments)]

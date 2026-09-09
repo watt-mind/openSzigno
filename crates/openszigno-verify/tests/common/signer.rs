@@ -37,6 +37,7 @@ pub fn document_signature(certificates: Vec<Vec<u8>>) -> SigSpec {
         include_signature_profile: true,
         xades_namespace: XADES_NS.to_owned(),
         objects_reversed: false,
+        decoy_objects: Vec::new(),
         certificate_values: Vec::new(),
         signing_certificate: None,
         signature_policy_implied: false,
@@ -73,6 +74,7 @@ pub fn dossier_signature(certificates: Vec<Vec<u8>>) -> SigSpec {
         include_signature_profile: true,
         xades_namespace: XADES_NS.to_owned(),
         objects_reversed: false,
+        decoy_objects: Vec::new(),
         certificate_values: Vec::new(),
         signing_certificate: None,
         signature_policy_implied: false,
@@ -499,6 +501,12 @@ pub(super) fn render_signature(spec: &SigSpec, namespace: &str) -> String {
     } else {
         String::new()
     };
+    // Unreferenced open content, emitted first so that document order alone
+    // would pick it: what a signature is evaluated against must be decided by
+    // what its references cover, not by which object comes first.
+    for decoy in &spec.decoy_objects {
+        out.push_str(decoy);
+    }
     if spec.objects_reversed {
         out.push_str(&xades_object);
         out.push_str(&profile_object);

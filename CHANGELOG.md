@@ -16,6 +16,10 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
   `encoding` pseudo-attribute and reports the label together with the byte
   range holding it, so a writer restating the declaration agrees with the
   decoder byte for byte. Additive; `schema_version` stays `1`.
+- `openszigno_core::declared_encoding`, which reads the XML declaration's
+  `encoding` pseudo-attribute and reports the label together with the byte
+  range holding it, so a writer restating the declaration agrees with the
+  decoder byte for byte. Additive; `schema_version` stays `1`.
 
 ### Fixed
 
@@ -104,6 +108,40 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
 
 ### Security
 
+- `sign` no longer lets the dossier being signed choose what the operator's
+  key signs. The `OBJREF` and `Id` attributes a reference points at, the
+  declared media type an `xades:DataObjectFormat` carries and the root
+  namespace the signature profile object declares were interpolated into the
+  signature XML unescaped, and every digest is computed after the values are
+  already in the document, so a hostile dossier could write an
+  attacker-supplied `ds:Reference` with no transforms or a forged
+  `xades:CommitmentTypeIndication` into what was signed, and `verify` would
+  then accept all of it. Both halves are fixed: an `Id` or `OBJREF` that is
+  not an XML NCName, a media type outside the characters a media type may
+  use, and a namespace URI holding a markup delimiter, a quote character or a
+  control character are all refused with `document_not_signable`; and every
+  remaining interpolation goes through the writer's attribute and text
+  escapers, so no dossier-derived string reaches signature XML unescaped.
+- `verify` now selects the XAdES qualifying properties a signature is
+  evaluated against by what that signature's own references cover, rather than
+  by taking the first `xades:QualifyingProperties` (stage C) and the first
+  `xades:SignedProperties` (the reference-scope check) under the signature. A
+  `ds:Object` is open content the XMLDSig schema allows any number of, and no
+  reference has to cover one, so a single inserted decoy object changed the
+  verdict without touching a signed byte: an empty
+  `<ds:Object><xades:QualifyingProperties/></ds:Object>` prepended to a
+  certificate-substitution dossier turned `xades_signing_certificate_mismatch`
+  (`failed`, so `invalid`) into `xades_signing_certificate_absent` (`unknown`,
+  so `indeterminate`), and a decoy carrying an unsigned
+  `xades:SignedProperties` turned a sound signature into
+  `reference_scope_incomplete` and its document into `documents_uncovered`.
+  Every `SignedProperties` a signature owns now satisfies the scope
+  requirement, stage C reads the covered one, a signature covering none of its
+  own reports `xades_signing_certificate_absent` as before, and a second
+  `xades:QualifyingProperties` is reported once as the new
+  `xades_extra_qualifying_properties` (`info`) and otherwise ignored. Real
+  XAdES signatures reference their `SignedProperties`, so the rule is a no-op
+  for conformant material; `schema_version` stays `1`.
 - `sign` no longer lets the dossier being signed choose what the operator's
   key signs. The `OBJREF` and `Id` attributes a reference points at, the
   declared media type an `xades:DataObjectFormat` carries and the root

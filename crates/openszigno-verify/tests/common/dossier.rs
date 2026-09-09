@@ -110,6 +110,15 @@ pub struct SigSpec {
     /// Emit the qualifying-properties object before the signature-profile
     /// object, which real dossiers do occasionally.
     pub objects_reversed: bool,
+    /// Raw `ds:Object` elements emitted *before* this signature's own profile
+    /// and qualifying-properties objects, and covered by no reference.
+    ///
+    /// The XMLDSig schema allows any number of `ds:Object` children with open
+    /// content, so anyone who can append bytes to a dossier can add one. This
+    /// is how a test inserts such a decoy: it changes no digest, so a
+    /// signature built with one must produce exactly the check list it
+    /// produces without it.
+    pub decoy_objects: Vec<String>,
     /// Certificates to place in `xades:CertificateValues`, which is where real
     /// dossiers carry the intermediates and usually the root.
     pub certificate_values: Vec<Vec<u8>>,
