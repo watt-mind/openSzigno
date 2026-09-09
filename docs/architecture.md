@@ -3700,7 +3700,14 @@ is `signing_key_mismatch` and is refused before anything is signed.
   extension must be short and alphanumeric or the document is rejected; it
   is appended when the title does not already end with it. Names are
   NFC-normalised and collisions are detected case-insensitively on the
-  normalised form.
+  normalised form. The comparison key is a real case fold — NFC, then the full
+  Unicode uppercase mapping, then the full lowercase mapping — not a plain
+  lower-casing, which leaves U+017F (`ſ`) and U+00DF (`ß`) alone and so would
+  miss two titles a filesystem that upper-cases to compare maps onto one file.
+  It deliberately errs towards more names comparing equal than any one
+  filesystem merges: the cost of that direction is a deduplicated name and a
+  warning, the cost of the other is a lost document. The key is only ever
+  compared; the file that is written keeps the title's own NFC spelling.
 - The output directory may be new or existing. Its path must not contain
   symlinks (or reparse points on Windows). A directory created by this run
   has mode `0700` on Unix; an existing directory keeps its mode.

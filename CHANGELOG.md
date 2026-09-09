@@ -101,6 +101,17 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
   `::ffff:a.b.c.d` form already was, so `::169.254.169.254` is refused as the
   metadata address it is. `--online-allow-private` waives the new rules
   exactly as it waives the old ones.
+- `extract` compares output names with a real case fold. The key was NFC plus
+  `to_lowercase`, which is not case folding: it leaves U+017F (`ſ`, long s)
+  and U+00DF (`ß`, sharp s) exactly as written, so `ſ.txt` and `s.txt`, or
+  `straße.txt` and `STRASSE.txt`, compared as two distinct names — while
+  NTFS, which upper-cases to compare, maps each pair onto one file, and the
+  second write would have overwritten the first. The key is now NFC, the full
+  uppercase mapping, then the full lowercase mapping, which folds both. No new
+  dependency: the round trip through uppercase is what expands `ſ` to `s` and
+  `ß` to `ss`. It errs towards more names comparing equal than any one
+  filesystem merges, which costs a deduplicated name and a warning rather than
+  a document.
 
 ## [0.7.1] - 2026-09-09
 
