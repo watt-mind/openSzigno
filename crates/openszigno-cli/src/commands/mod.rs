@@ -7,6 +7,7 @@ pub(crate) mod inspect;
 pub(crate) mod list;
 pub(crate) mod sign;
 pub(crate) mod skill;
+pub(crate) mod timestamp;
 pub(crate) mod validate;
 pub(crate) mod verify;
 

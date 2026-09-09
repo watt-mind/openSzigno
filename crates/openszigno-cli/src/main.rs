@@ -28,6 +28,7 @@ use crate::commands::inspect::inspect;
 use crate::commands::list::list;
 use crate::commands::sign::sign;
 use crate::commands::skill::skill;
+use crate::commands::timestamp::timestamp;
 use crate::commands::validate::validate_structure;
 use crate::commands::verify::verify_command;
 use crate::extract::ExtractRequest;
@@ -108,6 +109,10 @@ fn main() -> ExitCode {
         Command::Sign(args) => {
             let result = sign(&args);
             ("sign", args.json, result)
+        }
+        Command::Timestamp(args) => {
+            let result = timestamp(&args);
+            ("timestamp", args.json, result)
         }
         // Handled above, before any envelope machinery is set up.
         Command::Skill => unreachable!("skill is handled before the dispatch"),

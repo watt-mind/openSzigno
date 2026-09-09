@@ -120,7 +120,10 @@ fn embed_spec(path: &Path, options: &ParseOptions) -> Result<DocumentSpec, CliEr
 
 /// Write `bytes` to `path`, refusing to replace anything that is already
 /// there, and removing what this run created if the write fails.
-fn write_new_file(path: &Path, bytes: &[u8]) -> Result<(), CliError> {
+///
+/// `timestamp` writes its output through this too: one writer means one set
+/// of rules about clobbering, unsafe directories and partial files.
+pub(crate) fn write_new_file(path: &Path, bytes: &[u8]) -> Result<(), CliError> {
     let name = path
         .file_name()
         .and_then(|name| name.to_str())
