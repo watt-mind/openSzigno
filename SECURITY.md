@@ -28,11 +28,24 @@ that expired before the validation time, or `--no-revocation` all yield
 `indeterminate`, which means "nothing that was checked failed" — not "this is
 authentic", and not "this is forged".
 
-**Extraction is not verification.** `inspect`, `list`, `extract`, and
-`validate-structure` check nothing cryptographic at all; `signatures_verified`
-and `cryptographic_verification_performed` stay `false` for them. A dossier
-that openSzigno parses, lists, and extracts without complaint may be entirely
-forged.
+**Extraction is not verification.** `inspect`, `list`, `extract`,
+`validate-structure`, `create`, and `sign` check nothing cryptographic at all;
+`signatures_verified` and `cryptographic_verification_performed` stay `false`
+for them. A dossier that openSzigno parses, lists, and extracts without
+complaint may be entirely forged.
+
+**Writing is not verification.** `create` and `sign` produce material; they
+assert nothing about it. `create` writes an unsigned dossier and warns
+`created_dossier_unsigned` on every run. `sign` writes a signature with the key
+it was given and checks none of it: not the key, not the certificate, not the
+chain, not the token a `--tsa` returned beyond that it stamps the right
+imprint. Every successful run warns `signed_dossier_unverified`. Running
+`verify` on what `sign` wrote, against trust material you supply, is the only
+way to learn whether it holds, and a `valid` verdict there means exactly what
+this section already says it means. It is not a qualified electronic
+signature: that needs a key on a qualified device, which by construction is
+not a key this process can hold. See
+[docs/remote-signing.md](docs/remote-signing.md).
 
 Equally, a rejection is not proof of forgery: the pinned algorithm policy
 refuses SHA-1, RSA below 2048 bits, and other weak algorithms outright, which
@@ -269,8 +282,8 @@ chose it.
 credential identifier, and the bearer token.** Nothing else. Not the dossier,
 not a payload, not a document title, not a file name, not a hash of anything
 but the canonicalised `ds:SignedInfo` the signature covers. The digest goes out
-twice — in `credentials/authorize`, so the authorisation is bound to the data
-it covers, and in `signatures/signHash` — and that binding is why it is sent at
+twice, in `credentials/authorize`, so the authorisation is bound to the data
+it covers, and in `signatures/signHash`, and that binding is why it is sent at
 authorisation time rather than a placeholder.
 
 The remaining rules are the ones `--online` already imposes: the destination

@@ -153,8 +153,8 @@ Both jobs are safe to rerun after a partial success.
 `publish-crates.yml` looks each crate up in the crates.io sparse index
 (`https://index.crates.io/<prefix>/<name>`) before publishing it and skips
 the ones whose exact version is already there, so a rerun after
-`openszigno-core` published but `openszigno-author` failed continues with
-`verify` instead of dying on "crate version is already uploaded". After
+`openszigno-core` published but `openszigno-author` failed retries from
+`author` instead of dying on "crate version is already uploaded". After
 each publish it polls the same index until the version is visible, because
 the next crate resolves its dependency through the index and not through
 the workspace. A `concurrency` group keyed on the tag serialises runs for

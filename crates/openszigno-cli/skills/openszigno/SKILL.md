@@ -332,8 +332,8 @@ openszigno create --output OUT.es3 --title 'Dossier title' \
 ### 7. Sign a dossier
 
 Only when the user asks for a dossier to be *signed* and has supplied a key
-and its certificate. `sign` writes a signed copy and **verifies nothing** —
-not the key, not the certificate, not the chain — so never present its
+and its certificate. `sign` writes a signed copy and **verifies nothing**:
+not the key, not the certificate, not the chain. Never present its
 output as authentic, valid, or legally effective.
 
 ```sh
