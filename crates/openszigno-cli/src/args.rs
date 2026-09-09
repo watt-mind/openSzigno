@@ -37,6 +37,8 @@ pub(crate) enum Command {
     Verify(VerifyArgs),
     /// Build a new, unsigned dossier from files on disk.
     Create(CreateArgs),
+    /// Write a signed copy of a dossier. It verifies nothing.
+    Sign(SignArgs),
     /// Print the agent skill (SKILL.md) that teaches an AI agent this CLI.
     Skill,
 }
@@ -216,6 +218,115 @@ pub(crate) struct CreateArgs {
 impl CreateArgs {
     pub(crate) fn parse_options(&self) -> ParseOptions {
         parse_options(&self.allow_namespace)
+    }
+}
+
+/// A signing time from `--signing-time`, normalised to the RFC 3339 UTC
+/// seconds form `xades:SigningTime` is written with.
+#[derive(Clone, Debug)]
+pub(crate) struct SigningTime(pub(crate) String);
+
+/// Parse `--signing-time` during command-line parsing, so an unusable value is
+/// a usage error (exit 2) rather than a half-written signature.
+fn parse_signing_time(value: &str) -> Result<SigningTime, String> {
+    parse_rfc3339(value)
+        .map(|unix| SigningTime(format_rfc3339(unix)))
+        .ok_or_else(|| "expected an RFC 3339 timestamp".to_owned())
+}
+
+/// What a signature covers.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
+pub(crate) enum Scope {
+    /// One signature per selected document, covering that document's profile
+    /// and its payload.
+    #[default]
+    Document,
+    /// One signature on the dossier, covering its profile and every document.
+    Dossier,
+}
+
+#[derive(Clone, Debug, Args)]
+pub(crate) struct SignArgs {
+    /// Input .es3 dossier, or `-` to read it from standard input.
+    pub(crate) file: PathBuf,
+    /// The signed dossier to write. An existing file is never overwritten.
+    #[arg(short, long, value_name = "FILE")]
+    pub(crate) output: PathBuf,
+    /// The signing key: PKCS#8, DER or PEM, plain or passphrase-protected,
+    /// RSA or NIST P-256. The key is read from the file and never from the
+    /// command line.
+    #[arg(long, value_name = "FILE")]
+    pub(crate) key: PathBuf,
+    /// The certificate belonging to `--key`, PEM or DER. It may be omitted
+    /// when the key file is PEM and carries the certificate too. Without one
+    /// nothing binds the signature to a certificate.
+    #[arg(long, value_name = "FILE")]
+    pub(crate) cert: Option<PathBuf>,
+    /// Read the passphrase of an encrypted `--key` from this file, one
+    /// trailing newline stripped. It takes precedence over the environment
+    /// variable OPENSZIGNO_DECRYPT_PASSPHRASE. A passphrase is never taken
+    /// from the command line.
+    #[arg(long = "passphrase-file", value_name = "FILE")]
+    pub(crate) passphrase_file: Option<PathBuf>,
+    /// A certificate to place in xades:CertificateValues, so a verifier can
+    /// build the signer's path without a store of its own. Repeatable; a PEM
+    /// bundle may hold several.
+    #[arg(long, value_name = "FILE")]
+    pub(crate) chain: Vec<PathBuf>,
+    /// What the signature covers: one signature per document, or one over the
+    /// whole dossier.
+    #[arg(long, value_enum, default_value_t = Scope::Document)]
+    pub(crate) scope: Scope,
+    /// Sign only this document, named by its object_ref (the ds:Object Id its
+    /// DocumentProfile OBJREF points at) or as `#<index>` in source order.
+    /// Repeatable. Without it every document is signed.
+    #[arg(long = "document", value_name = "SELECTOR")]
+    pub(crate) document: Vec<String>,
+    /// Ask this RFC 3161 timestamp authority for a token over each signature
+    /// value, and embed it as a xades:SignatureTimeStamp. This is the only
+    /// thing that makes `sign` touch the network, and the destination rules,
+    /// timeouts and size caps are the ones `verify --online` uses.
+    #[arg(long, value_name = "URL")]
+    pub(crate) tsa: Option<String>,
+    /// A timestamp authority certificate to place in xades:CertificateValues,
+    /// so a verifier can build the token's path too. Repeatable.
+    #[arg(long = "tsa-cert", value_name = "FILE")]
+    pub(crate) tsa_cert: Vec<PathBuf>,
+    /// The xades:SigningTime to write, as an RFC 3339 timestamp, normalised to
+    /// UTC seconds. Without it the current time is used, which makes the
+    /// output depend on the clock.
+    #[arg(long = "signing-time", value_name = "TIME", value_parser = parse_signing_time)]
+    pub(crate) signing_time: Option<SigningTime>,
+    /// The signature algorithm: rsa-sha256 (the default for an RSA key, and
+    /// what Hungarian e-akta verifiers universally accept), rsa-pss-sha256, or
+    /// ecdsa-p256-sha256 (the default for a P-256 key).
+    #[arg(long, value_name = "NAME")]
+    pub(crate) algorithm: Option<String>,
+    /// Permit `--tsa` to contact loopback, private (RFC 1918), link-local and
+    /// unique-local addresses, and the host name `localhost`. Refused by
+    /// default, exactly as it is for `verify --online`.
+    #[arg(long = "online-allow-private", requires = "tsa")]
+    pub(crate) online_allow_private: bool,
+    /// Route the `--tsa` request through this proxy. Without it no proxy is
+    /// used at all, and none is taken from the environment.
+    #[arg(long = "online-proxy", value_name = "URL", requires = "tsa")]
+    pub(crate) online_proxy: Option<String>,
+    /// Emit one stable JSON object on stdout.
+    #[arg(long)]
+    pub(crate) json: bool,
+    /// Also accept a dossier whose root Dossier element is in this namespace,
+    /// in addition to the known-compatible ones. Repeatable.
+    #[arg(long = "allow-namespace", value_name = "URI")]
+    pub(crate) allow_namespace: Vec<String>,
+}
+
+impl SignArgs {
+    pub(crate) fn parse_options(&self) -> ParseOptions {
+        parse_options(&self.allow_namespace)
+    }
+
+    pub(crate) fn scope_is_dossier(&self) -> bool {
+        self.scope == Scope::Dossier
     }
 }
 

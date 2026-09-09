@@ -341,6 +341,43 @@ pub(crate) fn write_human_success(command: &str, response: &Response) -> io::Res
                 "The dossier is unsigned: creating it proves nothing about its contents."
             )?;
         }
+        "sign" => {
+            let signatures = response.data["signatures"]
+                .as_array()
+                .map_or(&[][..], |items| items);
+            writeln!(
+                out,
+                "Signed {} ({} B, {} signature(s)).",
+                display_json_string(&response.data["output"]),
+                response.data["bytes"],
+                signatures.len()
+            )?;
+            for signature in signatures {
+                let mut line = format!(
+                    "{} | scope={} | {}",
+                    display_json_string(&signature["id"]),
+                    display_json_string(&signature["scope"]),
+                    display_json_string(&signature["algorithm"])
+                );
+                if let Some(index) = signature["document_index"].as_u64() {
+                    line.push_str(&format!(" | document={index}"));
+                }
+                line.push_str(&format!(
+                    " | signing time={}",
+                    display_json_string(&signature["signing_time"])
+                ));
+                line.push_str(if signature["timestamped"] == Value::Bool(true) {
+                    " | timestamped"
+                } else {
+                    " | no timestamp"
+                });
+                writeln!(out, "{line}")?;
+            }
+            writeln!(
+                out,
+                "Signing verified nothing. Run `openszigno verify` with your own trust material to judge these signatures."
+            )?;
+        }
         "validate-structure" => {
             writeln!(
                 out,

@@ -148,6 +148,7 @@ the URLs the certificates themselves publish.
 | `extract FILE --output DIR` | Decode supported payloads into `DIR`, expanding embedded dossiers, never overwriting a file. `--document SEL --stdout` writes one payload to stdout instead. | 0, 2, 3, 4, 5 |
 | `verify FILE` | Verify every `ds:Signature` against the trust material you supply and report a per-signature verdict of `valid`, `invalid`, or `indeterminate`. | 0, 2, 3, 4, 6, 7 |
 | `create --output FILE --title TITLE` | Build one new, unsigned dossier from files on disk, with `--document`, `--zip`, `--embed`, `--encrypt-for`, and `--created`. Never overwrites the output. | 0, 2, 3, 4, 5 |
+| `sign FILE --output FILE --key KEY` | Write a signed copy of a dossier: one enveloped XMLDSig/XAdES signature per document, or one over the dossier with `--scope dossier`, optionally timestamped with `--tsa`. Never overwrites the output. | 0, 2, 3, 4, 5 |
 | `skill` | Write the embedded agent skill (`SKILL.md`) to stdout and nothing else. Takes no `FILE` and no `--json`. | 0, 2, 3 |
 
 `create` is the writing side: it builds a new dossier from files on disk,
@@ -159,8 +160,9 @@ it writes carries no signature, which every run says out loud.
 `--encrypt-for CERT.pem` encrypts every `--document` payload for that
 recipient certificate as CMS EnvelopedData, which `extract --decrypt-key`
 reads back; it is the one thing that makes the output non-deterministic,
-because a content key must be random. Signing and timestamping are not
-implemented; see [docs/roadmap.md](docs/roadmap.md).
+because a content key must be random. Signing a dossier is `sign`, below;
+writing a container timestamp is not implemented, see
+[docs/roadmap.md](docs/roadmap.md).
 
 Every command except `create` and `skill` takes `-` in place of the path and
 reads the dossier from standard input. Every flag, the JSON envelope, the stable
@@ -182,6 +184,30 @@ loopback, private and cloud-metadata destinations refused; trust material is
 never fetched. [docs/trust.md](docs/trust.md) explains how to obtain, pin, and
 lay out all of it.
 
+## Signing
+
+`sign` is the other writing side: it takes a dossier and a key you supply and
+writes a signed copy, with the reference scope, the XAdES signed properties
+and the placement `verify` requires, and optionally an RFC 3161 timestamp from
+a `--tsa` you name. The key, its certificate and its passphrase come from
+files, never from the command line.
+
+```sh
+openszigno sign dossier.es3 --output signed.es3 \
+  --key signer.p8 --cert signer.crt --chain issuing-ca.pem \
+  --tsa https://tsa.example/tsa --signing-time 2026-01-02T00:00:00Z
+```
+
+**Signing is not verification.** `sign` produces a signature and checks
+nothing — not the key, not the certificate, not the chain — and says so on
+every run. Whether what it wrote holds is a question for `verify`, against
+trust material you supply; and a `valid` verdict over a chain you built
+yourself means only that the chain you chose to trust verified. It is not a
+statement about anybody's identity, not a legal opinion, and not a qualified
+electronic signature: a qualified signature needs a key on a qualified device,
+which by construction is not a key this process can hold. See
+[docs/remote-signing.md](docs/remote-signing.md).
+
 ## Documentation
 
 - [Documentation index](docs/index.md), which lists everything else
@@ -189,8 +215,9 @@ lay out all of it.
 - [Trust, revocation, and qualified status](docs/trust.md)
 - [ES3 specification and implementation map](docs/es3-specification.md)
 - [Roadmap and residual risks](docs/roadmap.md)
+- [Remote signing and qualified signatures](docs/remote-signing.md)
 - [Agent skill](crates/openszigno-cli/skills/openszigno/SKILL.md): how an AI
-  agent should drive the CLI to inspect, extract, decrypt and verify
+  agent should drive the CLI to inspect, extract, decrypt, sign and verify
   dossiers. The binary carries it, so no checkout is needed to install it:
 
   ```sh

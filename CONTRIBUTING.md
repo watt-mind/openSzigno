@@ -350,7 +350,8 @@ validation time, against trust material the caller supplied; any required
 check it could not perform caps the verdict at `indeterminate`. `--online`
 fetches revocation data only, only for certificates on a path to a configured
 anchor, and is off by default. `extract --decrypt-key` reverses the `encrypt`
-transform. The other four commands verify nothing at all, and no command
+transform. `sign` writes a signature and checks nothing, not even the one it
+just wrote. The other five commands verify nothing at all, and no command
 determines a document's legal effect.
 
 What is still unimplemented is listed in

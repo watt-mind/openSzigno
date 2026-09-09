@@ -37,6 +37,9 @@ pub const AT: &str = "2020-06-02T00:00:00Z";
 // A very small HTTP server
 // ---------------------------------------------------------------------------
 
+/// A handler that computes a response body from a request body.
+pub type Responder = Arc<dyn Fn(&[u8]) -> Vec<u8> + Send + Sync>;
+
 /// What the server should answer with.
 #[derive(Clone)]
 pub enum Reply {
@@ -50,6 +53,12 @@ pub enum Reply {
     Status(u16),
     /// Accept the connection and never answer, to exercise the timeout.
     Silence,
+    /// A `200` whose body is computed from the request body.
+    ///
+    /// A timestamp authority cannot answer from a fixed script: the token it
+    /// returns has to stamp the imprint the request asked about, and the
+    /// request only exists once the signature does.
+    Computed(Responder),
 }
 
 /// What the server saw, so a test can assert on the request as well as on the
@@ -181,6 +190,16 @@ pub fn handle(stream: &mut TcpStream, routes: &[(&'static str, Reply)], seen: &M
                 &[("content-type", "application/octet-stream")],
                 payload.len(),
             ) && stream.write_all(payload).is_ok();
+            let _ = ok;
+        }
+        Reply::Computed(answer) => {
+            let payload = answer(&body);
+            let ok = respond(
+                stream,
+                200,
+                &[("content-type", "application/timestamp-reply")],
+                payload.len(),
+            ) && stream.write_all(&payload).is_ok();
             let _ = ok;
         }
         Reply::Bulk(size) => {

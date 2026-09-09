@@ -2,7 +2,8 @@
 """Golden JSON and human output contract tests for the openSzigno CLI.
 
 Runs a fixed command matrix over every fixture in `tests/fixtures/**/*.es3`,
-plus one `create` case that builds a dossier from `tests/fixtures/create/`,
+plus one `create` case that builds a dossier from `tests/fixtures/create/` and
+one `sign` refusal,
 normalises the two time values that cannot be stable, and compares the result
 against the committed files under `tests/golden/`.
 
@@ -133,6 +134,31 @@ def create_cases(temp):
         yield name, argv, cwd
 
 
+# The `sign` matrix. `sign` needs a private key, and this repository commits
+# none — synthetic or not — so no successful signing run can be a golden: the
+# key would have to be generated, and a generated key produces different bytes
+# every run. What is pinned instead is the refusal, which is exactly what a
+# caller who mistyped a path sees, and which is byte-identical on every
+# machine because the envelope never echoes a path it was given. The success
+# paths are covered by `crates/openszigno-cli/tests/sign.rs`.
+def sign_cases(temp):
+    """The `sign` matrix: `(name, argv, cwd)` triples, all failures."""
+    for name in ("sign.missing-key", "sign.missing-key.human"):
+        cwd = temp / "sign" / name
+        cwd.mkdir(parents=True, exist_ok=True)
+        argv = [
+            "sign",
+            str(FIXTURES / "created.es3"),
+            "--output",
+            "signed.es3",
+            "--key",
+            "no-such-key.pem",
+        ]
+        if not name.endswith(".human"):
+            argv.append("--json")
+        yield name, argv, cwd
+
+
 def mask_json(node):
     """Mask the two time values in a parsed envelope, in place.
 
@@ -237,14 +263,15 @@ def matrix(binary, temp):
                 body, extension = normalise_json(stdout), "json"
             produced[f"{directory}/{name}.{extension}"] = body
             produced[f"{directory}/{name}.exit"] = f"{status}\n"
-    for name, argv, cwd in create_cases(temp):
-        stdout, status = run(binary, argv, temp, cwd=cwd)
-        if name.endswith(".human"):
-            body, extension = normalise_text(stdout), "txt"
-        else:
-            body, extension = normalise_json(stdout), "json"
-        produced[f"create/{name}.{extension}"] = body
-        produced[f"create/{name}.exit"] = f"{status}\n"
+    for group, generator in (("create", create_cases), ("sign", sign_cases)):
+        for name, argv, cwd in generator(temp):
+            stdout, status = run(binary, argv, temp, cwd=cwd)
+            if name.endswith(".human"):
+                body, extension = normalise_text(stdout), "txt"
+            else:
+                body, extension = normalise_json(stdout), "json"
+            produced[f"{group}/{name}.{extension}"] = body
+            produced[f"{group}/{name}.exit"] = f"{status}\n"
     return produced
 
 

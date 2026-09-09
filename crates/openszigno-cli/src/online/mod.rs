@@ -147,6 +147,18 @@ impl FailureClass {
     }
 }
 
+/// A request body and the media types that describe it.
+///
+/// RFC 6960 Appendix A.1 for OCSP and RFC 3161 section 3.4 for timestamping
+/// both describe exactly this: a `POST` of a DER request under its own content
+/// type, with a known length.
+#[derive(Clone, Copy)]
+pub struct Post<'a> {
+    media_type: &'a str,
+    accept: &'a str,
+    bytes: &'a [u8],
+}
+
 /// The transport, configured once so that every fetch in a run is bounded the
 /// same way.
 pub struct Fetcher {
@@ -203,9 +215,43 @@ impl Fetcher {
         })
     }
 
+    /// One bounded `POST` of a DER request body, for a caller outside this
+    /// module.
+    ///
+    /// It is the same transport, the same destination policy and the same
+    /// bounds a revocation fetch goes through: the only thing that differs is
+    /// the media type, and a second HTTP client in this binary would be a
+    /// second place for those rules to drift out of agreement. The failure is
+    /// returned as the class's own words, so `sign` can name why nothing was
+    /// contacted.
+    pub fn post_der(
+        &self,
+        url: &str,
+        media_type: &str,
+        accept: &str,
+        body: &[u8],
+        limit: u64,
+    ) -> Result<Vec<u8>, String> {
+        self.fetch(
+            url,
+            Some(Post {
+                media_type,
+                accept,
+                bytes: body,
+            }),
+            limit,
+        )
+        .map_err(FailureClass::describe)
+    }
+
     /// One bounded fetch, following at most [`MAX_REDIRECTS`] redirects and
     /// never leaving the host the certificate named.
-    fn fetch(&self, url: &str, body: Option<&[u8]>, limit: u64) -> Result<Vec<u8>, FailureClass> {
+    fn fetch(
+        &self,
+        url: &str,
+        body: Option<Post<'_>>,
+        limit: u64,
+    ) -> Result<Vec<u8>, FailureClass> {
         let origin = host_of(url).ok_or(FailureClass::Invalid)?;
         let mut current = url.to_owned();
         for _ in 0..=MAX_REDIRECTS {
@@ -233,13 +279,13 @@ impl Fetcher {
                 // peer has to infer is the shape that behaves differently on
                 // different platforms. RFC 6960 Appendix A.1 describes exactly
                 // this: a `POST` of the DER request with its content type.
-                Some(bytes) => self
+                Some(post) => self
                     .agent
                     .post(&current)
-                    .header("content-type", "application/ocsp-request")
-                    .header("accept", "application/ocsp-response")
-                    .header("content-length", bytes.len().to_string())
-                    .send(bytes),
+                    .header("content-type", post.media_type)
+                    .header("accept", post.accept)
+                    .header("content-length", post.bytes.len().to_string())
+                    .send(post.bytes),
                 None => self.agent.get(&current).call(),
             };
             let mut response = response.map_err(classify_transport)?;

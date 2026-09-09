@@ -26,7 +26,13 @@ cipher.workspace = true
 cms.workspace = true
 der.workspace = true
 openszigno-core = { version = "0.6.0", path = "../openszigno-core" }
+# The signer canonicalizes through the verifier's own backend, over the tree
+# the shared core parser built. Two canonicalizers that had to agree about
+# namespace scope is exactly the gap a signature must not sit in.
+openszigno-verify = { version = "0.6.0", path = "../openszigno-verify" }
+p256.workspace = true
 pem-rfc7468.workspace = true
+pkcs8.workspace = true
 # `OsRng`: the content-encryption key, the initialisation vector, and the
 # key-transport padding must all be unpredictable.
 rand_core.workspace = true
@@ -36,7 +42,7 @@ sha2.workspace = true
 thiserror.workspace = true
 unicode-normalization.workspace = true
 x509-cert.workspace = true
-# The content-encryption key is zeroed when it is dropped.
+# The content-encryption key and the signing key are zeroed when dropped.
 zeroize.workspace = true
 zip.workspace = true
 
