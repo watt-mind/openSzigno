@@ -38,6 +38,31 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
   form was refused as partially covered. The "the signature must cover
   everything" rule itself is unchanged, and the enveloped-signature transform
   is still required in both forms.
+- `openszigno timestamp FILE --output OUT --tsa URL` writes a copy of a
+  dossier carrying a container `es:TimeStamp`: one RFC 3161 token over the
+  elements the e-dossier format says a timestamp at that placement protects,
+  and no signature at all. It needs no key, no certificate and no passphrase.
+  `--scope dossier` (the default) writes one timestamp over the dossier;
+  `--scope document`, with `--document SELECTOR`, writes one inside each
+  selected document. `--tsa-cert` puts the authority's issuing certificates in
+  the timestamp's own `xades:CertificateValues`, and `--online-allow-private`
+  and `--online-proxy` are the transport flags `sign --tsa` already has: the
+  request, the destination policy, the pinned resolution, the timeouts and the
+  size cap are the same code. The element written is the one
+  `openszigno verify` already checked, so a timestamped dossier reports
+  `dossier_timestamp_verified` or `document_timestamp_verified` against trust
+  material the caller supplies, and `dossier_timestamp_invalid` once the
+  container is edited. The envelope is `command: "timestamp"` with `data`
+  fields `output`, `bytes` and `timestamps[]` (`id`, `scope`,
+  `document_index`, `gen_time`). Every successful run warns
+  `timestamped_dossier_unverified`: obtaining a token is not evidence about
+  it. `schema_version` stays `1`. See
+  [The timestamp command](docs/architecture.md#the-timestamp-command).
+- `timestamp_exists` (exit 4), a new stable error code: `timestamp` was asked
+  to write an `es:TimeStamp` where the dossier already carries one. Adding a
+  timestamp where an existing signature or timestamp covers the insertion
+  point is `document_already_signed`, the refusal `sign` already makes,
+  applied by the same code.
 
 ### Changed
 

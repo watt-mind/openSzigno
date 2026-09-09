@@ -585,3 +585,4 @@ fn the_human_summary_names_the_timestamp_and_the_boundary() {
     assert!(text.contains(&format!("genTime={GEN_TIME}")), "{text}");
     assert!(text.contains("Timestamping verified nothing."), "{text}");
 }
+
