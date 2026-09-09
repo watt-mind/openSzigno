@@ -103,7 +103,8 @@ part of the public contract — it is where to look, not what is promised.
 crates/openszigno-cli/src/
   main.rs             # fn main: dispatch, then write the response and exit
   args.rs             # clap types, and the shared --allow-namespace plumbing
-  input.rs            # the bounded reader for a file or stdin, InputInfo, load
+  input.rs            # the bounded reader for a file or stdin, the one every
+                      #   other caller-supplied file is read with, InputInfo
   response.rs         # the JSON envelope, CliError, and its exit statuses
   render/             # writing the envelope (json.rs) and the summary (human.rs)
   commands/           # one module per command: inspect, list, validate,
@@ -383,7 +384,10 @@ input passes through these stages, each with an explicit limit:
 
 1. **Input size.** The file is read with a hard cap (`max_input_bytes`,
    64 MiB). The CLI also refuses a path that is not a regular file. Larger
-   inputs fail with `input_too_large` before parsing.
+   inputs fail with `input_too_large` before parsing. The file is opened once
+   and both checks are made against that one open descriptor, with the cap
+   enforced on the bytes that arrive; see
+   [Bounded file reads](#bounded-file-reads).
 2. **Encoding.** Only the `encoding` pseudo-attribute of the XML declaration
    itself is consulted; comments or later content cannot select an encoding.
    UTF-8 and ISO-8859-2 are decoded strictly; anything else is
@@ -527,6 +531,36 @@ stderr. Document ordering is the source XML order. No command writes XML
 payload bytes to stdout except `extract --stdout`, which writes the selected
 document's payload and nothing else.
 
+### Bounded file reads
+
+Every file the CLI reads because a caller named it goes through one helper,
+`input::read_bounded_file`: the dossier, `--decrypt-key` and `--key` with their
+certificates and passphrase files, the `--csc` configuration and the secrets it
+names, and each entry of a `--trust-store` and a `--revocation-store`.
+
+- The path is opened once. The type and the size come from an `fstat` on that
+  descriptor, and the bytes are read through it, so replacing or growing the
+  file after a check cannot change what is read.
+- The open refuses a symlink rather than following one, with `O_NOFOLLOW` on
+  Unix and `FILE_FLAG_OPEN_REPARSE_POINT` on Windows. The dossier path is the
+  one exception: it is the caller's own and has always been readable through a
+  link.
+- Reading stops one byte past the cap, and the file is refused at that point,
+  so a reported length that is not the truth is bounded all the same. A file of
+  exactly the cap is read; one byte more is not.
+
+The caps are `max_input_bytes` (64 MiB) for a dossier, 1 MiB for key material
+and the `--csc` configuration, 4 MiB for one trust-store entry or trusted list,
+and `MAX_REVOCATION_ITEM_BYTES` (16 MiB) for one CRL or OCSP response. Each
+caller words its own refusal, with the code that path already used, and no
+message names the file, because the path may be private.
+
+An input that is not a regular file, a directory most often, is `io_error`
+(exit 3) with `input.bytes` reported as `null` on every operating system. A
+directory has a length of its own on some filesystems and none on others, and
+it is a byte count of nothing the caller asked for either way, so the envelope
+says it does not know rather than repeating it.
+
 ### Reading from stdin
 
 `FILE` may be `-`, which reads the dossier from standard input instead of from
@@ -538,9 +572,9 @@ for a file.
   `input_too_large` (exit 4), the same code a file over the cap produces, and
   `input.bytes` is `null` because the true size of a stream that was not read
   to its end is unknown.
-- The cap is enforced on the bytes actually read. No filesystem metadata is
-  consulted, because a pipe has none and a file's metadata can change between
-  the check and the read.
+- The cap is enforced on the bytes actually read, on this path and on the file
+  path alike. A pipe has no filesystem metadata to consult, and a file's can
+  change between a check and the read.
 - The dossier is buffered in memory in full. That is inherent to the format:
   the XML must be parsed as one tree, and payloads are decoded from it.
 - Standard input and standard output are independent, so `-` combines with
@@ -625,7 +659,7 @@ The envelope fields are always present:
 | `schema_version` | number | Currently `1`. |
 | `ok` | boolean | `false` on any failure. |
 | `command` | string | `inspect`, `list`, `extract`, `validate-structure`, `verify`, `create`, `sign`, or `usage`. `skill` never appears: it emits no envelope. |
-| `input` | object | `format` is `"microsec-es3"` or `null`; `bytes` is the input size or `null`. |
+| `input` | object | `format` is `"microsec-es3"` or `null`; `bytes` is the input size, or `null` when it is not known, which includes an input that is not a regular file and a stream that was not read to its end. |
 | `data` | object or null | Command-specific; `null` on failure. |
 | `warnings` | array | Objects with stable `code` and human `message`. |
 | `errors` | array | Objects with stable `code` and human `message`. |
@@ -1837,14 +1871,15 @@ tool's allowlist. The classification never grants trust on its own — nothing
 found inside a dossier is ever an anchor, however it is signed.
 
 Files are read in sorted order so the same store always builds the same paths;
-subdirectories and symlinks are skipped rather than followed. **Every entry is
-parsed as an X.509 certificate at load time**, so a store that loads is one
-whose every byte was understood: one malformed entry among good ones fails the
-whole store. A file above 4 MiB, a directory holding more than 1024 entries, an
-entry that is not a valid certificate, and an empty store are all
-`trust_store_invalid` (exit 3), and the message names the entry's ordinal, never
-the file, because the path may be private. No trust anchors are compiled into
-the binary.
+subdirectories and symlinks are skipped rather than followed, and a symlink is
+refused by the open itself (see [Bounded file reads](#bounded-file-reads)).
+**Every entry is parsed as an X.509 certificate at load time**, so a store that
+loads is one whose every byte was understood: one malformed entry among good
+ones fails the whole store. A file above 4 MiB, a directory holding more than
+1024 entries, an entry that is not a valid certificate, and an empty store are
+all `trust_store_invalid` (exit 3), and the message names the entry's ordinal,
+never the file, because the path may be private. No trust anchors are compiled
+into the binary.
 
 ### Trusted lists
 
@@ -2206,6 +2241,9 @@ build is willing to open a socket to:
 | The address that is dialled | exactly the addresses the check approved | The policy hands its resolution to `ureq` as a pinned answer for that host and port, and a name that was not vetted for the fetch in hand does not resolve at all: there is no second lookup, so a zone that answers with a public address and then with a private one has no window between the check and the socket. A host that resolves to nothing is a `transport` failure and nothing is contacted. |
 | The name that is verified | unchanged | Pinning is an address decision only. The URL is sent as published, so the `Host` header, the TLS SNI value and the certificate host-name verification all still use the name the certificate named. |
 | Every hop | the URL the certificate published and **each redirect target** go through the whole policy, and each is pinned in its own right | A redirect already may not leave the host, but "the same name" and "the same address" are different statements. |
+| `redirect_downgrade` | a redirect from `https` to `http` is refused, for every request kind | A redirect is the peer's choice. Same host, same certificate, and yet the next request would go out in the clear carrying whatever the first one carried: for `sign --csc`, the bearer token in the header and the PIN and one-time password in the body. The refusal is decided before the loop comes round, so the downgraded target is never contacted. |
+| `credentials_require_https` | a request carrying credentials requires `https` on **every** hop, the first included | Credentials are a bearer token in the `Authorization` header, or a body the caller marked sensitive, which every `sign --csc` request is. The one exemption is a loopback service under `--online-allow-private`, granted on the addresses the policy approved rather than on the host text, which is what this project's own test servers are. Without the flag the refusal comes before the host is even resolved. |
+| The `Authorization` header | attached only after the target has passed every check above | A target that failed the destination policy, the credential rule or the address pin is never sent the header: it is put on the request in one place, reached only from the vetted branch of the fetch loop. |
 
 `--online-allow-private` waives the address rules — and only those — for an
 internal CA that really does publish on a private network. It does not waive
@@ -2228,7 +2266,7 @@ the policy looked.
 | Connect timeout | 5 s | |
 | Total timeout | 20 s per fetch | A fetch that exceeds it is a named failure, never a hang. |
 | Size cap | `MAX_REVOCATION_ITEM_BYTES` (16 MiB) for a CRL, 64 KiB for an OCSP response | Enforced by the reader, so a server that lies about `Content-Length` cannot make the run allocate more. The CRL cap is the *verifier's own* limit, re-exported: a download cap larger than what the tier walk will parse meant a CRL could arrive, be stored, and then answer nothing. |
-| Redirects | at most 3, **never to another host** | The authority for a URL is the certificate, and the certificate named one host. The port is part of the host. |
+| Redirects | at most 3, **never to another host**, and **never from `https` to `http`** | The authority for a URL is the certificate, and the certificate named one host. The port is part of the host. A downgrade is refused as `destination_refused` with the rule `redirect_downgrade`. |
 | Proxy | none, unless `--online-proxy URL` | `HTTP_PROXY` and its relatives are ignored. A verifier that silently routed its revocation traffic through whatever the shell happened to set would hand an attacker who controls that variable a way to feed it chosen bytes. With a proxy the proxy does the connecting, so the destination policy still checks the URL but no longer decides which socket is opened. |
 | Requests | `GET` for a CRL; `POST` of an RFC 6960 `OCSPRequest` as `application/ocsp-request` for OCSP | The `certID` uses **SHA-256**, which is inside the pinned allowlist. No nonce is sent: a nonce defends a live request against replay, and the verifier deliberately ignores nonces because it must also read archived responses. |
 | Volume | at most 32 certificates per run, rounds included, at most 4 URLs per certificate | Opening one dossier cannot generate unbounded traffic. |
@@ -2245,7 +2283,8 @@ store, so it can never displace an answer that was already to hand.
 naming the URL and a failure class: `timeout`, `http status <code>`,
 `too large` (with the limit it exceeded), `redirect`, `invalid`, `transport`,
 `destination_refused` (with the rule that refused it — nothing was contacted at
-all), or `cache_collision` (the artefact was fetched, but `--online-cache`
+all, and `redirect_downgrade` and `credentials_require_https` are two of those
+rules), or `cache_collision` (the artefact was fetched, but `--online-cache`
 already holds a different file under that name and nothing was overwritten).
 The class is reported
 because the remedies differ — a timeout is somebody else's outage, a `404` is a
@@ -2685,7 +2724,7 @@ verify), and `revocation_not_checked` (the caller switched revocation off).
 | `revocation_status_unknown` | `unknown` | No usable revocation data covers a certificate in the path, or no path was built to ask about. Blocking. A failed `--online` fetch reaches a verdict through this check and not on its own; see `online_fetch_failed`. |
 | `revocation_data_stale` | `unknown` | The data's `nextUpdate` had passed at the validation time, or it carries none and its `thisUpdate` precedes it. Also the OCSP `unknown` status. |
 | `revocation_data_invalid` | `unknown` | Every source that covered a certificate was found but could not be used: signed by someone unauthorised, a delta or indirect CRL, an unimplemented `issuingDistributionPoint` form, a critical CRL extension this build does not implement, an OCSP response whose status is not `successful`, or an item larger than `MAX_REVOCATION_ITEM_BYTES`, whose size and limit the message names. The message names the cause. Emitted only after every tier has been tried. `unknown`, not `failed`: unusable data means the tool could not answer. |
-| `online_fetch_failed` | `info` | Under `--online`, one fetch did not produce a usable artefact. The message names the URL and the failure class: `timeout`, `http status <code>`, `too large` with the limit, `redirect`, `invalid`, `transport`, `destination_refused` with the rule that refused the destination before any socket was opened, or `cache_collision` when `--online-cache` already held a different file under an artefact's name and nothing was overwritten. Informational: whether the missing data mattered is answered by the chain that needed it, through `revocation_status_unknown`, which blocks. |
+| `online_fetch_failed` | `info` | Under `--online`, one fetch did not produce a usable artefact. The message names the URL and the failure class: `timeout`, `http status <code>`, `too large` with the limit, `redirect`, `invalid`, `transport`, `destination_refused` with the rule that refused the destination before any socket was opened (`redirect_downgrade` for a redirect that would leave `https` for `http`, `credentials_require_https` for a request carrying credentials over a scheme that is not `https`, and the address and scheme rules), or `cache_collision` when `--online-cache` already held a different file under an artefact's name and nothing was overwritten. Informational: whether the missing data mattered is answered by the chain that needed it, through `revocation_status_unknown`, which blocks. |
 | `ocsp_responder_trusted` | `info` | An OCSP response was accepted under the RFC 6960 section 2.2 trusted-responder model: the responder is not the issuing CA and that CA did not delegate to it, but its certificate carries `id-kp-OCSPSigning` and chains to a configured anchor. Reported because this rests on the caller's trust store rather than on the issuing CA's word. |
 | `trust_list_loaded` | `info` | A `--trust-list` file was read; the message says how many anchors it contributed. |
 | `trust_list_unverified` | `unknown` | A trusted list was used without `--trust-list-signer`, so its own signature was not checked. Blocking. |
@@ -3180,7 +3219,31 @@ other moving part; without it the current time is written.
 A dossier declared ISO-8859-2 is decoded to UTF-8 before it is signed and its
 declaration is rewritten to say so. That changes no signature already in the
 file: canonical XML is UTF-8 whatever the source encoding was, so every
-existing digest is computed over exactly the same octets as before.
+existing digest is computed over exactly the same octets as before. The
+declaration is read by the reader's own parser
+(`openszigno_core::declared_encoding`), so every spelling the reader accepts
+is one the writer rewrites: either quote character, and any whitespace around
+the `=`. Only the encoding label's own bytes are replaced.
+
+### Nothing outside a signature is ever rewritten
+
+A signature is written as a skeleton and completed in three passes (reference
+digests, then the signature value, then the timestamp token), because each
+stage's input only exists once the previous one is in the document. The values
+stand in as placeholder strings until their pass fills them in.
+
+Every substitution is bounded to the byte range of the `ds:Signature` element
+that wrote the placeholder, taken from the parsed working document. The
+dossier's own text is never touched, whatever it happens to say: a document
+whose title or payload reads exactly like a placeholder is content, it is
+digested as it stands, and it comes back out of `list` unchanged. A
+substitution over the whole document would rewrite it after its digest had
+been taken, and produce a dossier `sign` called a success and `verify` then
+reported `reference_digest_mismatch` for.
+
+The ranges never overlap, because no signature this tool writes ever contains
+another, and they are applied last first so that the earlier ones stay valid
+as lengths change.
 
 ### Algorithms
 

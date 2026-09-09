@@ -47,6 +47,14 @@ impl Client {
 
     /// One CSC operation: `POST <base>/<operation>` with a JSON body.
     ///
+    /// The body is marked **sensitive**: an `credentials/authorize` request
+    /// carries the PIN and the one-time password that authorise a signature,
+    /// so on top of the bearer token in the header there is credential
+    /// material in the body itself. The transport then requires `https` on
+    /// every hop, including the first, and refuses a redirect that would move
+    /// the exchange onto `http`. Both refusals arrive here as the transport's
+    /// own class, so `csc_unreachable` names the rule that stopped the run.
+    ///
     /// A transport failure is `csc_unreachable` and names the class the
     /// transport reported — `timeout`, `destination_refused: …` and the rest —
     /// because the remedies differ and a bare "it did not work" is not
@@ -56,7 +64,7 @@ impl Client {
         let url = format!("{}/{operation}", self.base_url);
         let answer = self
             .fetcher
-            .post_json(&url, &self.token, body, MAX_RESPONSE_BYTES)
+            .post_json(&url, &self.token, body, MAX_RESPONSE_BYTES, true)
             .map_err(|class| {
                 SignError::remote(
                     SignErrorCode::CscUnreachable,
@@ -95,12 +103,12 @@ fn described(body: &[u8]) -> String {
 
 /// Bound and strip a value taken from a remote answer before it reaches a
 /// message, exactly as every other value taken from input is bounded.
+///
+/// The shared sanitiser drops control *and* format characters, so a service
+/// cannot put an ANSI escape or a bidirectional override into a refusal a
+/// terminal then acts on.
 fn sanitize(value: &str) -> String {
-    value
-        .chars()
-        .filter(|character| !character.is_control())
-        .take(120)
-        .collect()
+    openszigno_core::sanitize_display(value, 120)
 }
 
 #[cfg(test)]

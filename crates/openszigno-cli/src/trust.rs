@@ -30,6 +30,8 @@ use std::path::Path;
 use openszigno_verify::certs::certificates_from_bytes;
 use openszigno_verify::{MemoryTrustStore, RoxmltreeC14n, TrustListSnapshot};
 
+use crate::input::{BoundedReadError, read_bounded_file};
+
 /// The largest trust-store file this loader will read, so that a store pointed
 /// at a huge file cannot exhaust memory.
 const MAX_FILE_BYTES: u64 = 4 * 1024 * 1024;
@@ -81,16 +83,29 @@ fn read_directory(directory: &Path) -> Result<Vec<Vec<u8>>, String> {
 
     let mut certificates = Vec::new();
     for path in names {
+        // The entry kind is checked twice on purpose. This one only decides
+        // what to skip; the read below opens the file once and refuses a
+        // symlink, a directory and an over-cap file through that one open
+        // descriptor, so nothing here is a security decision a race could
+        // undo.
         let metadata = fs::symlink_metadata(&path)
             .map_err(|_| "a trust store file could not be inspected".to_owned())?;
         if !metadata.is_file() {
             continue;
         }
-        if metadata.len() > MAX_FILE_BYTES {
-            return Err("a trust store file is too large".to_owned());
-        }
-        let bytes =
-            fs::read(&path).map_err(|_| "a trust store file could not be read".to_owned())?;
+        let bytes = match read_bounded_file(&path, MAX_FILE_BYTES) {
+            Ok(bytes) => bytes,
+            Err(BoundedReadError::NotRegular) => continue,
+            Err(BoundedReadError::TooLarge { .. }) => {
+                return Err("a trust store file is too large".to_owned());
+            }
+            Err(BoundedReadError::Inspect) => {
+                return Err("a trust store file could not be inspected".to_owned());
+            }
+            Err(BoundedReadError::Read) => {
+                return Err("a trust store file could not be read".to_owned());
+            }
+        };
         // Every entry is parsed as an X.509 certificate here, so a store that
         // loads is one whose every byte was understood.
         let parsed = certificates_from_bytes(&bytes)
@@ -143,15 +158,18 @@ pub(crate) fn snapshot_of(list: &openszigno_verify::TrustList) -> TrustListSnaps
 }
 
 /// Read a regular file, refusing symlinks and anything over `limit` bytes.
-/// The message never names the path, because it may be private.
+///
+/// One open, one `fstat` on that descriptor, and a cap on the bytes that
+/// arrived, so a file replaced or grown after a check cannot be read past the
+/// limit. The message never names the path, because it may be private.
 fn read_bounded(path: &Path, limit: u64) -> Result<Vec<u8>, String> {
-    let metadata = fs::symlink_metadata(path)
-        .map_err(|_| "a trust material file could not be inspected".to_owned())?;
-    if !metadata.is_file() {
-        return Err("a trust material path is not a regular file".to_owned());
-    }
-    if metadata.len() > limit {
-        return Err("a trust material file is too large".to_owned());
-    }
-    fs::read(path).map_err(|_| "a trust material file could not be read".to_owned())
+    read_bounded_file(path, limit).map_err(|error| {
+        match error {
+            BoundedReadError::Inspect => "a trust material file could not be inspected",
+            BoundedReadError::NotRegular => "a trust material path is not a regular file",
+            BoundedReadError::TooLarge { .. } => "a trust material file is too large",
+            BoundedReadError::Read => "a trust material file could not be read",
+        }
+        .to_owned()
+    })
 }

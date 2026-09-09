@@ -94,7 +94,9 @@ pub fn id_map<'a, 'input>(
 
 fn decode_xml(bytes: &[u8]) -> Result<(String, String), Error> {
     let bytes = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(bytes);
-    let label = declared_encoding(bytes).unwrap_or_else(|| "UTF-8".to_owned());
+    let label = declared_encoding(bytes)
+        .map(|declaration| declaration.label)
+        .unwrap_or_else(|| "UTF-8".to_owned());
     let normalized = label.to_ascii_lowercase().replace('_', "-");
     if normalized == "utf-8" || normalized == "utf8" {
         return String::from_utf8(bytes.to_vec())
@@ -118,38 +120,82 @@ fn decode_xml(bytes: &[u8]) -> Result<(String, String), Error> {
     Ok((decoded.into_owned(), "ISO-8859-2".to_owned()))
 }
 
-/// Read the `encoding` pseudo-attribute of the XML declaration only. The
-/// search is bounded to the declaration itself so that comments or content
-/// later in the prolog cannot choose how the document is decoded.
-fn declared_encoding(bytes: &[u8]) -> Option<String> {
+/// The `encoding` pseudo-attribute of an XML declaration, and where its value
+/// sits in the bytes it was read from.
+///
+/// The range is the label alone, quotes excluded, so a writer that has to
+/// restate the encoding can rewrite exactly those bytes and nothing else.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EncodingDeclaration {
+    /// The label exactly as written, neither trimmed nor case-folded.
+    pub label: String,
+    /// The byte offset of the first byte of the label.
+    pub start: usize,
+    /// The byte offset one past the last byte of the label.
+    pub end: usize,
+}
+
+/// Read the `encoding` pseudo-attribute of the XML declaration only.
+///
+/// The search is bounded to the declaration itself so that comments or
+/// content later in the prolog cannot choose how the document is decoded, and
+/// it accepts every spelling XML allows there: either quote character, and
+/// any whitespace around the `=`. It is the one reading of that declaration
+/// this project has: `XmlSource::decode` decides the input encoding with it,
+/// and a writer restating the declaration must agree with it byte for byte.
+///
+/// A leading byte order mark is skipped, and the offsets returned are into
+/// `bytes` as given, mark included.
+pub fn declared_encoding(bytes: &[u8]) -> Option<EncodingDeclaration> {
+    const MARK: &[u8] = &[0xEF, 0xBB, 0xBF];
+    let offset = if bytes.starts_with(MARK) {
+        MARK.len()
+    } else {
+        0
+    };
+    let bytes = &bytes[offset..];
     let prefix = &bytes[..bytes.len().min(512)];
     if !prefix.starts_with(b"<?xml") || !prefix.get(5..)?.first()?.is_ascii_whitespace() {
         return None;
     }
     let end = prefix.windows(2).position(|window| window == b"?>")?;
     let declaration = std::str::from_utf8(&prefix[5..end]).ok()?;
-    let mut rest = declaration;
-    while let Some(position) = rest.find("encoding") {
-        let preceded_by_space = rest[..position]
+    // Every offset below is relative to `declaration`; `base` turns one into
+    // an offset into `bytes` as the caller handed them over.
+    let base = offset + 5;
+    let mut cursor = 0;
+    while let Some(position) = declaration[cursor..].find("encoding") {
+        let name_at = cursor + position;
+        let preceded_by_space = declaration[..name_at]
             .chars()
             .next_back()
             .is_some_and(char::is_whitespace);
-        rest = &rest[position + "encoding".len()..];
+        cursor = name_at + "encoding".len();
         if !preceded_by_space {
             continue;
         }
-        let after = rest.trim_start();
-        let Some(value) = after.strip_prefix('=') else {
+        let after = &declaration[cursor..];
+        let trimmed = after.trim_start();
+        let Some(value) = trimmed.strip_prefix('=') else {
             continue;
         };
-        let value = value.trim_start();
-        let quote = value.chars().next()?;
+        // The label starts after the name, the whitespace, the `=`, more
+        // whitespace, and the opening quote.
+        let mut at = cursor + (after.len() - trimmed.len()) + 1;
+        let trimmed = value.trim_start();
+        at += value.len() - trimmed.len();
+        let quote = trimmed.chars().next()?;
         if quote != '\'' && quote != '"' {
             return None;
         }
-        let value = &value[quote.len_utf8()..];
-        let close = value.find(quote)?;
-        return Some(value[..close].to_owned());
+        at += quote.len_utf8();
+        let label = &trimmed[quote.len_utf8()..];
+        let close = label.find(quote)?;
+        return Some(EncodingDeclaration {
+            label: label[..close].to_owned(),
+            start: base + at,
+            end: base + at + close,
+        });
     }
     None
 }
@@ -210,5 +256,66 @@ mod tests {
         let source = XmlSource::decode(b"<a><b/></a>", &Limits::default()).unwrap();
         let tree = source.parse_tree(&Limits::default()).unwrap();
         assert_eq!(tree.root_element().tag_name().name(), "a");
+    }
+
+    /// The label, and the range that names it, for every spelling the
+    /// declaration allows.
+    #[test]
+    fn every_declaration_spelling_yields_the_label_and_its_range() {
+        for text in [
+            "<?xml version=\"1.0\" encoding=\"ISO-8859-2\"?><a/>",
+            "<?xml version='1.0' encoding='ISO-8859-2'?><a/>",
+            "<?xml version=\"1.0\" encoding = \"ISO-8859-2\"?><a/>",
+            "<?xml version=\"1.0\" encoding\t=\n'ISO-8859-2'?><a/>",
+        ] {
+            let found = declared_encoding(text.as_bytes())
+                .unwrap_or_else(|| panic!("{text} declares an encoding"));
+            assert_eq!(found.label, "ISO-8859-2", "{text}");
+            assert_eq!(&text[found.start..found.end], "ISO-8859-2", "{text}");
+        }
+    }
+
+    /// A byte order mark shifts the offsets and nothing else.
+    #[test]
+    fn the_offsets_are_into_the_bytes_as_given() {
+        let mut bytes = vec![0xEF, 0xBB, 0xBF];
+        bytes.extend_from_slice(b"<?xml version='1.0' encoding='utf8'?><a/>");
+        let found = declared_encoding(&bytes).expect("the declaration is read past the mark");
+        assert_eq!(found.label, "utf8");
+        assert_eq!(&bytes[found.start..found.end], b"utf8");
+    }
+
+    /// Nothing outside the declaration is read, and a declaration that names
+    /// no encoding names none.
+    #[test]
+    fn only_the_declarations_own_encoding_is_read() {
+        for text in [
+            "<a/>",
+            "<?xml version=\"1.0\"?><a/>",
+            "<?xml version=\"1.0\"?><!-- encoding=\"ISO-8859-2\" --><a/>",
+            // `encoding` has to be a pseudo-attribute of its own, not the
+            // tail of another name.
+            "<?xml version=\"1.0\" xencoding=\"ISO-8859-2\"?><a/>",
+        ] {
+            assert_eq!(declared_encoding(text.as_bytes()), None, "{text}");
+        }
+    }
+
+    /// An upper-case label decodes as the same encoding a lower-case one
+    /// does, and both reach the caller as written.
+    #[test]
+    fn the_label_is_matched_without_regard_to_case() {
+        let source = XmlSource::decode(
+            "<?xml version='1.0' encoding='ISO-8859-2'?><a/>".as_bytes(),
+            &Limits::default(),
+        )
+        .expect("a single-quoted declaration decodes");
+        assert_eq!(source.encoding(), "ISO-8859-2");
+        let source = XmlSource::decode(
+            "<?xml version=\"1.0\" encoding = \"utf-8\"?><a/>".as_bytes(),
+            &Limits::default(),
+        )
+        .expect("spaces around the equals sign decode");
+        assert_eq!(source.encoding(), "UTF-8");
     }
 }

@@ -10,6 +10,85 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-09-09
+
+### Added
+
+- `openszigno_core::declared_encoding`, which reads the XML declaration's
+  `encoding` pseudo-attribute and reports the label together with the byte
+  range holding it, so a writer restating the declaration agrees with the
+  decoder byte for byte. Additive; `schema_version` stays `1`.
+
+### Fixed
+
+- `sign` no longer rewrites the dossier's own text when it fills a signature
+  in. The digest, signature-value and timestamp placeholders were substituted
+  over the whole document, so a document whose title or payload read like one
+  of them was rewritten after the digest over it had been taken: the run
+  reported success and `verify` then reported `reference_digest_mismatch`.
+  Each pass now substitutes inside the byte range of the `ds:Signature` it is
+  filling in and nowhere else.
+- `sign` accepts every XML declaration the reader accepts when it restates the
+  encoding. Only `encoding="..."` was recognised, so a dossier declared with
+  single quotes or with spaces around the `=` was decoded to UTF-8 and then
+  still declared ISO-8859-2. The declaration is now read with the reader's own
+  parser, `openszigno_core::declared_encoding`, and only the label's own bytes
+  are replaced.
+- Every file the CLI reads because a caller named it now goes through one
+  bounded reader. The key, certificate, passphrase, trust-store and
+  revocation-store loaders checked a path's size and type and then read the
+  path a second time, so replacing or growing the file in between bypassed
+  both checks. The file is now opened once, with `O_NOFOLLOW` on Unix and
+  `FILE_FLAG_OPEN_REPARSE_POINT` on Windows, its type and size come from an
+  `fstat` on that descriptor, and the bytes are read through a cap that stops
+  one byte past the limit. Every code, message and cap is what it was; a file
+  of exactly the cap is still read. An input that is not a regular file is
+  still `io_error` (exit 3), and now reports `input.bytes` as `null` on every
+  operating system rather than a directory's own length, which meant different
+  things on different platforms and was never a payload size. See
+  [Bounded file reads](docs/architecture.md#bounded-file-reads).
+- Strings a remote Cloud Signature Consortium service chose are sanitised
+  before they reach human output, an error message or the JSON envelope:
+  credential identifiers, the reported `specs` version, the published key
+  algorithms and the `error` string of a refusal. Unicode `Cc` and `Cf`
+  characters, which is where ANSI escapes and bidirectional overrides live,
+  are dropped, and the value is bounded. A service can no longer move the
+  cursor or reorder what is printed around it. The filter is
+  `openszigno_core::sanitize_display`, which the XMLDSig structure pass now
+  shares.
+
+### Security
+
+- The release workflow no longer pipes the cargo-dist installer script into a
+  shell. `.github/workflows/release.yml` runs with `contents: write`, so a
+  tampered installer asset would have run with a token that can rewrite the
+  GitHub release and the binaries published from it. Both jobs that install
+  dist from the network, `plan` and each leg of `build-local-artifacts`
+  (`irm | iex` on Windows), now use `.github/actions/install-dist`, a
+  composite action that downloads the prebuilt cargo-dist archive for the
+  runner's target from the same release, checks its SHA-256 against a
+  checksum pinned in the action, and only then unpacks the binary. A mismatch
+  fails the step. The other jobs already reused the binary cached by `plan`.
+  See [Installing dist in CI](docs/releasing.md#installing-dist-in-ci) and
+  [Bumping dist](docs/releasing.md#bumping-dist), which also records the exact
+  diff to reapply after `dist generate` rewrites the workflow.
+- The online transport refuses a redirect that leaves `https` for `http`, for
+  every request kind, as `destination_refused` with the rule
+  `redirect_downgrade`. A redirect could previously stay on the host the
+  certificate or the configuration named and change the scheme, and the next
+  hop then went out in the clear carrying whatever the first one carried.
+- A request that carries credentials — a bearer token in the `Authorization`
+  header, or a body the caller marked sensitive, which every `sign --csc`
+  request now is — requires `https` on every hop, the first included, and is
+  refused as `destination_refused` with the rule `credentials_require_https`
+  otherwise. The one exemption is a loopback service under
+  `--online-allow-private`, granted on the addresses the destination policy
+  approved rather than on the host text. A refusal reaches `sign --csc` as
+  `csc_unreachable` naming the rule, and nothing is contacted.
+- The `Authorization` header is attached only after a target has passed the
+  destination policy, the credential rule and the address pin, so a target
+  that failed any check is never sent one.
+
 ## [0.7.0] - 2026-09-09
 
 ### Added
@@ -1588,7 +1667,8 @@ This release performs no cryptographic verification of any kind.
 
 [0.1.0]: https://github.com/watt-mind/openSzigno/releases/tag/v0.1.0
 [0.2.0]: https://github.com/watt-mind/openSzigno/compare/v0.1.0...v0.2.0
-[Unreleased]: https://github.com/watt-mind/openSzigno/compare/v0.7.0...develop
+[Unreleased]: https://github.com/watt-mind/openSzigno/compare/v0.7.1...develop
+[0.7.1]: https://github.com/watt-mind/openSzigno/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/watt-mind/openSzigno/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/watt-mind/openSzigno/compare/v0.5.1...v0.6.0
 [0.5.1]: https://github.com/watt-mind/openSzigno/compare/v0.5.0...v0.5.1

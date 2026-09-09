@@ -135,16 +135,12 @@ fn slot_of(child: Node<'_, '_>, slots: &[Slot]) -> Option<usize> {
 }
 
 /// Name an unexpected element without echoing untrusted input verbatim: the
-/// local name is bounded and stripped of control characters, and a foreign
-/// namespace is reported as such rather than quoted.
+/// local name goes through the shared display sanitiser, which bounds it and
+/// drops every control and format character, and a foreign namespace is
+/// reported as such rather than quoted.
 fn describe(child: Node<'_, '_>) -> String {
     let tag = child.tag_name();
-    let name: String = tag
-        .name()
-        .chars()
-        .filter(|character| !character.is_control())
-        .take(64)
-        .collect();
+    let name = openszigno_core::sanitize_display(tag.name(), 64);
     if tag.namespace() == Some(XMLDSIG_NAMESPACE) {
         format!("ds:{name}")
     } else {

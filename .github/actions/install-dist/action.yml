@@ -1,0 +1,124 @@
+name: Install dist
+description: >-
+  Install the pinned dist (cargo-dist) release binary after verifying its
+  SHA-256 checksum, instead of piping the upstream installer script into a
+  shell.
+
+# Why this action exists
+#
+# `dist generate` writes an "Install dist" step that pipes
+# cargo-dist-installer.sh (or, on Windows, cargo-dist-installer.ps1) straight
+# from a GitHub release into a shell, inside a workflow that holds
+# `contents: write`. A tampered asset would run with that token and could
+# reach the published binaries and the release itself. dist 0.32 has no
+# configuration key for the install command, its URL, or a checksum
+# (`DistInstallStrategy` in cargo-dist is derived from `cargo-dist-version`
+# alone), so the verified install lives here and release.yml is re-pointed at
+# it after every `dist generate`. See docs/releasing.md, "Installing dist in
+# CI".
+#
+# The prebuilt archive is used rather than the installer script: it is the
+# artefact that actually carries the binary, and unlike the two installer
+# scripts it has a published checksum next to it in the release.
+#
+# Checksums below are the SHA-256 of each archive as published in
+# https://github.com/axodotdev/cargo-dist/releases/download/v0.32.0/sha256.sum
+# and repeated in the per-asset `<archive>.sha256` file beside it. They were
+# confirmed by downloading each archive and hashing it locally on 2026-09-09.
+
+inputs:
+  version:
+    description: dist release version to install, without the leading `v`.
+    required: false
+    default: "0.32.0"
+
+runs:
+  using: composite
+  steps:
+    - name: Install dist ${{ inputs.version }} with a verified checksum
+      shell: bash
+      env:
+        DIST_VERSION: ${{ inputs.version }}
+      run: |
+        set -euo pipefail
+
+        # Pinned SHA-256 per release asset. Update these together with
+        # DIST_VERSION's default and with cargo-dist-version in
+        # dist-workspace.toml; see docs/releasing.md, "Bumping dist".
+        sha_x86_64_unknown_linux_gnu=eb52f9fae0d0506774e9f1801c1168f87fa2c87a45e2d64d3ae7c89401929946
+        sha_aarch64_unknown_linux_gnu=d29bcffeb3f8b0c517b4ce0dd2470926ed5cb0bb29d78c6bdd5f88d76ee14a6a
+        sha_x86_64_apple_darwin=6243464a8389e006b9256ee548bc795638f1a17113c1b6669c0e05ce89fd05c5
+        sha_aarch64_apple_darwin=aa343b2ff78ec2981f17a65140250c5ad6062c74072163f68c5c2686d94763a7
+        sha_x86_64_pc_windows_msvc=26e845cabff12a92911ce960af73a86c8f9b2b2d9072b01dfe5b662acf044fa3
+
+        os=$(uname -s)
+        arch=$(uname -m)
+        case "$os" in
+          Linux)
+            case "$arch" in
+              x86_64) target=x86_64-unknown-linux-gnu ;;
+              aarch64|arm64) target=aarch64-unknown-linux-gnu ;;
+              *) echo "unsupported Linux architecture: $arch" >&2; exit 1 ;;
+            esac
+            archive="cargo-dist-${target}.tar.xz"
+            binary=dist
+            ;;
+          Darwin)
+            case "$arch" in
+              x86_64) target=x86_64-apple-darwin ;;
+              arm64) target=aarch64-apple-darwin ;;
+              *) echo "unsupported macOS architecture: $arch" >&2; exit 1 ;;
+            esac
+            archive="cargo-dist-${target}.tar.xz"
+            binary=dist
+            ;;
+          MINGW*|MSYS*|CYGWIN*|Windows_NT)
+            target=x86_64-pc-windows-msvc
+            archive="cargo-dist-${target}.zip"
+            binary=dist.exe
+            ;;
+          *)
+            echo "unsupported operating system: $os" >&2
+            exit 1
+            ;;
+        esac
+
+        # shellcheck disable=SC2154  # the sha_* names are assigned above.
+        eval "expected=\${sha_${target//-/_}}"
+
+        workdir=$(mktemp -d)
+        url="https://github.com/axodotdev/cargo-dist/releases/download/v${DIST_VERSION}/${archive}"
+        curl --proto '=https' --tlsv1.2 -sSfL -o "${workdir}/${archive}" "$url"
+
+        actual=$(
+          if command -v sha256sum > /dev/null 2>&1; then
+            sha256sum "${workdir}/${archive}"
+          else
+            shasum -a 256 "${workdir}/${archive}"
+          fi
+        )
+        actual=${actual%% *}
+        if [ "$actual" != "$expected" ]; then
+          echo "checksum mismatch for ${archive}" >&2
+          echo "  expected ${expected}" >&2
+          echo "  actual   ${actual}" >&2
+          exit 1
+        fi
+
+        # bsdtar on macOS and Windows and GNU tar on Linux both read the
+        # archive format published for their own platform.
+        tar -xf "${workdir}/${archive}" -C "$workdir"
+        found=$(find "$workdir" -type f -name "$binary" -print | head -n 1)
+        if [ -z "$found" ]; then
+          echo "${binary} not found in ${archive}" >&2
+          exit 1
+        fi
+
+        # dist's own installer installs into CARGO_HOME, and the generated
+        # `plan` job caches ~/.cargo/bin/dist from there.
+        install -d "${HOME}/.cargo/bin"
+        install -m 0755 "$found" "${HOME}/.cargo/bin/${binary}"
+        rm -rf "$workdir"
+
+        echo "${HOME}/.cargo/bin" >> "$GITHUB_PATH"
+        "${HOME}/.cargo/bin/${binary}" --version

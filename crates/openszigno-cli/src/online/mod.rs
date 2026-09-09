@@ -88,7 +88,10 @@ use std::time::Duration;
 
 use openszigno_verify::{Check, CheckCode, MAX_REVOCATION_ITEM_BYTES};
 
-use destination::{Refusal, host_of, permitted, resolve, scheme_of};
+use destination::{
+    REFUSED_PLAINTEXT_CREDENTIALS, REFUSED_REDIRECT_DOWNGRADE, Refusal, host_of, loopback_only,
+    permitted, resolve, scheme_of,
+};
 pub use gaps::{EligibleCertificate, Fetched, GapRequest};
 use pinned::{PinnedResolver, SharedResolver};
 
@@ -174,6 +177,20 @@ pub struct Post<'a> {
     /// place this tool ever puts one: never in a URL, never in a body, never in
     /// a log line and never in the JSON envelope.
     authorization: Option<&'a str>,
+    /// Whether the *body* is credential material, as the caller sees it. A CSC
+    /// `credentials/authorize` body carries the PIN and the one-time password
+    /// that authorise a signature, which are secrets the header rule knows
+    /// nothing about, so the caller says so here and the transport applies the
+    /// same rule to both.
+    sensitive: bool,
+}
+
+impl Post<'_> {
+    /// Whether this request carries anything that must not cross a plaintext
+    /// hop: a bearer token in the header, or a body the caller flagged.
+    fn carries_credentials(&self) -> bool {
+        self.authorization.is_some() || self.sensitive
+    }
 }
 
 /// The transport, configured once so that every fetch in a run is bounded the
@@ -256,6 +273,7 @@ impl Fetcher {
                 accept,
                 bytes: body,
                 authorization: None,
+                sensitive: false,
             }),
             limit,
         )
@@ -272,13 +290,19 @@ impl Fetcher {
     /// body naming it and the caller has to read that body to say why the run
     /// stopped. Everything else — the destination policy, the pinned
     /// addresses, the timeouts, the redirect rules and the size cap — is the
-    /// same transport `verify --online` goes through.
+    /// same transport `verify --online` goes through. `sensitive` says whether
+    /// the body is credential material as well, which a CSC
+    /// `credentials/authorize` body is: it carries the PIN and the one-time
+    /// password. Either way a request that carries credentials has to be
+    /// `https` on every hop, and is refused before a socket is opened
+    /// otherwise.
     pub fn post_json(
         &self,
         url: &str,
         bearer: &str,
         body: &str,
         limit: u64,
+        sensitive: bool,
     ) -> Result<Answer, String> {
         let authorization = format!("Bearer {bearer}");
         self.request(
@@ -288,6 +312,7 @@ impl Fetcher {
                 accept: "application/json",
                 bytes: body.as_bytes(),
                 authorization: Some(&authorization),
+                sensitive,
             }),
             limit,
             true,
@@ -310,6 +335,13 @@ impl Fetcher {
 
     /// The fetch itself. `any_status` says whether a non-`200` answer is a
     /// failure class or a body the caller wants to read.
+    ///
+    /// Every hop is vetted before it is contacted, and the order is the point:
+    /// the destination policy, then the credential-scheme rule, then the
+    /// address pin, and only then a request built with its `Authorization`
+    /// header. A target that failed any of those checks is never sent the
+    /// header, because the header is not attached until the target has passed
+    /// all of them.
     fn request(
         &self,
         url: &str,
@@ -318,8 +350,24 @@ impl Fetcher {
         any_status: bool,
     ) -> Result<(u16, Vec<u8>), FailureClass> {
         let origin = host_of(url).ok_or(FailureClass::Invalid)?;
+        let credentials = body.is_some_and(|post| post.carries_credentials());
         let mut current = url.to_owned();
         for _ in 0..=MAX_REDIRECTS {
+            // A request that carries credentials needs TLS on *this* hop, the
+            // first one included. A revocation fetch does not: a CRL is public
+            // and is signature-checked either way. The one exception is a
+            // loopback service under `--online-allow-private`, which is what
+            // this project's own test servers are and where the bytes never
+            // leave the machine — and even that is granted on the *vetted*
+            // addresses below, not on the host text. Without the flag the
+            // refusal comes first, so a plaintext credential URL is not even
+            // looked up.
+            let insecure_credentials = credentials && scheme_of(&current) != Some("https");
+            if insecure_credentials && !self.allow_private {
+                return Err(FailureClass::DestinationRefused(
+                    REFUSED_PLAINTEXT_CREDENTIALS,
+                ));
+            }
             // The destination policy is applied to every URL actually
             // contacted, the redirect targets included: a redirect stays on
             // the host the certificate named, but "the same name" and "the
@@ -329,54 +377,23 @@ impl Fetcher {
                     Refusal::Refused(reason) => FailureClass::DestinationRefused(reason),
                     Refusal::Unresolvable => FailureClass::Transport,
                 })?;
+            if insecure_credentials && !loopback_only(&vetted) {
+                return Err(FailureClass::DestinationRefused(
+                    REFUSED_PLAINTEXT_CREDENTIALS,
+                ));
+            }
             // The approval is made binding here: these addresses, and only
             // these, are what the agent may open a socket to for this hop. The
             // URL is passed on unchanged, so the `Host` header and the TLS
             // host-name verification still use the name the certificate
             // published.
             self.resolver.pin(&vetted);
-            let response = match body {
-                // The body is passed as a slice, which `ureq` sends with a
-                // known length: an explicit `Content-Length` and no chunked
-                // transfer encoding. That matters beyond tidiness — a
-                // responder that does not implement chunked requests answers a
-                // chunked `POST` with a `400`, and a request whose end the
-                // peer has to infer is the shape that behaves differently on
-                // different platforms. RFC 6960 Appendix A.1 describes exactly
-                // this: a `POST` of the DER request with its content type.
-                Some(post) => {
-                    let mut request = self
-                        .agent
-                        .post(&current)
-                        .header("content-type", post.media_type)
-                        .header("accept", post.accept)
-                        .header("content-length", post.bytes.len().to_string());
-                    if let Some(value) = post.authorization {
-                        request = request.header("authorization", value);
-                    }
-                    request.send(post.bytes)
-                }
-                None => self.agent.get(&current).call(),
-            };
-            let mut response = response.map_err(classify_transport)?;
+            let mut response = self
+                .send(&current, body.as_ref())
+                .map_err(classify_transport)?;
             let status = response.status().as_u16();
             if (300..400).contains(&status) {
-                let location = response
-                    .headers()
-                    .get("location")
-                    .and_then(|value| value.to_str().ok())
-                    .ok_or(FailureClass::Redirect)?;
-                let next = resolve(&current, location).ok_or(FailureClass::Redirect)?;
-                // A redirect across hosts is refused rather than followed: the
-                // authority for this URL is the certificate, and the
-                // certificate named one host.
-                if host_of(&next).as_deref() != Some(origin.as_str()) {
-                    return Err(FailureClass::Redirect);
-                }
-                if !matches!(scheme_of(&next), Some("http" | "https")) {
-                    return Err(FailureClass::Redirect);
-                }
-                current = next;
+                current = self.next_hop(&current, &response, &origin)?;
                 continue;
             }
             if status != 200 && !any_status {
@@ -397,6 +414,88 @@ impl Fetcher {
         }
         Err(FailureClass::Redirect)
     }
+
+    /// Issue one hop that has already passed every check, and attach the
+    /// `Authorization` header here, at the last possible moment.
+    ///
+    /// This is the only place in the binary that puts a bearer token on the
+    /// wire, and it is reached only from the vetted branch of [`Fetcher::request`].
+    fn send(
+        &self,
+        url: &str,
+        body: Option<&Post<'_>>,
+    ) -> Result<ureq::http::Response<ureq::Body>, ureq::Error> {
+        // The body is passed as a slice, which `ureq` sends with a known
+        // length: an explicit `Content-Length` and no chunked transfer
+        // encoding. That matters beyond tidiness — a responder that does not
+        // implement chunked requests answers a chunked `POST` with a `400`,
+        // and a request whose end the peer has to infer is the shape that
+        // behaves differently on different platforms. RFC 6960 Appendix A.1
+        // describes exactly this: a `POST` of the DER request with its content
+        // type.
+        let Some(post) = body else {
+            return self.agent.get(url).call();
+        };
+        let mut request = self
+            .agent
+            .post(url)
+            .header("content-type", post.media_type)
+            .header("accept", post.accept)
+            .header("content-length", post.bytes.len().to_string());
+        if let Some(value) = post.authorization {
+            request = request.header("authorization", value);
+        }
+        request.send(post.bytes)
+    }
+
+    /// Where a `3xx` answer points, once it has passed the redirect rules.
+    ///
+    /// A redirect is the peer's choice, so it is bounded twice over: it may
+    /// not leave the host the certificate named, and it may not move an
+    /// `https` exchange onto `http`. The downgrade refusal happens here,
+    /// before the loop comes round and opens a socket, so nothing is ever
+    /// contacted at the downgraded target.
+    fn next_hop(
+        &self,
+        current: &str,
+        response: &ureq::http::Response<ureq::Body>,
+        origin: &str,
+    ) -> Result<String, FailureClass> {
+        let location = response
+            .headers()
+            .get("location")
+            .and_then(|value| value.to_str().ok())
+            .ok_or(FailureClass::Redirect)?;
+        redirect_target(current, location, origin)
+    }
+}
+
+/// The redirect rules themselves, as one decision over three strings.
+///
+/// It is a free function, and pure, because these are the rules a redirect has
+/// to satisfy *before* the loop comes round: nothing here has a socket, so
+/// there is no shape of this code in which a refused target is contacted
+/// first.
+fn redirect_target(current: &str, location: &str, origin: &str) -> Result<String, FailureClass> {
+    let next = resolve(current, location).ok_or(FailureClass::Redirect)?;
+    // A redirect across hosts is refused rather than followed: the authority
+    // for this URL is the certificate, and the certificate named one host.
+    if host_of(&next).as_deref() != Some(origin) {
+        return Err(FailureClass::Redirect);
+    }
+    let next_scheme = scheme_of(&next);
+    if !matches!(next_scheme, Some("http" | "https")) {
+        return Err(FailureClass::Redirect);
+    }
+    // The downgrade. Same host, same certificate, and yet the next request
+    // would go out in the clear, carrying whatever the first one carried: a
+    // bearer token, a PIN, a one-time password. Refused for every request
+    // kind, because a plaintext hop is not something a peer gets to choose for
+    // this tool even when there is nothing secret on this particular one.
+    if scheme_of(current) == Some("https") && next_scheme == Some("http") {
+        return Err(FailureClass::DestinationRefused(REFUSED_REDIRECT_DOWNGRADE));
+    }
+    Ok(next)
 }
 
 fn classify_transport(error: ureq::Error) -> FailureClass {
@@ -586,49 +685,5 @@ fn hex(bytes: &[u8]) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_failure_names_the_url_and_its_class() {
-        let check = failure("http://crl.example/ca.crl", FailureClass::Timeout);
-        assert_eq!(check.code, CheckCode::OnlineFetchFailed);
-        // Informational: whether the certificate ended up covered is the
-        // verifier's answer to give, on the chain that needed the data.
-        assert_eq!(check.status, openszigno_verify::CheckStatus::Info);
-        assert!(check.message.contains("http://crl.example/ca.crl"));
-        assert!(check.message.contains("timeout"));
-        let check = failure("http://crl.example/ca.crl", FailureClass::HttpStatus(404));
-        assert!(check.message.contains("http status 404"));
-    }
-
-    /// The class is a stable token a caller can match on, and the reason after
-    /// it is what tells them which rule refused the destination.
-    #[test]
-    fn a_refused_destination_names_the_class_and_the_rule() {
-        let check = failure(
-            "http://127.0.0.1/ca.crl",
-            FailureClass::DestinationRefused("the host is a loopback address"),
-        );
-        assert_eq!(check.code, CheckCode::OnlineFetchFailed);
-        assert_eq!(check.status, openszigno_verify::CheckStatus::Info);
-        assert!(check.message.contains("destination_refused"));
-        assert!(check.message.contains("loopback"));
-    }
-
-    /// The size cap the fetcher enforces is the verifier's own, so nothing
-    /// this fetches can be too large for the code that has to judge it.
-    #[test]
-    fn the_fetch_cap_is_the_verifiers_own_limit() {
-        assert_eq!(MAX_CRL_BYTES, MAX_REVOCATION_ITEM_BYTES as u64);
-        let check = failure("http://crl.example/ca.crl", FailureClass::TooLarge(16));
-        assert!(check.message.contains("too large"));
-        assert!(check.message.contains("16-byte"));
-    }
-
-    #[test]
-    fn a_control_character_never_reaches_a_message() {
-        let check = failure("http://crl.example/\u{7}a.crl", FailureClass::Invalid);
-        assert!(!check.message.contains('\u{7}'));
-    }
-}
+#[path = "mod_tests.rs"]
+mod tests;

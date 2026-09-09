@@ -43,6 +43,12 @@
 //! no signature this module writes ever contains another: a document
 //! signature's references name its own document's profile, that document's
 //! payload object, and two objects inside itself.
+//!
+//! A placeholder is only ever replaced inside the `ds:Signature` element that
+//! wrote it, over the byte range the parsed working document reports for that
+//! element. Nothing outside it is touched, whatever the dossier's own text
+//! happens to say: a document whose title reads like a placeholder is a
+//! document, not an instruction.
 
 pub mod csc;
 mod dsig;
@@ -198,26 +204,21 @@ pub fn sign(
 /// about its own bytes. Re-encoding changes no signature already in the file:
 /// canonical XML is UTF-8 whatever the source encoding was, so every existing
 /// digest is computed over exactly the same octets as before.
+///
+/// The declaration is read by the reader's own parser, so every spelling the
+/// reader accepts is one this rewrites: either quote character, and any
+/// whitespace around the `=`. Only the label's own bytes are replaced; the
+/// rest of the document, declaration included, is left exactly as it was.
 fn normalise_declaration(text: &str) -> String {
-    let Some(end) = text.find("?>") else {
+    let Some(declaration) = openszigno_core::declared_encoding(text.as_bytes()) else {
         return text.to_owned();
     };
-    let declaration = &text[..end];
-    if !declaration.starts_with("<?xml") {
+    if text[declaration.start..declaration.end].eq_ignore_ascii_case("UTF-8") {
         return text.to_owned();
     }
-    let Some(start) = declaration.find("encoding=\"") else {
-        return text.to_owned();
-    };
-    let value_start = start + "encoding=\"".len();
-    let Some(value_end) = declaration[value_start..].find('"') else {
-        return text.to_owned();
-    };
-    let value_end = value_start + value_end;
-    if declaration[value_start..value_end].eq_ignore_ascii_case("UTF-8") {
-        return text.to_owned();
-    }
-    format!("{}UTF-8{}", &text[..value_start], &text[value_end..])
+    let mut text = text.to_owned();
+    text.replace_range(declaration.start..declaration.end, "UTF-8");
+    text
 }
 
 /// The documents to sign, in source order.
@@ -505,25 +506,38 @@ fn insert_signatures(text: String, plans: &[Plan]) -> String {
     text
 }
 
+/// One signature's byte range in the working text, and the values to fill in
+/// inside it.
+struct FragmentEdit {
+    range: std::ops::Range<usize>,
+    /// Placeholder, and what replaces it.
+    values: Vec<(String, String)>,
+}
+
 /// Pass one: every reference digest, over the document the signatures now sit
 /// in.
 fn fill_digests(text: &str, plans: &[Plan]) -> Result<String, SignError> {
     let working = Working::parse(text)?;
-    let filled = working.with_tree(|lookup| {
-        let mut replacements = Vec::new();
+    let edits = working.with_tree(|lookup| {
+        let mut edits = Vec::new();
         for plan in plans {
+            let mut values = Vec::new();
             for reference in &plan.references {
                 let target = reference.uri.trim_start_matches('#');
                 let octets = lookup.canonical_by_id(target)?;
-                replacements.push((
+                values.push((
                     digest_placeholder(&reference.id),
                     dsig::digest_value(&octets),
                 ));
             }
+            edits.push(FragmentEdit {
+                range: lookup.signature_range(&plan.id)?,
+                values,
+            });
         }
-        Ok(replacements)
+        Ok(edits)
     })?;
-    Ok(replace_all(working.text(), &filled))
+    Ok(fill_in(working.text(), edits))
 }
 
 /// Pass two: every `ds:SignatureValue`, over the canonicalized
@@ -537,11 +551,17 @@ fn fill_signature_values(
     let octets = working.with_tree(|lookup| {
         plans
             .iter()
-            .map(|plan| Ok((plan.id.clone(), lookup.canonical_signed_info(&plan.id)?)))
+            .map(|plan| {
+                Ok((
+                    plan.id.clone(),
+                    lookup.canonical_signed_info(&plan.id)?,
+                    lookup.signature_range(&plan.id)?,
+                ))
+            })
             .collect::<Result<Vec<_>, SignError>>()
     })?;
-    let mut replacements = Vec::new();
-    for (id, octets) in octets {
+    let mut edits = Vec::new();
+    for (id, octets, range) in octets {
         // A hash-only backend never sees the octets, only their digest; a
         // local key signs the octets themselves. The signer decides which.
         let signature = if signer.prefers_digest() {
@@ -549,9 +569,12 @@ fn fill_signature_values(
         } else {
             signer.sign_bytes(&octets)?
         };
-        replacements.push((value_placeholder(&id), dsig::base64(&signature)));
+        edits.push(FragmentEdit {
+            range,
+            values: vec![(value_placeholder(&id), dsig::base64(&signature))],
+        });
     }
-    Ok(replace_all(working.text(), &replacements))
+    Ok(fill_in(working.text(), edits))
 }
 
 /// Pass three: every `xades:SignatureTimeStamp`, over the canonicalized
@@ -565,11 +588,17 @@ fn fill_timestamps(
     let octets = working.with_tree(|lookup| {
         plans
             .iter()
-            .map(|plan| Ok((plan.id.clone(), lookup.canonical_signature_value(&plan.id)?)))
+            .map(|plan| {
+                Ok((
+                    plan.id.clone(),
+                    lookup.canonical_signature_value(&plan.id)?,
+                    lookup.signature_range(&plan.id)?,
+                ))
+            })
             .collect::<Result<Vec<_>, SignError>>()
     })?;
-    let mut replacements = Vec::new();
-    for (id, octets) in octets {
+    let mut edits = Vec::new();
+    for (id, octets, range) in octets {
         let response = timestamp(&octets).map_err(|reason| {
             SignError::new(
                 SignErrorCode::TsaFailed,
@@ -577,16 +606,35 @@ fn fill_timestamps(
             )
         })?;
         let token = tsa::timestamp_token(&response, &octets)?;
-        replacements.push((timestamp_placeholder(&id), dsig::base64(&token)));
+        edits.push(FragmentEdit {
+            range,
+            values: vec![(timestamp_placeholder(&id), dsig::base64(&token))],
+        });
     }
-    Ok(replace_all(working.text(), &replacements))
+    Ok(fill_in(working.text(), edits))
 }
 
-/// Replace each placeholder with its value, once.
-fn replace_all(text: &str, replacements: &[(String, String)]) -> String {
+/// Replace each placeholder with its value, inside the signature that wrote it
+/// and nowhere else.
+///
+/// A dossier may hold text that reads exactly like a placeholder — a document
+/// title, a payload, an attribute — and a replacement over the whole text
+/// would rewrite it too, changing bytes a reference digest had just been
+/// computed over. The result was a run that reported success and a signature
+/// the verifier then reported `reference_digest_mismatch` for.
+///
+/// The ranges are the signature elements' own, taken from the parsed working
+/// document, and no signature this module writes ever contains another, so
+/// they never overlap. Applying them last first keeps the earlier ones valid.
+fn fill_in(text: &str, mut edits: Vec<FragmentEdit>) -> String {
+    edits.sort_by_key(|edit| std::cmp::Reverse(edit.range.start));
     let mut text = text.to_owned();
-    for (placeholder, value) in replacements {
-        text = text.replace(placeholder.as_str(), value);
+    for edit in edits {
+        let mut fragment = text[edit.range.clone()].to_owned();
+        for (placeholder, value) in &edit.values {
+            fragment = fragment.replace(placeholder.as_str(), value);
+        }
+        text.replace_range(edit.range, &fragment);
     }
     text
 }
@@ -609,6 +657,80 @@ mod tests {
             normalise_declaration("<?xml version=\"1.0\"?><a/>"),
             "<?xml version=\"1.0\"?><a/>"
         );
+    }
+
+    /// Every spelling the reader accepts is one the writer rewrites. A
+    /// declaration the writer did not recognise used to leave ISO-8859-2
+    /// standing over text that had already been decoded to UTF-8.
+    #[test]
+    fn every_declaration_the_reader_accepts_is_rewritten() {
+        for declaration in [
+            "<?xml version=\"1.0\" encoding=\"ISO-8859-2\"?>",
+            "<?xml version='1.0' encoding='ISO-8859-2'?>",
+            "<?xml version=\"1.0\" encoding = \"ISO-8859-2\"?>",
+            "<?xml version='1.0' encoding\t=\n'iso-8859-2'?>",
+            "<?xml version='1.0' encoding='ISO_8859-2'?>",
+        ] {
+            let rewritten = normalise_declaration(&format!("{declaration}<a/>"));
+            assert!(
+                rewritten.contains("UTF-8") && !rewritten.to_ascii_lowercase().contains("8859"),
+                "{declaration} was left as {rewritten}"
+            );
+            assert!(rewritten.ends_with("<a/>"), "{rewritten}");
+        }
+    }
+
+    /// A label that already means UTF-8 is left alone whatever its case, and
+    /// nothing but the label is ever touched.
+    #[test]
+    fn a_utf8_declaration_is_left_exactly_as_written() {
+        for declaration in [
+            "<?xml version='1.0' encoding='utf-8'?>",
+            "<?xml version=\"1.0\" encoding = \"UTF-8\"?>",
+        ] {
+            let text = format!("{declaration}<a>encoding=\"ISO-8859-2\"</a>");
+            assert_eq!(normalise_declaration(&text), text);
+        }
+    }
+
+    /// Only the bytes inside a fragment's own range are rewritten. The same
+    /// placeholder text outside it is content, and content is never touched.
+    #[test]
+    fn a_placeholder_outside_the_fragment_is_left_alone() {
+        let text = "<a>@@p@@</a><sig>@@p@@</sig><b>@@p@@</b>";
+        let start = text.find("<sig>").expect("the fragment is there");
+        let end = text.find("<b>").expect("the fragment ends there");
+        let filled = fill_in(
+            text,
+            vec![FragmentEdit {
+                range: start..end,
+                values: vec![("@@p@@".to_owned(), "value".to_owned())],
+            }],
+        );
+        assert_eq!(filled, "<a>@@p@@</a><sig>value</sig><b>@@p@@</b>");
+    }
+
+    /// Several fragments are filled in one pass, and each one's range still
+    /// names its own bytes after the ones after it have changed length.
+    #[test]
+    fn every_fragment_is_filled_whatever_the_others_did_to_the_length() {
+        let text = "<x>@@p@@</x><y>@@p@@</y>";
+        let first = text.find("<x>").expect("the first fragment is there");
+        let second = text.find("<y>").expect("the second fragment is there");
+        let filled = fill_in(
+            text,
+            vec![
+                FragmentEdit {
+                    range: first..second,
+                    values: vec![("@@p@@".to_owned(), "a much longer value".to_owned())],
+                },
+                FragmentEdit {
+                    range: second..text.len(),
+                    values: vec![("@@p@@".to_owned(), "b".to_owned())],
+                },
+            ],
+        );
+        assert_eq!(filled, "<x>a much longer value</x><y>b</y>");
     }
 
     #[test]

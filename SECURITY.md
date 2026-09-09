@@ -89,7 +89,8 @@ only a digest is sent to it.
   command ever transmits key material, and `sign --csc` transmits a digest
   rather than the data it was taken over.
 - **Read-only and bounded.** Key, certificate, and passphrase files are opened
-  read-only and capped at 1 MiB each.
+  read-only and capped at 1 MiB each, through the one bounded reader described
+  under "How a file the caller named is read" below.
 - **Failures say nothing useful to an attacker.** A failed decryption is the
   fixed message `decryption failed`, which does not distinguish a failed RSA
   unwrap from a bad content-key length from bad padding — that distinction is
@@ -190,6 +191,56 @@ nothing about authenticity in any case, which is the point made under
 "Decryption is not verification either" above; verify a signature if you need
 to know that content is genuine.
 
+## How a file the caller named is read
+
+Every file this tool reads because a caller named it goes through one bounded
+reader: the dossier itself, the private key, its certificate, the passphrase
+file, the `--csc` configuration and the secrets it names, and each entry of a
+`--trust-store` and a `--revocation-store`.
+
+- **Opened once, judged once.** The file is opened, and its type and size come
+  from an `fstat` on that one open descriptor. Nothing is decided on metadata
+  read from the path separately, because a path can be replaced and a file can
+  be grown between such a check and the read that follows it, which would let
+  a check pass on one file while another was read.
+- **Symlinks are refused rather than followed**, everywhere except the dossier
+  path itself, which is the caller's own and has always been readable through
+  a link. The refusal is the open: `O_NOFOLLOW` on Unix and
+  `FILE_FLAG_OPEN_REPARSE_POINT` on Windows, so it is the kernel that declines,
+  not a check something could race. A symlink standing in a trust store or a
+  revocation store is skipped, exactly as a subdirectory is.
+- **The cap applies to the bytes that arrive.** Reading stops one byte past the
+  limit and the file is refused at that point, so a file whose reported length
+  is not the truth is bounded all the same. The caps are 64 MiB for a dossier,
+  1 MiB for key material and the `--csc` configuration, 4 MiB for a trust-store
+  entry or a trusted list, and the verifier's own 16 MiB for one CRL or OCSP
+  response. A file of exactly the cap is read; one byte more is refused.
+- **A refusal never names the file**, because the path may be private. It names
+  the kind of file and, where an operator needs it to act, the limit.
+
+## Text a remote service supplied
+
+A Cloud Signature Consortium service chooses the credential identifiers it
+lists, the `specs` version it reports, the key algorithms it publishes, and the
+`error` string it refuses with. None of that is typed by the operator, and all
+of it ends up in a message, in the JSON envelope, or on a terminal, which reads
+more than text: an unfiltered string can move the cursor, repaint a line, or
+reverse the reading order of what is printed around it.
+
+Every such value is sanitised before it reaches any of those. Unicode `Cc`
+(the C0 and C1 control ranges, where `ESC` and therefore every ANSI sequence
+lives) and `Cf` (format characters, where the bidirectional overrides and the
+zero-width joiners live) are dropped rather than escaped, and the value is
+bounded, ending in `...` inside its cap when it was cut short. A list of such
+values is bounded in length too. The same filter bounds the element names the
+XMLDSig structure pass reports out of an untrusted signature. What a service
+sends is still shown, so a refusal stays actionable; what a terminal would act
+on is not.
+
+`error_description` is a separate matter and is never printed at all: it is
+free text a provider writes, and this tool has no way to know a provider has
+not put a token, a credential identifier or a user's name in it.
+
 ## Network exposure
 
 **openSzigno opens a socket only when you ask it to, with one of three
@@ -234,7 +285,25 @@ attacker-supplied until something the operator configured vouches for it:
   the IPv4 address it carries. The host's *resolved* addresses are checked
   against the same list before connecting, so a public name that resolves
   inwards is refused too. Refusals are reported as `online_fetch_failed`
-  (`info`) with the class `destination_refused`, and nothing is contacted.
+  (`info`) with the class `destination_refused` and the rule that refused the
+  destination, and nothing is contacted.
+- **No downgrade on a redirect** (`redirect_downgrade`). A redirect that leaves
+  `https` for `http` is refused for every request kind, even on the host the
+  certificate named. A redirect is the peer's choice, and a peer does not get
+  to move an exchange that started under TLS into the clear, carrying whatever
+  the first request carried. The refusal is decided before the next hop is
+  opened, so nothing is contacted at the downgraded target.
+- **Credentials require `https` on every hop** (`credentials_require_https`).
+  A request carrying a bearer token in the `Authorization` header, or a body
+  the caller marked sensitive, is refused unless the URL is `https`, the first
+  hop included. `--online-allow-private` waives it only for a loopback service,
+  and only on the addresses the policy approved. A revocation fetch carries no
+  credentials and is unaffected: a CRL is public and is signature-checked
+  either way.
+- **The `Authorization` header goes on last.** It is attached only after the
+  target has passed the destination policy, the credential rule and the address
+  pin, in the one place in this binary that puts a bearer token on the wire, so
+  a target that failed any check is never sent one.
 - **The check is bound to the connection.** The addresses the policy approved
   are pinned as the resolution for that host and port, so the socket goes where
   the policy looked; a name that was not vetted for the fetch in hand does not
@@ -288,9 +357,14 @@ authorisation time rather than a placeholder.
 
 The remaining rules are the ones `--online` already imposes: the destination
 policy, the pinned address resolution, 5 s to connect and 20 s per request, at
-most three redirects and never to another host, no proxy from the environment,
-and a 256 KiB cap on a response. `https` is required unless
-`--online-allow-private` is given, because the token is in a header.
+most three redirects, never to another host and never from `https` to `http`,
+no proxy from the environment, and a 256 KiB cap on a response. `https` is
+required on every hop, the first included, because the token is in a header
+and a `credentials/authorize` body carries the PIN and the one-time password
+as well; every CSC request is marked sensitive for that reason. The one
+exemption is a loopback service under `--online-allow-private`. A refusal
+reaches the caller as `csc_unreachable` naming the rule, and nothing is
+contacted.
 
 What comes back is not trusted on the strength of having come back. The
 signature the service returns is verified locally, against the certificate the
@@ -319,6 +393,12 @@ openSzigno aims to guarantee that a hostile input cannot:
   title, a ZIP member path, an absolute path, or a symlink or reparse point in
   the output path;
 - overwrite, truncate, or replace an existing file;
+- have a file read past its cap, or a symlink read as key, trust, or
+  revocation material, by replacing or growing that file between a check and
+  the read;
+- put terminal control sequences or bidirectional overrides into human output,
+  an error message, or the JSON envelope, whether through a dossier or through
+  a remote signing service;
 - leave a partial extraction behind after a mid-run failure;
 - smuggle content into the machine-readable channel, since JSON mode emits
   exactly one object on stdout and all diagnostics go to stderr;
@@ -327,9 +407,14 @@ openSzigno aims to guarantee that a hostile input cannot:
 - learn anything about a decryption key from how a decryption failed, or cause
   key or passphrase material to reach stdout, stderr, the JSON envelope, or an
   extracted file;
+- put a bearer token, a PIN or a one-time password on a plaintext hop, whether
+  by naming an `http` service or by answering a request with a redirect that
+  downgrades one, or make openSzigno send an `Authorization` header to a
+  destination any check refused;
 - cause openSzigno to make a network connection without `--online`, or, with
   it, to any destination other than a URL published inside a certificate that
-  reaches a configured trust anchor — including through a redirect, an
+  reaches a configured trust anchor — including through a redirect, a redirect
+  that leaves `https` for `http` on the same host, an
   environment proxy, a scheme the certificate did not name, userinfo in a URL,
   a name that resolves to a loopback, private, link-local, unique-local,
   multicast or cloud-metadata address while `--online-allow-private` is absent,

@@ -906,14 +906,14 @@ fn a_missing_input_file_is_an_io_error() {
 }
 
 #[test]
-fn a_directory_as_input_is_an_io_error() {
+fn a_directory_as_input_is_an_io_error_with_no_byte_count() {
     let directory = scratch();
     let output = run(&["list", directory.path().to_str().unwrap(), "--json"]);
     assert_eq!(output.status.code(), Some(3));
     let response = parse_json(&output);
     assert_eq!(response["errors"][0]["code"], "io_error");
     assert_eq!(response["input"]["format"], Value::Null);
-    assert!(response["input"]["bytes"].as_u64().is_some());
+    assert_eq!(response["input"]["bytes"], Value::Null);
 }
 
 #[cfg(unix)]
