@@ -184,8 +184,13 @@ fn title_error(index: usize, rejection: TitleRejection) -> Error {
 /// Returns the Base64 text and the transform chain, in the forward order the
 /// profile declares (`zip? -> encrypt? -> base64`), which is the order the
 /// specification fixes and the reader reverses.
+/// `title` is the canonical title, the one written to `es:Title`, because it
+/// is also the name the ZIP member carries: the raw title would put a
+/// different string in the archive than in the profile, and `extract` names
+/// the file from the archive member.
 fn encode(
     index: usize,
+    title: &str,
     document: &DocumentSpec,
     encryption: Option<&Encryption>,
     limits: &Limits,
@@ -202,7 +207,7 @@ fn encode(
     let mut transforms = Vec::with_capacity(3);
     let mut payload = if document.compress {
         transforms.push("zip".to_owned());
-        archive::compress(&document.title, &document.bytes, limits)?
+        archive::compress(title, &document.bytes, limits)?
     } else {
         document.bytes.clone()
     };
@@ -267,7 +272,8 @@ pub fn build(spec: &DossierSpec, limits: &Limits) -> Result<BuiltDossier, Error>
                 ),
             ));
         }
-        let (payload, transforms) = encode(index, document, spec.encryption.as_ref(), limits)?;
+        let (payload, transforms) =
+            encode(index, &title, document, spec.encryption.as_ref(), limits)?;
         payloads.push(payload);
         documents.push(BuiltDocument {
             index,

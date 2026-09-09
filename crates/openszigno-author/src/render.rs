@@ -26,7 +26,10 @@ pub struct RenderedDocument<'a> {
 
 /// Escape XML text content. The title rules already refuse every control
 /// character, so only the markup delimiters remain.
-fn text(value: &str) -> String {
+///
+/// The signer shares this escaper, through `sign::names`, so that one rule
+/// covers every string this crate writes into XML.
+pub(crate) fn text(value: &str) -> String {
     let mut escaped = String::with_capacity(value.len());
     for character in value.chars() {
         match character {
@@ -40,7 +43,9 @@ fn text(value: &str) -> String {
 }
 
 /// Escape an attribute value: text escaping plus both quote characters.
-fn attribute(value: &str) -> String {
+///
+/// The signer shares this escaper too; see [`text`].
+pub(crate) fn attribute(value: &str) -> String {
     let mut escaped = String::with_capacity(value.len());
     for character in value.chars() {
         match character {

@@ -950,7 +950,7 @@ I/O and extraction policy.
 | `invalid_signing_certificate` | author | 4 | `--cert`, `--chain`, `--tsa-cert`, or the certificate inside the key file is not a readable X.509 certificate. |
 | `signing_certificate_required` | author | 4 | `--key` was given with no `--cert` and the key file carries none, so nothing would bind the signature to a certificate. |
 | `signing_key_mismatch` | author | 4 | The certificate's public key is not the signing key's public key. |
-| `document_not_signable` | author | 4 | A selected document has no payload `ds:Object` or no `es:DocumentProfile` with an `Id`, so the mandated reference set cannot be written for it. |
+| `document_not_signable` | author | 4 | A selected document has no payload `ds:Object` or no `es:DocumentProfile` with an `Id`, so the mandated reference set cannot be written for it; or the dossier holds a value a signature would have to quote and cannot: an `Id`/`OBJREF` that is not an XML NCName, a media type outside the token characters, or a namespace URI holding markup, a quote character or a control character. See [Nothing the dossier says decides what is signed](#nothing-the-dossier-says-decides-what-is-signed). |
 | `document_already_signed` | author | 4 | Adding this signature would invalidate one the dossier already carries. See [Signing a dossier that is already signed](#signing-a-dossier-that-is-already-signed). |
 | `tsa_failed` | author, CLI | 5 | The `--tsa` request could not be made, was refused by the destination policy, or the answer was not a granted RFC 3161 response carrying a token over the requested imprint. The message names the reason. |
 | `csc_config_invalid` | CLI, author | 4 | The `--csc` configuration file cannot be used (a missing or empty key, an unknown key, a value outside the accepted TOML subset, a `redirect_uri` that is not a loopback URI, or a plain `http` `base_url` without `--online-allow-private`), or the service it names does not report a CSC API v2 `specs` version or will not sign a data-to-be-signed representation. Nothing is contacted and nothing is written. |
@@ -2974,7 +2974,9 @@ refuse is `unsafe_document_title` here, so a created dossier is always
 extractable.
 
 `--zip` stores every `--document` payload as `zip -> base64`, in a
-one-member archive named after the document. An embedded dossier is always
+one-member archive named with the same canonical title `es:Title` carries,
+trimmed and in NFC, because `extract` names the file it writes from the
+archive member. An embedded dossier is always
 stored as `base64`, and is never encrypted either. A payload that deflates
 better than `max_zip_compression_ratio` is refused as `zip_ratio_limit`,
 because the reader would refuse to expand it.
@@ -3227,8 +3229,14 @@ and a token over the wrong one is a token nobody recomputes.
 | `xades:SignedProperties` | `signed-props-<signature id>`. |
 | each `ds:Reference` | `ref-<signature id>-<what it covers>`. |
 
-No identifier is random, and one already in use in the dossier is a refusal
-rather than a collision. Given the same input, key, signing time and flags,
+No identifier is random. One already in use in the dossier is disambiguated
+rather than allowed to collide: the signature's `Id` gains a `-2`, `-3` and so
+on until every identifier the new signature would introduce is free, and every
+identifier derived from it follows (`sig-doc0-2`, `signed-props-sig-doc0-2`,
+`ref-sig-doc0-2-object`). That is what makes co-signing work; see
+[Signing a dossier that is already signed](#signing-a-dossier-that-is-already-signed).
+A dossier that has exhausted 64 variants of one base identifier is
+`document_already_signed`. Given the same input, key, signing time and flags,
 **RSA PKCS#1 v1.5 produces byte-identical output**: the signature is a
 deterministic function of what it signs. RSA-PSS salts its input and ECDSA
 draws a nonce, so those two do not, and `--signing-time` is what pins the one
@@ -3262,6 +3270,30 @@ reported `reference_digest_mismatch` for.
 The ranges never overlap, because no signature this tool writes ever contains
 another, and they are applied last first so that the earlier ones stay valid
 as lengths change.
+
+### Nothing the dossier says decides what is signed
+
+Some of the values in a signature come out of the dossier rather than out of
+this tool: the `Id` and `OBJREF` attributes a `ds:Reference` points at, the
+declared media type an `xades:DataObjectFormat` carries, and the root
+namespace the signature-profile object declares. A dossier is untrusted input,
+and every digest is computed *after* those values are in the document, so a
+value that reached the XML unescaped would let the dossier write the reference
+set and the signed properties rather than describe them, under the operator's
+own key.
+
+Two rules hold, and both are enforced:
+
+- **Refusal.** An `Id` or `OBJREF` that is not an XML
+  [NCName](https://www.w3.org/TR/xml-names/#NT-NCName), a declared media type
+  outside the characters `create` itself allows a media type (both halves
+  non-empty, at most 64 characters, ASCII alphanumerics and `.-+_`), and a
+  namespace URI holding `<`, `>`, `"`, `'`, `&` or a control character are all
+  `document_not_signable`, before anything is rendered. The refusal names the
+  attribute, never its value.
+- **Escaping.** Every remaining interpolation goes through the same attribute
+  and text escapers the unsigned writer uses, so no dossier-derived string can
+  reach signature XML unescaped whatever a later change adds to the rendering.
 
 ### Algorithms
 
@@ -3441,19 +3473,30 @@ and refused with a clear message rather than half-supported.
 A second signature can be added to a dossier that already carries one, and a
 document that already has a signature can be given another: neither
 signature's references reach inside the other, so nothing that verified stops
-verifying.
+verifying. Co-signing a document this tool has already signed works too — the
+identifiers are disambiguated, as
+[Identifiers and determinism](#identifiers-and-determinism) describes, and the
+first signature is not read, not rewritten and not removed.
 
-Two cases are refused with `document_already_signed`, because writing them
+Three cases are refused with `document_already_signed`, because writing them
 would silently break what is already there:
 
 - adding a document signature to a dossier that carries a dossier-level
   signature or a dossier-level `es:TimeStamp`, both of which cover
   `es:Documents` and would stop matching the moment a document changes;
 - adding anything to a dossier carrying a signature with a `URI=""`
-  reference, which covers everything outside itself.
+  reference, which covers everything outside itself;
+- adding a signature to an element an existing `ds:Reference` already
+  resolves to, or to an element inside one. Adding a `ds:Signature` changes
+  the canonical form of its container and of every ancestor of that
+  container, so such a reference would stop matching: an `es:Document` with an
+  `Id` of its own, referenced by `URI="#doc0"`, is the shape this catches.
+  Only the same-document `#id` form is resolved, and a reference this tool
+  cannot resolve may name anything, so it counts as covering rather than
+  being assumed harmless.
 
-Nothing this tool writes falls into either case, so the limitation is about
-dossiers from elsewhere. `sign` never rewrites or removes a signature.
+Nothing this tool writes falls into any of the three, so the limitation is
+about dossiers from elsewhere. `sign` never rewrites or removes a signature.
 
 ### The JSON shape
 

@@ -14,6 +14,7 @@
 //! signature says, which is why it can be filled in after the signature value.
 
 use super::dsig::{PlannedReference, SHA256_URI, base64};
+use super::names::{attribute, text};
 use super::signer::certificate_digest;
 
 /// XAdES 1.3.2, the namespace this build writes.
@@ -54,7 +55,7 @@ pub(crate) fn render_qualifying_properties(plan: &QualifyingPlan<'_>) -> String 
     signed.push_str("<xades:SignedSignatureProperties>");
     signed.push_str(&format!(
         "<xades:SigningTime>{}</xades:SigningTime>",
-        plan.signing_time
+        text(plan.signing_time)
     ));
     // `SigningCertificateV2` with the digest alone. `IssuerSerialV2` is
     // optional in EN 319 132-1 and is deliberately not written: the digest is
@@ -75,10 +76,14 @@ pub(crate) fn render_qualifying_properties(plan: &QualifyingPlan<'_>) -> String 
         .iter()
         .filter_map(|reference| {
             let mime_type = reference.mime_type.as_ref()?;
+            // The media type is the dossier's own string. It is checked
+            // before a plan is built and escaped again here, so nothing it
+            // holds can add an element to the properties being signed.
             Some(format!(
                 "<xades:DataObjectFormat ObjectReference=\"#{}\">\
-<xades:MimeType>{mime_type}</xades:MimeType></xades:DataObjectFormat>",
-                reference.id
+<xades:MimeType>{}</xades:MimeType></xades:DataObjectFormat>",
+                attribute(&reference.id),
+                text(mime_type)
             ))
         })
         .collect();
@@ -122,7 +127,9 @@ pub(crate) fn render_qualifying_properties(plan: &QualifyingPlan<'_>) -> String 
 <xades:QualifyingProperties xmlns:xades=\"{XADES_NS}\" Target=\"#{}\">\
 <xades:SignedProperties Id=\"{}\">{signed}</xades:SignedProperties>{unsigned}\
 </xades:QualifyingProperties></ds:Object>",
-        plan.signature_id, plan.signature_id, plan.signed_properties_id
+        attribute(plan.signature_id),
+        attribute(plan.signature_id),
+        attribute(plan.signed_properties_id)
     )
 }
 
@@ -134,6 +141,10 @@ pub(crate) fn render_qualifying_properties(plan: &QualifyingPlan<'_>) -> String 
 /// signature, never about the signer: no name, no identifier, nothing derived
 /// from the key.
 pub(crate) fn render_signature_profile(signature_id: &str, namespace: &str) -> String {
+    // The namespace is the dossier's root namespace, so it is checked
+    // before a plan is built and escaped again here.
+    let signature_id = attribute(signature_id);
+    let namespace = attribute(namespace);
     format!(
         "<ds:Object Id=\"profile-{signature_id}\">\
 <es:SignatureProfile xmlns:es=\"{namespace}\" Id=\"sigprof-{signature_id}\">\
