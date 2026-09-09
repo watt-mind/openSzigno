@@ -87,6 +87,10 @@ impl TlService {
 
 /// How one synthetic trusted list should look.
 pub struct TrustListSpec {
+    /// The `TSLVersionIdentifier` the list states. `6` is TLv6, mandatory in
+    /// the EU from 2026-04-29; `5` is the TLv5 every member state published
+    /// until 2026-04-28. Both must load.
+    pub version: u32,
     pub territory: String,
     pub sequence_number: u32,
     pub issue_date: String,
@@ -100,11 +104,16 @@ pub struct TrustListSpec {
     pub pointers: Vec<Vec<u8>>,
     /// Corrupt one byte of the list after signing it.
     pub tamper: bool,
+    /// Give the list element an `Id` and have the signature reference it by
+    /// `#Id` rather than with the empty URI. TS 119 612 annex B.1.0 rule 2
+    /// allows either, so both must be accepted as covering the whole list.
+    pub reference_list_by_id: bool,
 }
 
 impl TrustListSpec {
     pub fn new(services: Vec<TlService>) -> Self {
         Self {
+            version: 6,
             territory: "HU".to_owned(),
             sequence_number: 7,
             issue_date: "2020-01-01T00:00:00Z".to_owned(),
@@ -113,6 +122,15 @@ impl TrustListSpec {
             signer: None,
             pointers: Vec::new(),
             tamper: false,
+            reference_list_by_id: false,
+        }
+    }
+
+    /// The same list, stated as TLv5.
+    pub fn v5(services: Vec<TlService>) -> Self {
+        Self {
+            version: 5,
+            ..Self::new(services)
         }
     }
 }
@@ -120,11 +138,19 @@ impl TrustListSpec {
 /// Render, and if a signer was given sign, one synthetic trusted list.
 pub fn build_trust_list(spec: &TrustListSpec) -> String {
     let mut out = String::from("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
+    let list_id = if spec.reference_list_by_id {
+        " Id=\"the-trusted-list\""
+    } else {
+        ""
+    };
     out.push_str(&format!(
-        "<tsl:TrustServiceStatusList xmlns:tsl=\"{TSL_NS}\" xmlns:ds=\"{DS_NS}\">"
+        "<tsl:TrustServiceStatusList xmlns:tsl=\"{TSL_NS}\" xmlns:ds=\"{DS_NS}\"{list_id}>"
     ));
     out.push_str("<tsl:SchemeInformation>");
-    out.push_str("<tsl:TSLVersionIdentifier>6</tsl:TSLVersionIdentifier>");
+    out.push_str(&format!(
+        "<tsl:TSLVersionIdentifier>{}</tsl:TSLVersionIdentifier>",
+        spec.version
+    ));
     out.push_str(&format!(
         "<tsl:TSLSequenceNumber>{}</tsl:TSLSequenceNumber>",
         spec.sequence_number
@@ -246,7 +272,12 @@ pub fn build_trust_list(spec: &TrustListSpec) -> String {
         out.push_str(&format!(
             "<ds:SignatureMethod Algorithm=\"{RSA_SHA256_URI}\"/>"
         ));
-        out.push_str("<ds:Reference URI=\"\"><ds:Transforms>");
+        let uri = if spec.reference_list_by_id {
+            "#the-trusted-list"
+        } else {
+            ""
+        };
+        out.push_str(&format!("<ds:Reference URI=\"{uri}\"><ds:Transforms>"));
         out.push_str(&format!("<ds:Transform Algorithm=\"{ENVELOPED_URI}\"/>"));
         out.push_str(&format!("<ds:Transform Algorithm=\"{C14N_EXC}\"/>"));
         out.push_str("</ds:Transforms>");
@@ -262,7 +293,10 @@ pub fn build_trust_list(spec: &TrustListSpec) -> String {
     let Some((key, _)) = &spec.signer else {
         return out;
     };
-    out = out.replace("@@TLDIGEST@@", &trust_list_digest(&out));
+    out = out.replace(
+        "@@TLDIGEST@@",
+        &trust_list_digest(&out, spec.reference_list_by_id),
+    );
     let value = trust_list_signature(&out, key);
     out = out.replace("@@TLSIG@@", &value);
     if spec.tamper {
@@ -272,14 +306,19 @@ pub fn build_trust_list(spec: &TrustListSpec) -> String {
     out
 }
 
-fn trust_list_digest(xml: &str) -> String {
+fn trust_list_digest(xml: &str, by_id: bool) -> String {
     let source = XmlSource::decode(xml.as_bytes(), &Limits::default()).expect("decodes");
     let tree = source.parse_tree(&Limits::default()).expect("parses");
     let signature = tree
         .descendants()
         .find(|node| node.attribute("Id") == Some("tl-signature"))
         .expect("the signature element exists");
-    let mut set = NodeSet::document(tree.root()).without_comments();
+    let mut set = if by_id {
+        NodeSet::subtree(tree.root_element())
+    } else {
+        NodeSet::document(tree.root())
+    }
+    .without_comments();
     set.exclude(signature);
     let octets = RoxmltreeC14n
         .canonicalize(

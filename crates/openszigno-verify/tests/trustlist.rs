@@ -195,6 +195,119 @@ fn a_tsa_qtst_service_is_also_read() {
     assert_eq!(loaded.anchors.len(), 1);
 }
 
+// ---------------------------------------------------------------------------
+// TSLVersionIdentifier: TLv5 and TLv6
+// ---------------------------------------------------------------------------
+
+/// The EU cut over from TLv5 to TLv6 on 2026-04-29 with no transition period,
+/// so a verifier has to read both: TLv6 for anything published from that date,
+/// TLv5 for every archived snapshot taken before it. Both carry the same
+/// namespace and the same element vocabulary, so both must load, contribute
+/// the same anchor, and verify their own signature.
+#[test]
+fn both_a_tlv5_and_a_tlv6_list_load_and_verify() {
+    let pki = pki((2019, 1, 1), &["0.4.0.1862.1.1"]);
+    for (version, spec) in [
+        (
+            5,
+            TrustListSpec::v5(vec![TlService::ca_qc(
+                "openSzigno Test Qualified CA",
+                pki.root_der.clone(),
+            )]),
+        ),
+        (
+            6,
+            TrustListSpec::new(vec![TlService::ca_qc(
+                "openSzigno Test Qualified CA",
+                pki.root_der.clone(),
+            )]),
+        ),
+    ] {
+        let mut spec = spec;
+        assert_eq!(spec.version, version);
+        spec.signer = Some((rsa_key(keys::SECOND_RSA2048), pki.tl_signer_der.clone()));
+        let list = build_trust_list(&spec);
+        let xml = dossier(signature(&pki), &pki.signer_key);
+        let report = run_with_list(&xml, &list, Some(&pki.tl_signer_der), AT);
+
+        assert_check(&report, CheckCode::CertPathOk, CheckStatus::Passed);
+        assert_check(
+            &report,
+            CheckCode::TrustListSignatureOk,
+            CheckStatus::Passed,
+        );
+        let loaded = report
+            .checks
+            .iter()
+            .find(|check| check.code == CheckCode::TrustListLoaded)
+            .expect("the list reports what it loaded");
+        assert!(
+            loaded.message.contains(&format!("version {version}")),
+            "{}",
+            loaded.message
+        );
+    }
+}
+
+/// A version identifier outside the two this build parses is refused rather
+/// than parsed as if it were one of them, and the message names the version so
+/// an operator can tell "this file is newer than your tool" from "this file is
+/// broken".
+#[test]
+fn a_list_stating_an_unparsed_version_is_refused() {
+    let pki = pki((2019, 1, 1), &[]);
+    let mut spec = TrustListSpec::new(vec![TlService::ca_qc(
+        "openSzigno Test Qualified CA",
+        pki.root_der.clone(),
+    )]);
+    spec.version = 7;
+    let list = build_trust_list(&spec);
+    let error = openszigno_verify::trustlist::load(list.as_bytes(), &[], &RoxmltreeC14n)
+        .expect_err("version 7 is not parsed");
+    assert!(error.contains("TSLVersionIdentifier \"7\""), "{error}");
+    assert!(error.contains("TLv6"), "{error}");
+}
+
+/// TS 119 612 clause 5.3.1 makes the field mandatory in every issue, and it is
+/// the only thing that says which parsing rules apply. A list without one is
+/// refused rather than guessed at.
+#[test]
+fn a_list_stating_no_version_is_refused() {
+    let pki = pki((2019, 1, 1), &[]);
+    let list = build_trust_list(&TrustListSpec::new(vec![TlService::ca_qc(
+        "openSzigno Test Qualified CA",
+        pki.root_der.clone(),
+    )]));
+    let stripped = list.replace("<tsl:TSLVersionIdentifier>6</tsl:TSLVersionIdentifier>", "");
+    let error = openszigno_verify::trustlist::load(stripped.as_bytes(), &[], &RoxmltreeC14n)
+        .expect_err("a list with no version identifier is refused");
+    assert!(error.contains("no TSLVersionIdentifier"), "{error}");
+}
+
+/// TS 119 612 annex B.1.0 rule 2 asks for a reference to the
+/// `TrustServiceStatusList` element, which a same-document `#Id` satisfies
+/// exactly as the empty URI does. Both cover the whole list, so both are
+/// accepted; neither weakens the "the signature covers everything" rule.
+#[test]
+fn a_signature_referencing_the_list_by_id_covers_it() {
+    let pki = pki((2019, 1, 1), &["0.4.0.1862.1.1"]);
+    let mut spec = TrustListSpec::new(vec![TlService::ca_qc(
+        "openSzigno Test Qualified CA",
+        pki.root_der.clone(),
+    )]);
+    spec.signer = Some((rsa_key(keys::SECOND_RSA2048), pki.tl_signer_der.clone()));
+    spec.reference_list_by_id = true;
+    let list = build_trust_list(&spec);
+    let xml = dossier(signature(&pki), &pki.signer_key);
+    let report = run_with_list(&xml, &list, Some(&pki.tl_signer_der), AT);
+
+    assert_check(
+        &report,
+        CheckCode::TrustListSignatureOk,
+        CheckStatus::Passed,
+    );
+}
+
 /// Something that is not a trusted list is refused rather than half-read.
 #[test]
 fn a_file_that_is_not_a_trusted_list_is_refused() {
