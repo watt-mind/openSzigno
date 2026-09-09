@@ -9,7 +9,8 @@ mod common;
 
 use common::{
     CertSpec, DossierSpec, OcspSpec, OcspStatus, SigSpec, SigningCertificateSpec, TestKey, build,
-    build_ocsp, document_signature, issued_by, keys, rsa_key, self_signed,
+    build_ocsp, document_signature, extended_key_usage_extension, issued_by, keys, rsa_key,
+    self_signed,
 };
 use openszigno_verify::codes::{CheckCode, CheckStatus};
 use openszigno_verify::revocation::RevocationStatus;
@@ -19,11 +20,19 @@ use openszigno_verify::{
 };
 use rcgen::BasicConstraints;
 
+const ID_KP_OCSP_SIGNING: &str = "1.3.6.1.5.5.7.3.9";
+
 /// The validation time these tests use unless they say otherwise.
 const AT: &str = "2020-06-02T00:00:00Z";
 
+/// When every response in this file says it was produced, which is before
+/// [`AT`]. The gap between the two is what the delegated-responder validity
+/// tests below turn on.
+const PRODUCED_AT: &str = "2020-05-15T00:00:00Z";
+
 struct Pki {
     root_der: Vec<u8>,
+    root_key: TestKey,
     signer_der: Vec<u8>,
     signer_key: TestKey,
 }
@@ -43,6 +52,7 @@ fn pki() -> Pki {
     );
     Pki {
         root_der: root.der,
+        root_key,
         signer_der: signer.der,
         signer_key,
     }
@@ -176,5 +186,85 @@ fn an_ocsp_unknown_status_is_not_reported_as_staleness() {
             .contains("does not know about this certificate"),
         "{}",
         summary.message
+    );
+}
+
+// ---------------------------------------------------------------------------
+// When a delegated responder had to be valid
+// ---------------------------------------------------------------------------
+
+/// A responder the root delegated to, valid over the given window, and a
+/// `good` response about the signer that it signed.
+fn delegated_response(pki: &Pki, not_before: (i32, u8, u8), not_after: (i32, u8, u8)) -> Vec<u8> {
+    let responder_key = rsa_key(keys::THIRD_RSA2048);
+    let mut responder_spec = CertSpec::signer("openSzigno Delegated OCSP Responder");
+    responder_spec.not_before = not_before;
+    responder_spec.not_after = not_after;
+    responder_spec.custom_extensions =
+        vec![extended_key_usage_extension(&[ID_KP_OCSP_SIGNING], false)];
+    let responder = issued_by(
+        &responder_spec,
+        &responder_key,
+        &self_signed(
+            &CertSpec::ca("openSzigno Test Root", BasicConstraints::Unconstrained),
+            &rsa_key(keys::ROOT_RSA2048),
+        ),
+        &pki.root_key,
+    );
+
+    let mut spec = OcspSpec::new(pki.root_der.clone(), pki.signer_der.clone(), responder_key);
+    spec.responder_der = Some(responder.der);
+    spec.include_responder_certificate = true;
+    spec.produced_at = PRODUCED_AT.to_owned();
+    spec.this_update = PRODUCED_AT.to_owned();
+    spec.next_update = Some("2020-08-01T00:00:00Z".to_owned());
+    build_ocsp(&spec)
+}
+
+/// RFC 6960: the delegation is the issuing CA's signature over the responder's
+/// certificate, and what matters is whether that certificate was in force when
+/// the responder spoke. A responder certificate that expired *after*
+/// `producedAt` said what it said while it still was entitled to, so the
+/// response stands. Checking the certificate at the validation time instead
+/// discarded every archived response whose responder certificate has since
+/// expired, which is most of them, and it disagreed with the trusted model
+/// next to it, which has always used `producedAt`.
+#[test]
+fn a_delegated_responder_expired_after_producedat_still_answers() {
+    let pki = pki();
+    let xml = dossier(signature(&pki), &pki.signer_key);
+    // In force at 2020-05-15, expired by 2020-06-02.
+    let response = delegated_response(&pki, (2019, 1, 1), (2020, 6, 1));
+    let report = run_at(&xml, vec![pki.root_der.clone()], vec![response], AT);
+
+    let entry = entry(&report);
+    assert_eq!(entry.status, RevocationStatus::Good);
+    assert_eq!(
+        entry.responder_model,
+        Some(openszigno_verify::revocation::ResponderModel::Delegated)
+    );
+    assert_check(&report, CheckCode::RevocationOk, CheckStatus::Passed);
+}
+
+/// The other direction, and the reason the rule is not simply "be lenient": a
+/// certificate that was not yet in force when the response says it was
+/// produced authorises nothing, however valid it has become since.
+#[test]
+fn a_delegated_responder_not_yet_valid_at_producedat_authorises_nothing() {
+    let pki = pki();
+    let xml = dossier(signature(&pki), &pki.signer_key);
+    // Not in force until 2020-06-01, which is after the 2020-05-15 producedAt
+    // and before the 2020-06-02 validation time.
+    let response = delegated_response(&pki, (2020, 6, 1), (2039, 1, 1));
+    let report = run_at(&xml, vec![pki.root_der.clone()], vec![response], AT);
+
+    let entry = entry(&report);
+    assert_eq!(entry.status, RevocationStatus::Unknown);
+    assert_eq!(entry.responder_model, None);
+    assert_absent(&report, CheckCode::RevocationOk);
+    assert_check(
+        &report,
+        CheckCode::RevocationDataInvalid,
+        CheckStatus::Unknown,
     );
 }

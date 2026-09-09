@@ -2184,7 +2184,7 @@ is reported in `chain[].revocation.responder_model`.
 | Model | What it requires | Where the authority comes from |
 | --- | --- | --- |
 | `issuer` | The CA that issued the queried certificate signed the response itself. | The CA. |
-| `delegated` | A certificate that same CA issued, naming itself in the `ResponderID`, carrying `id-kp-OCSPSigning` and valid at the validation time, signed it. | The CA's signature over the responder certificate *is* the delegation, so no trust store is needed. |
+| `delegated` | A certificate that same CA issued, naming itself in the `ResponderID`, carrying `id-kp-OCSPSigning` and valid at the response's `producedAt`, signed it. | The CA's signature over the responder certificate *is* the delegation, so no trust store is needed. |
 | `trusted` | The responder carries `id-kp-OCSPSigning` and its own path validates to a **configured trust anchor** — trust store or trusted list — at the response's `producedAt`, under the same path rules and `keyUsage` checks every other chain gets. | The caller's own trust material. |
 
 The third model is not a relaxation of the first two; it is the third thing
@@ -2200,10 +2200,16 @@ vouched for by the caller's own store, through a full path validation with
 `id-kp-OCSPSigning` required on the leaf; a responder that reaches no
 configured anchor authorises nothing. So this can never admit a response whose
 signer the operator had not already chosen to trust, and it is tried **last**,
-so a CA's own word always wins where both apply. The path is validated at
-`producedAt`, the instant the responder asserts it spoke: a certificate that
-had expired by then was not entitled to say anything, and one that expired
-afterwards said it while it still was.
+so a CA's own word always wins where both apply.
+
+Both models that involve a responder certificate ask about it at
+**`producedAt`**, the instant the responder asserts it spoke: the trusted model
+validates the path at that instant, and the delegated model checks the
+responder certificate's own validity there. A certificate that had expired by
+then, or was not yet in force, was not entitled to say anything; one that
+expired afterwards said it while it still was. Asking at the validation time
+instead would discard every archived response whose responder certificate has
+since expired, which is most of them.
 
 `ocsp_responder_trusted` (`info`) is emitted when the third model was used, so
 a reader can tell an answer that rests on the issuing CA from one that rests on

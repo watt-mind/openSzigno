@@ -49,6 +49,13 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
 
 ### Fixed
 
+- A delegated OCSP responder's certificate is checked for validity at the
+  response's `producedAt` rather than at the validation time, matching the
+  trusted-responder model beside it and the documented rule. Asking at the
+  validation time discarded every archived response whose responder
+  certificate has since expired — the certificate was in force when the
+  responder spoke, which is what RFC 6960's delegation is about — and it
+  admitted one that was not yet in force then. `schema_version` stays `1`.
 - A container `es:TimeStamp` selects its data only through an `xades:Include`
   in a recognised XAdES namespace. The element was matched on its local name
   alone, so an element another vocabulary happens to call `Include` added its

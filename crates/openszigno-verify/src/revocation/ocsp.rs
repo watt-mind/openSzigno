@@ -35,8 +35,8 @@ const OID_SHA512: ObjectIdentifier = ObjectIdentifier::new_unwrap("2.16.840.1.10
 /// 1. **`issuer`** — the CA that issued the queried certificate signed the
 ///    response itself. Nothing more is needed and nothing weaker is preferred.
 /// 2. **`delegated`** — a certificate that CA issued, carrying
-///    `id-kp-OCSPSigning`, signed it. The CA's own signature over that
-///    certificate is the delegation.
+///    `id-kp-OCSPSigning` and valid at the response's `producedAt`, signed it.
+///    The CA's own signature over that certificate is the delegation.
 /// 3. **`trusted`** — the responder is one the *relying party* trusts
 ///    directly: its certificate carries `id-kp-OCSPSigning` and its path
 ///    validates to a configured trust anchor at `producedAt`, even though the
@@ -121,7 +121,6 @@ pub(super) fn ocsp_answer(
         anchors,
         status,
         produced_at,
-        time,
         limits,
     ) else {
         return Answer::Invalid(
@@ -219,8 +218,9 @@ fn digest_by_oid(oid: ObjectIdentifier, bytes: &[u8]) -> Option<Vec<u8>> {
 ///    is looked at once it holds.
 /// 2. **Delegated** (section 4.2.2.2). A certificate that same CA issued,
 ///    naming itself in the `ResponderID`, carrying `id-kp-OCSPSigning` and
-///    valid at the time asked about, signed it. The CA's signature over the
-///    responder certificate *is* the delegation, so this needs no trust store.
+///    valid at the response's `producedAt`, signed it. The CA's signature over
+///    the responder certificate *is* the delegation, so this needs no trust
+///    store.
 /// 3. **Trusted responder** (section 2.2). The responder is one the relying
 ///    party trusts directly: it carries `id-kp-OCSPSigning` and its path
 ///    validates to a configured trust anchor at `producedAt`, even though the
@@ -243,7 +243,6 @@ fn digest_by_oid(oid: ObjectIdentifier, bytes: &[u8]) -> Option<Vec<u8>> {
 /// admit a response the operator did not already choose to trust the signer
 /// of. It is tried last so that a CA's own word always wins over the caller's
 /// configuration where both are available.
-#[allow(clippy::too_many_arguments)]
 fn responder_authorised(
     basic: &BasicOcspResponse,
     issuer: &ParsedCertificate,
@@ -251,7 +250,6 @@ fn responder_authorised(
     anchors: &[ParsedCertificate],
     status: crate::certs::AnchorStatus<'_>,
     produced_at: UnixTime,
-    time: UnixTime,
     limits: &VerifyLimits,
 ) -> Option<ResponderModel> {
     let Ok(message) = basic.tbs_response_data.to_der() else {
@@ -301,9 +299,17 @@ fn responder_authorised(
         .collect();
 
     // 2. A responder the issuing CA delegated to.
+    //
+    // Validity is checked at `producedAt`, the instant the responder asserts
+    // it made the statement, exactly as the trusted model below checks its
+    // path at that instant: a responder certificate that had expired by then
+    // was not entitled to say anything, and one that expired afterwards said
+    // it while it still was. Checking it at the validation time instead
+    // silently discarded every archived response whose responder certificate
+    // has since expired, which is most of them.
     for parsed in &named {
         if parsed.has_ocsp_signing_eku()
-            && parsed.is_valid_at(time)
+            && parsed.is_valid_at(produced_at)
             && parsed.issuer_der() == issuer.subject_der()
             && crate::certs::verify_issued_by(parsed, issuer)
             && verify_der_signature(&parsed.certificate, algorithm, &message, signature).is_ok()
