@@ -958,6 +958,37 @@ fn a_login_stores_the_token_and_its_record_and_prints_neither() {
     }
 }
 
+/// Human mode says where the token went and what the service is, and still
+/// prints no token: the summary is what a person at a terminal reads.
+#[test]
+fn the_human_summary_names_the_file_and_the_service_and_no_token() {
+    let fixture = fixture(Mock::new(Flavour::Cleverbase));
+    login_config(&fixture);
+    let output = run_with_browser(
+        &[
+            "csc",
+            "login",
+            &fixture.text("csc.toml"),
+            "--credential",
+            CREDENTIAL,
+            "--online-allow-private",
+        ],
+        Browser::Follow,
+    );
+    assert!(output.status.success(), "{output:?}");
+    let printed = String::from_utf8_lossy(&output.stdout).into_owned();
+    assert!(printed.contains("Logged in to http://"), "{printed}");
+    assert!(printed.contains("mode 0600"), "{printed}");
+    assert!(printed.contains("refresh token stored: true"), "{printed}");
+    assert!(printed.contains("supportsRar=false"), "{printed}");
+    assert!(
+        printed.contains(&format!("Credential {CREDENTIAL}")),
+        "{printed}"
+    );
+    let token = std::fs::read_to_string(fixture.path("token")).expect("the token is read");
+    assert!(!everything_printed(&output).contains(&token));
+}
+
 /// The authorization request carries PKCE `S256`, a state, and a loopback
 /// redirect on an ephemeral port; the token request carries the verifier and
 /// the code, and the service checks them.
