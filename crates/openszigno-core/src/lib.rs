@@ -23,7 +23,7 @@ pub use model::{
     StructuralWarning, StructuralWarningCode, TimestampPlacement, TimestampSummary,
 };
 pub use sniff::{DetectedType, sniff};
-pub use xml::{XmlSource, id_map};
+pub use xml::{EncodingDeclaration, XmlSource, declared_encoding, id_map};
 
 /// The XML parser this crate builds every tree with. Re-exported so that a
 /// verifier operates on exactly the same tree the structural parser saw.

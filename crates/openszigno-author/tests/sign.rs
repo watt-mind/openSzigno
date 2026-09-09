@@ -423,3 +423,215 @@ fn the_signer_reports_the_certificate_it_will_write() {
     assert_eq!(signer.certificate(), material.certificate.as_slice());
     assert_eq!(signer.algorithm(), SignatureAlgorithm::EcdsaP256Sha256);
 }
+
+// ---------------------------------------------------------------------------
+// The dossier's own text is never mistaken for the signer's scaffolding
+// ---------------------------------------------------------------------------
+
+/// Every placeholder string the signer writes for the first signature of a
+/// document-scope run.
+fn placeholders() -> Vec<String> {
+    let mut all: Vec<String> = [
+        "object",
+        "document-profile",
+        "signature-profile",
+        "signed-properties",
+    ]
+    .iter()
+    .map(|what| format!("@@openszigno-digest:ref-sig-doc0-{what}@@"))
+    .collect();
+    all.push("@@openszigno-value:sig-doc0@@".to_owned());
+    all.push("@@openszigno-timestamp:sig-doc0@@".to_owned());
+    all
+}
+
+/// A dossier whose every document is titled, and filled, with one of those
+/// strings.
+///
+/// The titles are patched into the built text rather than asked for directly,
+/// because a placeholder holds a colon and the title rules refuse one: a real
+/// dossier this tool did not write is under no such obligation, which is
+/// exactly the case this fixture stands in for.
+fn dossier_that_reads_like_the_scaffolding() -> (Vec<u8>, Vec<String>) {
+    let titles = placeholders();
+    let documents = titles
+        .iter()
+        .enumerate()
+        .map(|(index, title)| DocumentSpec {
+            title: format!("marker{index}"),
+            media_type: Some("text/plain".to_owned()),
+            bytes: title.clone().into_bytes(),
+            compress: false,
+            encrypt: false,
+        })
+        .collect();
+    let bytes = openszigno_author::build(
+        &DossierSpec {
+            title: "Synthetic signing fixture".to_owned(),
+            created: "2026-01-01T00:00:00Z".to_owned(),
+            documents,
+            encryption: None,
+        },
+        &Limits::default(),
+    )
+    .expect("the dossier builds")
+    .bytes;
+    let mut text = String::from_utf8(bytes).expect("the writer writes UTF-8");
+    for (index, title) in titles.iter().enumerate() {
+        let marker = format!("marker{index}");
+        assert_eq!(
+            text.matches(&marker).count(),
+            1,
+            "exactly one place holds {marker}"
+        );
+        text = text.replace(&marker, title);
+    }
+    (text.into_bytes(), titles)
+}
+
+/// The titles a reader reads back out of a dossier.
+fn titles(bytes: &[u8]) -> Vec<String> {
+    openszigno_core::parse_with_options(bytes, &ParseOptions::default())
+        .expect("the dossier parses")
+        .documents
+        .iter()
+        .map(|document| document.title.clone())
+        .collect()
+}
+
+#[test]
+fn a_dossier_that_reads_like_a_placeholder_is_signed_and_left_alone() {
+    let material = material();
+    let (bytes, expected) = dossier_that_reads_like_the_scaffolding();
+    let signed = sign(
+        &bytes,
+        &ParseOptions::default(),
+        &request(SignScope::Document),
+        &signer(&material),
+        None,
+    )
+    .expect("the dossier is signed");
+    assert_eq!(signed.signatures.len(), expected.len());
+
+    // The signature is over what is actually in the file, not over what the
+    // file said before a substitution rewrote parts of it.
+    let report = run(&signed.bytes, &material.certificate);
+    assert_nothing_failed(&report);
+    assert_check(&report, CheckCode::ReferenceDigestOk, CheckStatus::Passed);
+    assert_check(&report, CheckCode::SignatureValueOk, CheckStatus::Passed);
+    for signature in &report.signatures {
+        for code in [CheckCode::ReferenceDigestOk, CheckCode::SignatureValueOk] {
+            assert!(
+                signature
+                    .checks
+                    .iter()
+                    .any(|check| check.code == code && check.status == CheckStatus::Passed),
+                "signature {} is missing {}",
+                signature.index,
+                code.as_str()
+            );
+        }
+    }
+
+    // And the documents came through untouched: each title is still the
+    // placeholder-shaped text it went in as.
+    assert_eq!(titles(&signed.bytes), expected);
+}
+
+// ---------------------------------------------------------------------------
+// An ISO-8859-2 dossier, whatever its declaration looks like
+// ---------------------------------------------------------------------------
+
+/// Encode text as ISO-8859-2, for the characters these fixtures use.
+fn iso8859_2(text: &str) -> Vec<u8> {
+    text.chars()
+        .map(|character| match character {
+            'á' => 0xE1,
+            'é' => 0xE9,
+            'í' => 0xED,
+            'ó' => 0xF3,
+            'ö' => 0xF6,
+            'ü' => 0xFC,
+            'ő' => 0xF5,
+            'ú' => 0xFA,
+            'ű' => 0xFB,
+            'Á' => 0xC1,
+            'É' => 0xC9,
+            'Ó' => 0xD3,
+            'Ö' => 0xD6,
+            'Ú' => 0xDA,
+            'Ü' => 0xDC,
+            other if other.is_ascii() => other as u8,
+            other => panic!("this fixture has no ISO-8859-2 byte for {other}"),
+        })
+        .collect()
+}
+
+/// A dossier declared and encoded ISO-8859-2, with non-ASCII titles and the
+/// declaration spelled `declaration`.
+fn latin2_dossier(declaration: &str) -> (Vec<u8>, Vec<String>) {
+    let expected = vec![
+        "árvíztűrő tükörfúrógép".to_owned(),
+        "Éves jelentés".to_owned(),
+    ];
+    let documents = expected
+        .iter()
+        .map(|title| DocumentSpec {
+            title: title.clone(),
+            media_type: Some("text/plain".to_owned()),
+            bytes: format!("{title}\n").into_bytes(),
+            compress: false,
+            encrypt: false,
+        })
+        .collect();
+    let bytes = openszigno_author::build(
+        &DossierSpec {
+            title: "Árvíztűrő minta".to_owned(),
+            created: "2026-01-01T00:00:00Z".to_owned(),
+            documents,
+            encryption: None,
+        },
+        &Limits::default(),
+    )
+    .expect("the dossier builds")
+    .bytes;
+    let text = String::from_utf8(bytes).expect("the writer writes UTF-8");
+    let (written, rest) = text
+        .split_once("?>")
+        .expect("the writer writes a declaration");
+    assert!(written.starts_with("<?xml"), "{written}");
+    (iso8859_2(&format!("{declaration}{rest}")), expected)
+}
+
+#[test]
+fn an_iso_8859_2_dossier_signs_whatever_its_declaration_looks_like() {
+    for declaration in [
+        "<?xml version=\"1.0\" encoding=\"ISO-8859-2\"?>",
+        "<?xml version='1.0' encoding='ISO-8859-2'?>",
+        "<?xml version=\"1.0\" encoding = \"ISO-8859-2\"?>",
+        "<?xml version='1.0' encoding='iso-8859-2'?>",
+    ] {
+        let material = material();
+        let (bytes, expected) = latin2_dossier(declaration);
+        let signed = sign(
+            &bytes,
+            &ParseOptions::default(),
+            &request(SignScope::Document),
+            &signer(&material),
+            None,
+        )
+        .unwrap_or_else(|error| panic!("{declaration} is signed: {}", error.message()));
+
+        let report = run(&signed.bytes, &material.certificate);
+        assert_nothing_failed(&report);
+        assert_check(&report, CheckCode::ReferenceDigestOk, CheckStatus::Passed);
+        assert_check(&report, CheckCode::SignatureValueOk, CheckStatus::Passed);
+
+        // The output is UTF-8 and says so, and the non-ASCII titles survived
+        // the re-encoding intact.
+        let text = String::from_utf8(signed.bytes.clone()).expect("the output is UTF-8");
+        assert!(text.contains("UTF-8"), "{declaration}: {}", &text[..64]);
+        assert!(!text.to_ascii_lowercase().contains("8859"), "{declaration}");
+        assert_eq!(titles(&signed.bytes), expected, "{declaration}");
+    }
+}

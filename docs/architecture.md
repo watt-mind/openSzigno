@@ -3184,7 +3184,31 @@ other moving part; without it the current time is written.
 A dossier declared ISO-8859-2 is decoded to UTF-8 before it is signed and its
 declaration is rewritten to say so. That changes no signature already in the
 file: canonical XML is UTF-8 whatever the source encoding was, so every
-existing digest is computed over exactly the same octets as before.
+existing digest is computed over exactly the same octets as before. The
+declaration is read by the reader's own parser
+(`openszigno_core::declared_encoding`), so every spelling the reader accepts
+is one the writer rewrites: either quote character, and any whitespace around
+the `=`. Only the encoding label's own bytes are replaced.
+
+### Nothing outside a signature is ever rewritten
+
+A signature is written as a skeleton and completed in three passes (reference
+digests, then the signature value, then the timestamp token), because each
+stage's input only exists once the previous one is in the document. The values
+stand in as placeholder strings until their pass fills them in.
+
+Every substitution is bounded to the byte range of the `ds:Signature` element
+that wrote the placeholder, taken from the parsed working document. The
+dossier's own text is never touched, whatever it happens to say: a document
+whose title or payload reads exactly like a placeholder is content, it is
+digested as it stands, and it comes back out of `list` unchanged. A
+substitution over the whole document would rewrite it after its digest had
+been taken, and produce a dossier `sign` called a success and `verify` then
+reported `reference_digest_mismatch` for.
+
+The ranges never overlap, because no signature this tool writes ever contains
+another, and they are applied last first so that the earlier ones stay valid
+as lengths change.
 
 ### Algorithms
 

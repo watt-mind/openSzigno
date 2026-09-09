@@ -207,6 +207,21 @@ impl<'input> Lookup<'input> {
             })
     }
 
+    /// The byte range one signature's element occupies in the working text,
+    /// start tag to end tag.
+    ///
+    /// It is what bounds every substitution a later pass makes: the values a
+    /// pass fills in belong to this element, and a dossier is free to hold
+    /// text that looks exactly like the placeholder standing in for one.
+    pub(crate) fn signature_range(
+        &self,
+        signature_id: &str,
+    ) -> Result<std::ops::Range<usize>, SignError> {
+        self.by_id(signature_id)
+            .map(|node| node.range())
+            .ok_or_else(|| SignError::failed("the signature being written is not readable"))
+    }
+
     /// The `Id` of a direct child of the root `es:Dossier`.
     pub(crate) fn dossier_child_id(
         &self,
