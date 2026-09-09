@@ -42,9 +42,9 @@ one, `sign --csc` signs through a remote service that holds the key,
 `timestamp` writes a container `es:TimeStamp` without signing anything, and
 `csc login` runs the OAuth 2.0 rounds a CSC service needs. What is still
 planned is listed in [roadmap.md](roadmap.md). Nothing below is softened by
-any of it: `sign` produces a signature and checks none of it, and even `--csc`, which keeps the key out
-of this process entirely, asserts nothing about what it wrote (see
-[remote-signing.md](remote-signing.md)).
+any of it: `sign` produces a signature and checks none of it, and even
+`--csc`, which keeps the key out of this process entirely, asserts nothing
+about what it wrote (see [remote-signing.md](remote-signing.md)).
 
 Permanent non-goals for this tool:
 
@@ -556,6 +556,7 @@ These flags apply to every command that reads a dossier:
 | `--tsa-cert <FILE>` | A certificate for the timestamp's own `xades:CertificateValues`, so the authority's issuing CAs travel with the dossier. Repeatable; a PEM bundle may hold several. |
 | `--online-allow-private` | Permit `--tsa` to contact loopback, private, link-local and unique-local addresses. |
 | `--online-proxy <URL>` | Route the `--tsa` request through this proxy. |
+
 `csc login` takes a configuration path rather than a dossier, and accepts:
 
 | Flag | Meaning |
