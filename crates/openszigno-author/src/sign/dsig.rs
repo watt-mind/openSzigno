@@ -250,10 +250,22 @@ impl<'input> Lookup<'input> {
     }
 
     /// The `Id` of the `es:DocumentProfile` inside one `es:Document`.
-    pub(crate) fn document_profile_id(&self, container: Node<'_, 'input>) -> Option<String> {
+    ///
+    /// The namespace is required, exactly as it is in [`Self::dossier_child_id`]:
+    /// matching on the local name alone let a `DocumentProfile` from a foreign
+    /// namespace, placed first, decide what the signature referenced.
+    pub(crate) fn document_profile_id(
+        &self,
+        container: Node<'_, 'input>,
+        namespace: &str,
+    ) -> Option<String> {
         container
             .children()
-            .find(|node| node.is_element() && node.tag_name().name() == "DocumentProfile")
+            .find(|node| {
+                node.is_element()
+                    && node.tag_name().name() == "DocumentProfile"
+                    && node.tag_name().namespace() == Some(namespace)
+            })
             .and_then(|node| node.attribute("Id"))
             .map(str::to_owned)
     }
@@ -447,6 +459,34 @@ mod tests {
         assert!(text.contains("text"));
         assert!(!text.contains("gone"));
         assert_eq!(digest_value(b"").len(), 44);
+    }
+
+    /// A `DocumentProfile` from another namespace, placed first, is not the
+    /// one a signature references. Matching on the local name alone let a
+    /// dossier point the mandated reference wherever it liked.
+    #[test]
+    fn a_document_profile_from_another_namespace_is_never_the_one_referenced() {
+        let working = Working::parse(
+            "<Dossier xmlns=\"urn:es\" xmlns:x=\"urn:other\"><Document>\
+<x:DocumentProfile Id=\"foreign\"/><DocumentProfile Id=\"real\"/>\
+</Document></Dossier>",
+        )
+        .expect("this parses");
+        working
+            .with_tree(|lookup| {
+                let container = lookup
+                    .root()
+                    .children()
+                    .find(Node::is_element)
+                    .expect("the document element is there");
+                assert_eq!(
+                    lookup.document_profile_id(container, "urn:es"),
+                    Some("real".to_owned())
+                );
+                assert_eq!(lookup.document_profile_id(container, "urn:absent"), None);
+                Ok(())
+            })
+            .expect("the lookup runs");
     }
 
     #[test]

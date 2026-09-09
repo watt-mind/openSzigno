@@ -399,7 +399,7 @@ fn plan_signatures(
                             format!("document {} has no es:Document element", document.index),
                         )
                     })?;
-                let profile = lookup.document_profile_id(container).ok_or_else(|| {
+                let profile = lookup.document_profile_id(container, namespace).ok_or_else(|| {
                     SignError::new(
                         SignErrorCode::DocumentNotSignable,
                         format!(

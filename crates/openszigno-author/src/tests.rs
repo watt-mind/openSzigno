@@ -196,6 +196,44 @@ fn a_title_is_stored_in_one_canonical_composition() {
     assert_eq!(dossier.bytes, composed.bytes);
 }
 
+/// The ZIP member is named with the same canonical title, because that is the
+/// name `extract` writes the file under. It used to be named with the raw
+/// title, so a decomposed or padded spelling put one string in the archive
+/// and another in `es:Title`.
+#[test]
+fn the_zip_member_carries_the_title_the_profile_declares() {
+    let zipped = |title: &str| {
+        built(vec![DocumentSpec {
+            compress: true,
+            ..document(title, b"x")
+        }])
+    };
+    let composed = zipped("\u{e9}rt\u{e9}s.txt");
+    assert_eq!(zip_member_name(&composed), "\u{e9}rt\u{e9}s.txt");
+    assert_eq!(zipped("e\u{301}rte\u{301}s.txt").bytes, composed.bytes);
+    assert_eq!(zipped("  \u{e9}rt\u{e9}s.txt  ").bytes, composed.bytes);
+}
+
+/// The name of the one member of a `zip -> base64` document's archive.
+fn zip_member_name(dossier: &BuiltDossier) -> String {
+    let xml = text_of(dossier);
+    let payload = xml
+        .split_once("<ds:Object Id=\"obj0\">")
+        .expect("the payload object is there")
+        .1
+        .split_once("</ds:Object>")
+        .expect("it ends")
+        .0;
+    let bytes = STANDARD.decode(payload).expect("the payload is Base64");
+    let mut archive =
+        zip::ZipArchive::new(std::io::Cursor::new(bytes)).expect("the payload is a ZIP archive");
+    archive
+        .by_index(0)
+        .expect("the archive holds one member")
+        .name()
+        .to_owned()
+}
+
 #[test]
 fn a_dossier_with_no_document_is_refused() {
     let error = build(&spec(Vec::new()), &Limits::default()).expect_err("refused");
