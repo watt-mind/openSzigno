@@ -124,15 +124,21 @@ pub(crate) fn write_human_success(command: &str, response: &Response) -> io::Res
                 } else {
                     ""
                 };
+                let encrypted = if document["encrypted"] == Value::Bool(true) {
+                    " | encrypted"
+                } else {
+                    ""
+                };
                 writeln!(
                     out,
-                    "[{}] {} | {}/{} | {} B | {}{}",
+                    "[{}] {} | {}/{} | {} B | {}{}{}",
                     document["index"],
                     display_json_string(&document["title"]),
                     display_json_string(&document["mime_type"]["media_type"]),
                     display_json_string(&document["mime_type"]["subtype"]),
                     display_source_size(&document["source_size"]),
                     document["transforms"],
+                    encrypted,
                     nested
                 )?;
             }
@@ -296,6 +302,89 @@ pub(crate) fn write_human_success(command: &str, response: &Response) -> io::Res
                 out,
                 "Revocation policy: {}. A verdict of `valid` means every check passed at the stated validation time; it is not a legal opinion.",
                 display_json_string(&data["policy"]["revocation"])
+            )?;
+        }
+        "create" => {
+            writeln!(
+                out,
+                "Created {} ({} B, {} document(s)).",
+                display_json_string(&response.data["output"]),
+                response.data["bytes"],
+                response.data["documents"].as_array().map_or(0, Vec::len)
+            )?;
+            for document in response.data["documents"].as_array().into_iter().flatten() {
+                let nested = if document["nested_dossier"] == Value::Bool(true) {
+                    " | nested dossier"
+                } else {
+                    ""
+                };
+                let encrypted = if document["encrypted"] == Value::Bool(true) {
+                    " | encrypted"
+                } else {
+                    ""
+                };
+                writeln!(
+                    out,
+                    "[{}] {} | {}/{} | {} B | {}{}{}",
+                    document["index"],
+                    display_json_string(&document["title"]),
+                    display_json_string(&document["mime_type"]["media_type"]),
+                    display_json_string(&document["mime_type"]["subtype"]),
+                    display_source_size(&document["source_size"]),
+                    document["transforms"],
+                    encrypted,
+                    nested
+                )?;
+            }
+            writeln!(
+                out,
+                "The dossier is unsigned: creating it proves nothing about its contents."
+            )?;
+        }
+        "sign" => {
+            let signatures = response.data["signatures"]
+                .as_array()
+                .map_or(&[][..], |items| items);
+            writeln!(
+                out,
+                "Signed {} ({} B, {} signature(s)).",
+                display_json_string(&response.data["output"]),
+                response.data["bytes"],
+                signatures.len()
+            )?;
+            for signature in signatures {
+                let mut line = format!(
+                    "{} | scope={} | {}",
+                    display_json_string(&signature["id"]),
+                    display_json_string(&signature["scope"]),
+                    display_json_string(&signature["algorithm"])
+                );
+                if let Some(index) = signature["document_index"].as_u64() {
+                    line.push_str(&format!(" | document={index}"));
+                }
+                line.push_str(&format!(
+                    " | signing time={}",
+                    display_json_string(&signature["signing_time"])
+                ));
+                line.push_str(if signature["timestamped"] == Value::Bool(true) {
+                    " | timestamped"
+                } else {
+                    " | no timestamp"
+                });
+                // Which backend held the key. A remote one also names the
+                // credential, because that is what says whose certificate
+                // signed; the token that reached it never appears anywhere.
+                if let Some(who) = signature["signer"].as_str() {
+                    line.push_str(&format!(" | signer={who}"));
+                }
+                if let Some(credential) = signature["credential_id"].as_str() {
+                    line.push_str(&format!(" | credential={credential}"));
+                }
+                writeln!(out, "{line}")?;
+            }
+            writeln!(
+                out,
+                "Signing verified nothing. Run `openszigno verify` with your own trust material to judge these signatures."
             )?;
         }
         "validate-structure" => {

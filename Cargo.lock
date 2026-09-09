@@ -778,8 +778,37 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
+name = "openszigno-author"
+version = "0.7.0"
+dependencies = [
+ "aes",
+ "base64",
+ "cbc",
+ "cipher",
+ "cms",
+ "der",
+ "openszigno-core",
+ "openszigno-verify",
+ "p256",
+ "pem-rfc7468",
+ "pkcs8",
+ "rand_chacha",
+ "rand_core",
+ "rcgen",
+ "rsa",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror",
+ "unicode-normalization",
+ "x509-cert",
+ "zeroize",
+ "zip",
+]
+
+[[package]]
 name = "openszigno-cli"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "aes",
  "base64",
@@ -790,6 +819,7 @@ dependencies = [
  "const-oid",
  "der",
  "des",
+ "openszigno-author",
  "openszigno-core",
  "openszigno-verify",
  "p256",
@@ -814,7 +844,7 @@ dependencies = [
 
 [[package]]
 name = "openszigno-core"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "aes",
  "base64",
@@ -847,7 +877,7 @@ dependencies = [
 
 [[package]]
 name = "openszigno-verify"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "base64",
  "cms",

@@ -4,6 +4,7 @@
 # Regenerate locally with:
 #   python3 scripts/coverage_gate.py --lcov lcov.info --update-floors
 # CI never updates this file.
+openszigno-author 95.76
 openszigno-cli 94.90
 openszigno-core 97.72
 openszigno-verify 93.04

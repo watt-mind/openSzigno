@@ -10,6 +10,132 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-09-09
+
+### Added
+
+- `docs/remote-signing.md`, the research behind this milestone's authoring
+  commands: the Cloud Signature Consortium API versions and the hash-signing
+  flow a client would run, the EUDI Wallet rQES reference components and how
+  to run one locally, a remote QSCD provider table, RFC 3161 timestamp
+  authorities and whether they need an account, what Hungarian courts and the
+  company registry accept, a recommended first backend, and everything that
+  could not be verified. Indexed in `docs/index.md` and `docs/references.md`.
+  Documentation only; no behaviour changes.
+- `openszigno create`, the first command that writes a dossier: it builds one
+  new, unsigned `es:Dossier` from files on disk, with
+  `--document PATH[::TITLE[::MIME]]`, `--zip`, `--embed`, `--created`, and
+  `--json`. Output is deterministic (fixed element order, positional
+  `obj<n>`/`profile<n>` identifiers, a pinned ZIP modification time), so the
+  same inputs with the same `--created` produce a byte-identical file; the
+  one exception is `--encrypt-for` below, which must draw on a random source.
+  Every
+  parser limit bounds it, every document title is checked against the rules
+  `extract` applies to a filename, an existing output file is `output_exists`
+  rather than an overwrite, and every run warns `created_dossier_unsigned`.
+  See [The create command](docs/architecture.md#the-create-command).
+- `openszigno-author`, a new published crate holding that writer. It reads no
+  file, opens no socket, and calls no clock; `openszigno-core` stays
+  read-only. It depends on `openszigno-verify` for canonicalisation and
+  `openszigno-cli` depends on it, so it is published after
+  `openszigno-verify` and before `openszigno-cli`.
+- Stable codes for authoring: the errors `no_documents`,
+  `unsafe_document_title`, `invalid_dossier_title`, `unknown_mime_type`,
+  `invalid_mime_type`, `zip_failed`, and `invalid_output_path`, and the
+  warning `created_dossier_unsigned`. `too_many_documents`,
+  `decoded_too_large`, `total_size_limit`, and `zip_ratio_limit` are reused
+  with their existing meanings. Additive: `schema_version` stays `1`.
+- `tests/fixtures/created.es3`, the dossier `create` builds from the two new
+  synthetic inputs under `tests/fixtures/create/`, plus a `create` case in
+  the golden matrix.
+- `openszigno create --encrypt-for CERT`, repeatable, which writes every
+  `--document` payload as a CMS `EnvelopedData` addressed to each recipient
+  certificate (PEM or DER), the forward direction of
+  `extract --decrypt-key`. AES-256-CBC content encryption with a fresh
+  content key and initialisation vector per document, and RSAES-OAEP with
+  SHA-256 and MGF1-SHA-256 key transport per recipient, named by
+  `issuerAndSerialNumber`; `--legacy-key-transport` writes RSAES-PKCS1-v1_5
+  instead. DES-EDE3-CBC is never written. `--zip` under encryption makes the
+  ZIP the plaintext (`zip -> encrypt -> base64`); an `--embed` dossier stays
+  in the clear. `create` output is not deterministic with `--encrypt-for`,
+  because a content key must be unpredictable. Each `create` document now
+  reports `encrypted` in the JSON envelope, the human summary marks such a
+  document `| encrypted`, and the new codes are the errors
+  `invalid_recipient_certificate`, `unsupported_recipient_key`,
+  `no_recipients`, and `encrypt_failed` (exit 4) and the warning
+  `recipient_certificate_expired`. Additive: `schema_version` stays `1`.
+  See [Encrypting for a recipient](docs/architecture.md#encrypting-for-a-recipient).
+- `openszigno sign`, which writes a signed copy of a dossier: one enveloped
+  XMLDSig/XAdES signature per document, or one over the dossier with
+  `--scope dossier`. It writes the reference set the e-dossier scope rules
+  mandate, exclusive canonicalization and SHA-256 throughout,
+  `xades:SigningTime` and `xades:SigningCertificateV2` in the signed
+  properties, `xades:CertificateValues` from `--chain` and `--tsa-cert`, and
+  the signer certificate in `ds:KeyInfo`. Flags: `--output`, `--key`,
+  `--cert`, `--passphrase-file`, `--chain`, `--scope`, `--document`, `--tsa`,
+  `--tsa-cert`, `--signing-time`, `--algorithm`, `--online-allow-private`,
+  `--online-proxy`, and `--json`. RSA PKCS#1 v1.5 with SHA-256 is the default
+  and is deterministic given the same key, time and inputs; `rsa-pss-sha256`
+  and `ecdsa-p256-sha256` are offered and are randomised. The key, its
+  certificate and its passphrase come from files or from the existing
+  `OPENSZIGNO_DECRYPT_PASSPHRASE`, never from `argv`. Signing verifies
+  nothing, and every successful run warns `signed_dossier_unverified`. See
+  [The sign command](docs/architecture.md#the-sign-command).
+- `--tsa URL` on `sign`, which posts an RFC 3161 `TimeStampReq` and embeds the
+  token as an `xades:SignatureTimeStamp`. It is the only thing that makes
+  `sign` open a socket, and it goes through the same transport, destination
+  policy, address pinning, timeouts and size caps `verify --online` uses;
+  `--online-allow-private` and `--online-proxy` mean there what they mean
+  there.
+- The signing library in `openszigno-author` (`sign` module): the `Signer`
+  trait a later remote backend implements, `SoftwareSigner` for a local
+  PKCS#8 key, the XMLDSig and XAdES rendering, and RFC 3161 requests and
+  responses as bytes in and bytes out. The crate still reads no file and
+  opens no socket.
+- Stable codes for signing: `invalid_signing_key`,
+  `invalid_signing_certificate`, `signing_certificate_required`,
+  `signing_key_mismatch`, `document_not_signable`, `document_already_signed`,
+  `tsa_failed`, and `sign_failed`, plus the warning
+  `signed_dossier_unverified`. `document_not_found`, `invalid_output_path`,
+  `output_exists`, `unsafe_output_directory` and `io_error` are reused with
+  their existing meanings. Additive: `schema_version` stays `1`.
+- A `sign` refusal in the golden matrix. A successful signing run cannot be a
+  golden: it needs a private key, and this repository commits none.
+- `openszigno sign --csc CONFIG.toml`, a second signing backend: the digest of
+  the canonicalised `ds:SignedInfo` is signed by a Cloud Signature Consortium
+  API v2 service, so a qualified certificate held by a remote signature
+  creation device, or in an EUDI Wallet, produces the same XAdES structure the
+  software signer does. Only the digest ever leaves the machine. The run does
+  `info`, `credentials/list` when no credential is named, `credentials/info`
+  with `certificates: "chain"`, then per signature `credentials/authorize`
+  with the real hash and `numSignatures: 1` and `signatures/signHash`; the
+  returned signature is verified locally against the returned certificate
+  before anything is written. Discovery is read from `info` rather than
+  compiled in, the algorithm comes from the credential's own `key/algo` list,
+  and the chain the service publishes becomes `xades:CertificateValues` so
+  `--chain` stays optional. `--csc-credential ID` picks one credential; the
+  requests go through the same bounded transport `verify --online` uses, and
+  the bearer token travels in the `Authorization` header and nowhere else.
+  This round is non-interactive: an `oauth2`-mode credential is
+  `csc_authorization_required`, and the OAuth 2.0 rounds it needs are the
+  follow-up `openszigno csc login`. See
+  [Signing through a CSC service](docs/architecture.md#signing-through-a-csc-service).
+- Stable codes for that backend: the errors `csc_config_invalid`,
+  `csc_unreachable`, `csc_rejected`, `csc_credential_ambiguous`,
+  `csc_credential_unusable`, `csc_authorization_required` and
+  `csc_signature_invalid`, and the warnings `csc_config_permissive` and
+  `csc_key_unused`. `sign`'s JSON `data.signatures[]` entries gain `signer`
+  (`software` or `csc`), and a `csc` entry also carries `credential_id` and
+  `csc_specs`.
+
+### Changed
+
+- The extraction title sanitizer takes its rules from `openszigno-author`, so
+  a title `create` refuses is exactly a title `extract` would refuse. No
+  behaviour of `extract` changed.
+- `author` is an accepted Conventional Commits scope
+  (`scripts/commit-msg.sh`, `CONTRIBUTING.md`).
+
 ## [0.6.0] - 2026-09-08
 
 ### Added
@@ -1462,7 +1588,8 @@ This release performs no cryptographic verification of any kind.
 
 [0.1.0]: https://github.com/watt-mind/openSzigno/releases/tag/v0.1.0
 [0.2.0]: https://github.com/watt-mind/openSzigno/compare/v0.1.0...v0.2.0
-[Unreleased]: https://github.com/watt-mind/openSzigno/compare/v0.6.0...develop
+[Unreleased]: https://github.com/watt-mind/openSzigno/compare/v0.7.0...develop
+[0.7.0]: https://github.com/watt-mind/openSzigno/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/watt-mind/openSzigno/compare/v0.5.1...v0.6.0
 [0.5.1]: https://github.com/watt-mind/openSzigno/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/watt-mind/openSzigno/compare/v0.4.0...v0.5.0

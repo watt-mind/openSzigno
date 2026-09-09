@@ -1,8 +1,8 @@
 # openSzigno
 
 A safe, agent-friendly command-line tool for inspecting, listing, structurally
-validating, verifying, and extracting Hungarian Microsec e-Szignó e-dossiers
-(`.es3`).
+validating, verifying, extracting, creating, and signing Hungarian Microsec
+e-Szignó e-dossiers (`.es3`).
 
 [![CI](https://github.com/watt-mind/openSzigno/actions/workflows/ci.yml/badge.svg?branch=develop)](https://github.com/watt-mind/openSzigno/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
@@ -57,18 +57,18 @@ cargo install openszigno-cli --locked
 Shell and PowerShell installers, for a machine with no Rust toolchain:
 
 ```sh
-curl --proto '=https' --tlsv1.2 -LsSf https://github.com/watt-mind/openSzigno/releases/download/v0.6.0/openszigno-cli-installer.sh | sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/watt-mind/openSzigno/releases/download/v0.7.0/openszigno-cli-installer.sh | sh
 ```
 
 ```powershell
-powershell -ExecutionPolicy Bypass -c "irm https://github.com/watt-mind/openSzigno/releases/download/v0.6.0/openszigno-cli-installer.ps1 | iex"
+powershell -ExecutionPolicy Bypass -c "irm https://github.com/watt-mind/openSzigno/releases/download/v0.7.0/openszigno-cli-installer.ps1 | iex"
 ```
 
 Container image (`linux/amd64` and `linux/arm64`), for CI and sandboxed
 pipelines. It is `FROM scratch` and runs as the numeric user `65532`:
 
 ```sh
-docker run --rm -v "$PWD:/work" ghcr.io/watt-mind/openszigno:0.6.0 inspect /work/file.es3 --json
+docker run --rm -v "$PWD:/work" ghcr.io/watt-mind/openszigno:0.7.0 inspect /work/file.es3 --json
 ```
 
 Otherwise take an archive and the `.sha256` file beside it from the
@@ -147,10 +147,25 @@ the URLs the certificates themselves publish.
 | `validate-structure FILE` | Apply the strict structural rules and report `valid_structure` and any conformance warnings. | 0, 2, 3, 4 |
 | `extract FILE --output DIR` | Decode supported payloads into `DIR`, expanding embedded dossiers, never overwriting a file. `--document SEL --stdout` writes one payload to stdout instead. | 0, 2, 3, 4, 5 |
 | `verify FILE` | Verify every `ds:Signature` against the trust material you supply and report a per-signature verdict of `valid`, `invalid`, or `indeterminate`. | 0, 2, 3, 4, 6, 7 |
+| `create --output FILE --title TITLE` | Build one new, unsigned dossier from files on disk, with `--document`, `--zip`, `--embed`, `--encrypt-for`, and `--created`. Never overwrites the output. | 0, 2, 3, 4, 5 |
+| `sign FILE --output FILE --key KEY` | Write a signed copy of a dossier: one enveloped XMLDSig/XAdES signature per document, or one over the dossier with `--scope dossier`, optionally timestamped with `--tsa`, and with `--csc` instead of `--key` signed by a remote qualified certificate. Never overwrites the output. | 0, 2, 3, 4, 5 |
 | `skill` | Write the embedded agent skill (`SKILL.md`) to stdout and nothing else. Takes no `FILE` and no `--json`. | 0, 2, 3 |
 
-Every command except `skill` takes `-` in place of the path and reads the
-dossier from standard input. Every flag, the JSON envelope, the stable
+`create` is the writing side: it builds a new dossier from files on disk,
+in the shape this tool reads back, and does nothing else to it. The output
+is deterministic, so the same inputs with the same `--created` produce a
+byte-identical file; every limit that bounds reading bounds writing too; an
+existing output file is an error rather than an overwrite; and the dossier
+it writes carries no signature, which every run says out loud.
+`--encrypt-for CERT.pem` encrypts every `--document` payload for that
+recipient certificate as CMS EnvelopedData, which `extract --decrypt-key`
+reads back; it is the one thing that makes the output non-deterministic,
+because a content key must be random. Signing a dossier is `sign`, below;
+writing a container timestamp is not implemented, see
+[docs/roadmap.md](docs/roadmap.md).
+
+Every command except `create` and `skill` takes `-` in place of the path and
+reads the dossier from standard input. Every flag, the JSON envelope, the stable
 error, warning and check codes, the exit statuses, and the parser limits
 are specified in [docs/architecture.md](docs/architecture.md).
 
@@ -169,6 +184,36 @@ loopback, private and cloud-metadata destinations refused; trust material is
 never fetched. [docs/trust.md](docs/trust.md) explains how to obtain, pin, and
 lay out all of it.
 
+## Signing
+
+`sign` is the other writing side: it takes a dossier and a key you supply and
+writes a signed copy, with the reference scope, the XAdES signed properties
+and the placement `verify` requires, and optionally an RFC 3161 timestamp from
+a `--tsa` you name. The key, its certificate and its passphrase come from
+files, never from the command line.
+
+```sh
+openszigno sign dossier.es3 --output signed.es3 \
+  --key signer.p8 --cert signer.crt --chain issuing-ca.pem \
+  --tsa https://tsa.example/tsa --signing-time 2026-01-02T00:00:00Z
+```
+
+`--csc CONFIG.toml` signs through a Cloud Signature Consortium API v2 service
+instead of a local key, so a qualified certificate held by a remote signature
+creation device signs the same structure and only the digest ever leaves the
+machine; see
+[Signing through a CSC service](docs/architecture.md#signing-through-a-csc-service).
+
+**Signing is not verification.** `sign` produces a signature and checks
+nothing: not the key, not the certificate, not the chain, and it says so on
+every run. Whether what it wrote holds is a question for `verify`, against
+trust material you supply; and a `valid` verdict over a chain you built
+yourself means only that the chain you chose to trust verified. It is not a
+statement about anybody's identity, not a legal opinion, and not a qualified
+electronic signature: a qualified signature needs a key on a qualified device,
+which by construction is not a key this process can hold. See
+[docs/remote-signing.md](docs/remote-signing.md).
+
 ## Documentation
 
 - [Documentation index](docs/index.md), which lists everything else
@@ -176,8 +221,9 @@ lay out all of it.
 - [Trust, revocation, and qualified status](docs/trust.md)
 - [ES3 specification and implementation map](docs/es3-specification.md)
 - [Roadmap and residual risks](docs/roadmap.md)
+- [Remote signing and qualified signatures](docs/remote-signing.md)
 - [Agent skill](crates/openszigno-cli/skills/openszigno/SKILL.md): how an AI
-  agent should drive the CLI to inspect, extract, decrypt and verify
+  agent should drive the CLI to inspect, extract, decrypt, sign and verify
   dossiers. The binary carries it, so no checkout is needed to install it:
 
   ```sh

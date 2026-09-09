@@ -3,9 +3,9 @@
 
 use std::path::PathBuf;
 
-use clap::{Args, Parser, Subcommand};
+use clap::{ArgGroup, Args, Parser, Subcommand};
 use openszigno_core::{KNOWN_COMPATIBLE_NAMESPACES, Limits, ParseOptions};
-use openszigno_verify::parse_rfc3339;
+use openszigno_verify::{format_rfc3339, parse_rfc3339};
 
 /// Nesting levels `--max-depth` can never exceed, whatever the caller asks
 /// for. A flag must not be able to disable a bound.
@@ -35,6 +35,10 @@ pub(crate) enum Command {
     ValidateStructure(InputArgs),
     /// Verify XMLDSig/XAdES signatures, certificate paths, and revocation.
     Verify(VerifyArgs),
+    /// Build a new, unsigned dossier from files on disk.
+    Create(CreateArgs),
+    /// Write a signed copy of a dossier. It verifies nothing.
+    Sign(SignArgs),
     /// Print the agent skill (SKILL.md) that teaches an AI agent this CLI.
     Skill,
 }
@@ -144,6 +148,203 @@ pub(crate) struct VerifyArgs {
 impl VerifyArgs {
     pub(crate) fn parse_options(&self) -> ParseOptions {
         parse_options(&self.allow_namespace)
+    }
+}
+
+/// A creation date from `--created`, already normalised to the RFC 3339 UTC
+/// seconds form the dossier is written with.
+#[derive(Clone, Debug)]
+pub(crate) struct CreationDate(pub(crate) String);
+
+/// Parse `--created` during command-line parsing, so an unusable value is a
+/// usage error (exit 2) rather than a half-written dossier.
+fn parse_creation_date(value: &str) -> Result<CreationDate, String> {
+    parse_rfc3339(value)
+        .map(|unix| CreationDate(format_rfc3339(unix)))
+        .ok_or_else(|| "expected an RFC 3339 timestamp".to_owned())
+}
+
+#[derive(Clone, Debug, Args)]
+pub(crate) struct CreateArgs {
+    /// The dossier to write. An existing file is never overwritten.
+    #[arg(short, long, value_name = "FILE")]
+    pub(crate) output: PathBuf,
+    /// The dossier's own title.
+    #[arg(long, value_name = "TITLE")]
+    pub(crate) title: String,
+    /// A document to place in the dossier, as `PATH`, `PATH::TITLE`, or
+    /// `PATH::TITLE::TYPE/SUBTYPE`. The title defaults to the file's
+    /// basename and the media type to the one registered for its extension.
+    /// Repeatable; documents are written in the order given.
+    #[arg(long = "document", value_name = "PATH[::TITLE[::MIME]]")]
+    pub(crate) document: Vec<String>,
+    /// Store every `--document` payload as `zip -> base64` instead of
+    /// `base64`. Embedded dossiers are always stored as `base64`.
+    #[arg(long)]
+    pub(crate) zip: bool,
+    /// An existing dossier to embed as one document. It is parsed first, and
+    /// is titled `<stem>.dosszie` so that the reader treats it as an
+    /// embedded dossier. Repeatable; embedded dossiers follow the
+    /// `--document` list.
+    #[arg(long = "embed", value_name = "FILE")]
+    pub(crate) embed: Vec<PathBuf>,
+    /// Encrypt every `--document` payload for this recipient certificate,
+    /// PEM or DER, as CMS EnvelopedData: AES-256-CBC content encryption with
+    /// a fresh key per document, wrapped for each recipient with RSAES-OAEP
+    /// and SHA-256. Repeatable; any one recipient's private key reads the
+    /// document back. Embedded dossiers are never encrypted. Encrypting
+    /// makes the output depend on a random source, so two runs differ.
+    #[arg(long = "encrypt-for", value_name = "CERT")]
+    pub(crate) encrypt_for: Vec<PathBuf>,
+    /// Wrap the content-encryption key with RSAES-PKCS1-v1_5 instead of
+    /// RSAES-OAEP, for a reader that cannot do OAEP. Its padding is the one
+    /// the Bleichenbacher/Marvin attack is about; prefer the default.
+    #[arg(long = "legacy-key-transport", requires = "encrypt_for")]
+    pub(crate) legacy_key_transport: bool,
+    /// The creation date to write, as an RFC 3339 timestamp, normalised to
+    /// UTC seconds. Without it the current time is used, which makes the
+    /// output depend on the clock.
+    #[arg(long, value_name = "TIME", value_parser = parse_creation_date)]
+    pub(crate) created: Option<CreationDate>,
+    /// Emit one stable JSON object on stdout.
+    #[arg(long)]
+    pub(crate) json: bool,
+    /// Also accept an `--embed` dossier whose root Dossier element is in this
+    /// namespace, in addition to the known-compatible ones. Repeatable.
+    #[arg(long = "allow-namespace", value_name = "URI")]
+    pub(crate) allow_namespace: Vec<String>,
+}
+
+impl CreateArgs {
+    pub(crate) fn parse_options(&self) -> ParseOptions {
+        parse_options(&self.allow_namespace)
+    }
+}
+
+/// A signing time from `--signing-time`, normalised to the RFC 3339 UTC
+/// seconds form `xades:SigningTime` is written with.
+#[derive(Clone, Debug)]
+pub(crate) struct SigningTime(pub(crate) String);
+
+/// Parse `--signing-time` during command-line parsing, so an unusable value is
+/// a usage error (exit 2) rather than a half-written signature.
+fn parse_signing_time(value: &str) -> Result<SigningTime, String> {
+    parse_rfc3339(value)
+        .map(|unix| SigningTime(format_rfc3339(unix)))
+        .ok_or_else(|| "expected an RFC 3339 timestamp".to_owned())
+}
+
+/// What a signature covers.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
+pub(crate) enum Scope {
+    /// One signature per selected document, covering that document's profile
+    /// and its payload.
+    #[default]
+    Document,
+    /// One signature on the dossier, covering its profile and every document.
+    Dossier,
+}
+
+/// The group `--online-allow-private` and `--online-proxy` attach to: a run
+/// only touches the network for a timestamp authority or for a CSC service, so
+/// the two transport flags are meaningless without one of them.
+#[derive(Clone, Debug, Args)]
+#[command(group(ArgGroup::new("sign_network").args(["tsa", "csc"]).multiple(true)))]
+pub(crate) struct SignArgs {
+    /// Input .es3 dossier, or `-` to read it from standard input.
+    pub(crate) file: PathBuf,
+    /// The signed dossier to write. An existing file is never overwritten.
+    #[arg(short, long, value_name = "FILE")]
+    pub(crate) output: PathBuf,
+    /// The signing key: PKCS#8, DER or PEM, plain or passphrase-protected,
+    /// RSA or NIST P-256. The key is read from the file and never from the
+    /// command line. Mutually exclusive with --csc.
+    #[arg(long, value_name = "FILE", required_unless_present = "csc")]
+    pub(crate) key: Option<PathBuf>,
+    /// The certificate belonging to `--key`, PEM or DER. It may be omitted
+    /// when the key file is PEM and carries the certificate too. Without one
+    /// nothing binds the signature to a certificate.
+    #[arg(long, value_name = "FILE", conflicts_with = "csc")]
+    pub(crate) cert: Option<PathBuf>,
+    /// Sign through a Cloud Signature Consortium API v2 service instead of a
+    /// local key: only the digest of the canonicalised ds:SignedInfo leaves
+    /// this machine, and a remote qualified certificate signs it. The file is
+    /// a small TOML table holding the service URL and a bearer token obtained
+    /// out of band; see docs/remote-signing.md. Mutually exclusive with --key
+    /// and --cert.
+    #[arg(long = "csc", value_name = "FILE", conflicts_with_all = ["key", "passphrase_file", "algorithm"])]
+    pub(crate) csc: Option<PathBuf>,
+    /// The CSC credential to sign with, overriding the configuration file.
+    /// Without one the service must offer exactly one credential.
+    #[arg(long = "csc-credential", value_name = "ID", requires = "csc")]
+    pub(crate) csc_credential: Option<String>,
+    /// Read the passphrase of an encrypted `--key` from this file, one
+    /// trailing newline stripped. It takes precedence over the environment
+    /// variable OPENSZIGNO_DECRYPT_PASSPHRASE. A passphrase is never taken
+    /// from the command line.
+    #[arg(long = "passphrase-file", value_name = "FILE")]
+    pub(crate) passphrase_file: Option<PathBuf>,
+    /// A certificate to place in xades:CertificateValues, so a verifier can
+    /// build the signer's path without a store of its own. Repeatable; a PEM
+    /// bundle may hold several.
+    #[arg(long, value_name = "FILE")]
+    pub(crate) chain: Vec<PathBuf>,
+    /// What the signature covers: one signature per document, or one over the
+    /// whole dossier.
+    #[arg(long, value_enum, default_value_t = Scope::Document)]
+    pub(crate) scope: Scope,
+    /// Sign only this document, named by its object_ref (the ds:Object Id its
+    /// DocumentProfile OBJREF points at) or as `#<index>` in source order.
+    /// Repeatable. Without it every document is signed.
+    #[arg(long = "document", value_name = "SELECTOR")]
+    pub(crate) document: Vec<String>,
+    /// Ask this RFC 3161 timestamp authority for a token over each signature
+    /// value, and embed it as a xades:SignatureTimeStamp. This is the only
+    /// thing that makes `sign` touch the network, and the destination rules,
+    /// timeouts and size caps are the ones `verify --online` uses.
+    #[arg(long, value_name = "URL")]
+    pub(crate) tsa: Option<String>,
+    /// A timestamp authority certificate to place in xades:CertificateValues,
+    /// so a verifier can build the token's path too. Repeatable.
+    #[arg(long = "tsa-cert", value_name = "FILE")]
+    pub(crate) tsa_cert: Vec<PathBuf>,
+    /// The xades:SigningTime to write, as an RFC 3339 timestamp, normalised to
+    /// UTC seconds. Without it the current time is used, which makes the
+    /// output depend on the clock.
+    #[arg(long = "signing-time", value_name = "TIME", value_parser = parse_signing_time)]
+    pub(crate) signing_time: Option<SigningTime>,
+    /// The signature algorithm: rsa-sha256 (the default for an RSA key, and
+    /// what Hungarian e-akta verifiers universally accept), rsa-pss-sha256, or
+    /// ecdsa-p256-sha256 (the default for a P-256 key). Not accepted with
+    /// --csc, where the credential's own key/algo list decides.
+    #[arg(long, value_name = "NAME")]
+    pub(crate) algorithm: Option<String>,
+    /// Permit `--tsa` and `--csc` to contact loopback, private (RFC 1918),
+    /// link-local and unique-local addresses, and the host name `localhost`,
+    /// and permit a plain `http` CSC service. Refused by default, exactly as
+    /// it is for `verify --online`.
+    #[arg(long = "online-allow-private", requires = "sign_network")]
+    pub(crate) online_allow_private: bool,
+    /// Route the `--tsa` and `--csc` requests through this proxy. Without it
+    /// no proxy is used at all, and none is taken from the environment.
+    #[arg(long = "online-proxy", value_name = "URL", requires = "sign_network")]
+    pub(crate) online_proxy: Option<String>,
+    /// Emit one stable JSON object on stdout.
+    #[arg(long)]
+    pub(crate) json: bool,
+    /// Also accept a dossier whose root Dossier element is in this namespace,
+    /// in addition to the known-compatible ones. Repeatable.
+    #[arg(long = "allow-namespace", value_name = "URI")]
+    pub(crate) allow_namespace: Vec<String>,
+}
+
+impl SignArgs {
+    pub(crate) fn parse_options(&self) -> ParseOptions {
+        parse_options(&self.allow_namespace)
+    }
+
+    pub(crate) fn scope_is_dossier(&self) -> bool {
+        self.scope == Scope::Dossier
     }
 }
 

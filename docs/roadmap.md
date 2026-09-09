@@ -30,6 +30,15 @@ with the code-level detail, is
   DES-EDE3-CBC. Such a document is named and skipped.
 - Configurable limits: they are compile-time defaults today. See
   [Engineering items](#engineering-items).
+- Encrypting a dossier, and writing a container `es:TimeStamp`. `create`
+  writes an unsigned dossier and `sign` signs one, optionally with a
+  `xades:SignatureTimeStamp`; the rest is
+  [M5](#m5-authoring--in-progress).
+- A qualified electronic signature. `sign --key` holds a software key, which
+  cannot produce one; `sign --csc` signs through a service that holds the key
+  instead, but whether the result is qualified is the provider's statement and
+  never this tool's. The interactive login an `oauth2`-mode credential needs is
+  LAB-296. See [remote-signing.md](remote-signing.md).
 
 Outside the plan altogether:
 
@@ -40,7 +49,7 @@ Outside the plan altogether:
 - XML encodings other than UTF-8 and ISO-8859-2;
 - DTDs, DOCTYPE declarations, and entity declarations, which are rejected by
   design;
-- creating, editing, signing, timestamping, or encrypting dossiers;
+- editing a dossier in place, or rewriting one this tool did not build;
 - declaring a dossier legally valid, which is a legal judgement rather than a
   cryptographic result.
 
@@ -449,6 +458,50 @@ Residuals deliberately left out of M4:
   conflict with the `der 0.7`/`x509-cert 0.2`/`cms 0.2` versions this
   workspace is on. The `deny.toml` ignore covers only that residual and
   should be dropped with the upgrade.
+
+### M5: authoring — in progress
+
+Writing a dossier, not only reading one. The reading side is unchanged by
+this milestone: nothing here relaxes a limit, a name rule, or the
+verification boundary, and no command created by it verifies anything.
+
+The writer lives in its own crate, `openszigno-author`, so that the
+dependency tree of a caller who only reads stays as it is, and so that
+`openszigno-core` remains read-only.
+
+| Ticket | Scope | State |
+| --- | --- | --- |
+| LAB-287 | Research for the authoring milestone: the Cloud Signature Consortium API versions and the hash-signing flow, remote QSCD providers, RFC 3161 timestamp authorities, and what Hungarian courts and the company registry accept. Written up as [remote-signing.md](remote-signing.md). | Done |
+| LAB-288 | `create`: build an unsigned dossier from files on disk, deterministically, bounded by the same limits, never overwriting the output. | Done |
+| LAB-289 | `--encrypt-for`: write a document as `encrypt -> base64` for one or more recipient certificates, the forward direction of `extract --decrypt-key`. AES-256-CBC content encryption, RSAES-OAEP with SHA-256 key transport by default and RSAES-PKCS1-v1_5 under `--legacy-key-transport`. | Done |
+| LAB-290 | `sign` with a software key: XMLDSig over the dossier's own reference scope, with the XAdES signed properties `verify` already checks, and an optional `--tsa` RFC 3161 timestamp. | Done |
+| LAB-291 | A CSC (Cloud Signature Consortium) remote signing backend, so the key never reaches this process at all. `sign --csc` runs the non-interactive half of CSC API v2: discovery, credential resolution, `credentials/authorize` with a PIN or one-time password, and `signatures/signHash` over the digest alone. An `oauth2`-mode credential is refused with `csc_authorization_required`; the interactive login it needs is LAB-296. | Done |
+| LAB-292 | Timestamping what was signed. The `xades:SignatureTimeStamp` half shipped with LAB-290; what is left is the container `es:TimeStamp`, and timestamping a dossier without signing it. | Waiting on the maintainer |
+| LAB-293 | An e-Szignó interop check: everything this milestone writes is opened by the Microsec reference tool, and every difference is recorded rather than assumed away. | In progress |
+| LAB-296 | `openszigno csc login`: the OAuth 2.0 authorization-code rounds `--csc` cannot run: a loopback redirect listener, PKCE, `scope=service` and `scope=credential`, and RFC 9396 `authorization_details` where `supportsRar` is true. It is what makes an `oauth2`-mode credential usable, and it is the one thing LAB-291 deliberately left out. | Planned |
+
+Open questions this milestone must answer rather than assume:
+
+- Which `E-category` values and optional profile metadata the reference tool
+  expects, beyond the minimum `create` writes today.
+- Whether `application/nldossier2` is the right declared type for a general
+  embedded dossier, or only for the company-court case. It is what makes
+  openSzigno's own nested-dossier detection fire, which is why `create`
+  writes it; LAB-293 is where that gets checked against the reference tool.
+- What a signature this project writes must cover for the reference tool to
+  accept it. `sign` writes the set the e-dossier reference-scope rules require
+  and this tool's own `verify` accepts; whether the Microsec reference tool
+  agrees is LAB-293, and is the one thing that cannot be settled from inside
+  this repository.
+- Whether `xades:SigningCertificateV2` without an `IssuerSerialV2`, which is
+  what `sign` writes, is accepted everywhere the older `SigningCertificate`
+  form is. The digest is the binding either way.
+- Which key transport the Microsec reference tool writes. Its documented
+  `-encryptor_symm_alg` option covers the content cipher only and defaults to
+  `des-ede3-cbc`; no source available here names a key-transport default or
+  an option to choose one. `--legacy-key-transport` exists so that
+  RSAES-PKCS1-v1_5 can be produced when interop needs it, but which one the
+  reference tool actually wants is a LAB-293 question.
 
 ## Field observations from the private corpus
 

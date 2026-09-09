@@ -1,0 +1,54 @@
+[package]
+name = "openszigno-author"
+description = "Deterministic writer for Microsec e-Szigno dossiers, bounded by the openszigno-core limits"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+readme = "../../README.md"
+homepage = "https://github.com/watt-mind/openSzigno"
+documentation = "https://docs.rs/openszigno-author"
+keywords = ["e-szigno", "es3", "dossier", "xml", "microsec"]
+categories = ["parser-implementations", "encoding"]
+
+[lints]
+workspace = true
+
+[dependencies]
+# AES-256-CBC content encryption for the `encrypt` transform. No other
+# content cipher is ever written; DES-EDE3-CBC is read by `openszigno-core`
+# for compatibility and is never produced here.
+aes.workspace = true
+base64.workspace = true
+cbc.workspace = true
+cipher.workspace = true
+cms.workspace = true
+der.workspace = true
+openszigno-core = { version = "0.7.0", path = "../openszigno-core" }
+# The signer canonicalizes through the verifier's own backend, over the tree
+# the shared core parser built. Two canonicalizers that had to agree about
+# namespace scope is exactly the gap a signature must not sit in.
+openszigno-verify = { version = "0.7.0", path = "../openszigno-verify" }
+p256.workspace = true
+pem-rfc7468.workspace = true
+pkcs8.workspace = true
+# `OsRng`: the content-encryption key, the initialisation vector, and the
+# key-transport padding must all be unpredictable.
+rand_core.workspace = true
+rsa.workspace = true
+serde.workspace = true
+# The CSC API v2 bodies in `sign/csc.rs` are JSON in both directions.
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+unicode-normalization.workspace = true
+x509-cert.workspace = true
+# The content-encryption key and the signing key are zeroed when dropped.
+zeroize.workspace = true
+zip.workspace = true
+
+[dev-dependencies]
+rand_chacha.workspace = true
+rand_core.workspace = true
+rcgen = { workspace = true, features = ["x509-parser"] }

@@ -355,7 +355,7 @@ jobs:
           toolchain: stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       # `--no-verify` skips the build of the packaged crate. It is required
-      # here, not a shortcut: `openszigno-verify` and `openszigno-cli`
+      # here, not a shortcut: `openszigno-author`, `openszigno-verify` and `openszigno-cli`
       # depend on workspace crates whose released version is not on
       # crates.io until the release itself publishes it, so a verifying
       # package run cannot resolve them. What is still checked is every
@@ -372,12 +372,27 @@ jobs:
         run: |
           version=$(cargo metadata --no-deps --format-version 1 \
             | jq -r '.packages[] | select(.name == "openszigno-core") | .version')
-          if curl -sSf "https://index.crates.io/op/en/openszigno-core" \
-              | jq -e --arg v "$version" 'select(.vers == $v)' >/dev/null; then
+          published() {
+            curl -sSf "https://index.crates.io/op/en/$1" \
+              | jq -e --arg v "$version" 'select(.vers == $v)' >/dev/null
+          }
+          if published openszigno-core; then
             cargo package -p openszigno-verify --no-verify --locked
-            cargo package -p openszigno-cli --no-verify --locked
           else
             echo "::notice::openszigno-core $version is not on crates.io yet; skipping the dependent crates until the release publishes it"
+          fi
+          # author depends on core and verify; the CLI on all three. Each
+          # can only be packaged once what it depends on is published at
+          # this version, which the release workflow does in that order.
+          if published openszigno-verify; then
+            cargo package -p openszigno-author --no-verify --locked
+          else
+            echo "::notice::openszigno-verify $version is not on crates.io yet; skipping openszigno-author until the release publishes it"
+          fi
+          if published openszigno-author; then
+            cargo package -p openszigno-cli --no-verify --locked
+          else
+            echo "::notice::openszigno-author $version is not on crates.io yet; skipping openszigno-cli until the release publishes it"
           fi
       - name: List the packaged files
         run: |

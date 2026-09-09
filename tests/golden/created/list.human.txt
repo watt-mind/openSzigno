@@ -1,0 +1,4 @@
+Synthetic created dossier
+[0] hello.txt | text/plain | 54 B | ["base64"]
+[1] note.txt | text/plain | 62 B | ["base64"]
+Signatures/timestamps are listed by presence only; none were verified.

@@ -271,3 +271,137 @@ when designing later verification phases. Discovery, list authenticity and
 freshness, certificate purpose, and signature verification need explicit
 requirements. These links do not change the current user-supplied trust-store
 model or the `indeterminate` verification ceiling.
+
+## Remote signing and cloud signature APIs
+
+Added 2026-09-09 for [remote-signing.md](remote-signing.md), the research
+into how a future `sign` command would reach a remote signature service.
+Every external link used in that document is listed here. These are
+link-only entries: nothing was downloaded into `refs/`, so there are no
+checksums, and none of these sources is a specification this project
+implements today. Treat every vendor page as marketing until a call to the
+service confirms it. Seven links used in that document are already indexed
+above and are not repeated here: XMLDSig 1.1, the EUDI organisation and its
+Architecture and Reference Framework repository, the EU list of trusted
+lists, both Hungarian trusted list files, and the e-Szigno CLI reference.
+
+### Cloud Signature Consortium
+
+| Source | Project use |
+| --- | --- |
+| [CSC API V1.0.3.0](https://cloudsignatureconsortium.org/wp-content/uploads/2020/05/CSC_API_V1_1.0.3.0.pdf) | The version ETSI TS 119 432 V1.2.1 references; needed only to understand what a legacy service means by `hash`. |
+| [CSC API V1.0.4.0](https://cloudsignatureconsortium.org/wp-content/uploads/2020/01/CSC_API_V1_1.0.4.0.pdf) | The most widely deployed v1 revision; several commercial services still report it. |
+| [CSC API V2.0.0.2](https://cloudsignatureconsortium.org/wp-content/uploads/2023/04/csc-api-v2.0.0.2.pdf) | The operation set, the `explicit` and `oauth2` credential authorisation modes, and the `signatures/signHash` parameters a client has to send. |
+| [CSC API download page](https://cloudsignatureconsortium.org/resources/download-api-specifications/) | The authoritative version and date list; V2.1.0.1 and V2.2 are behind a form. |
+| [CSC API V2.2](https://cloudsignatureconsortium.org/resources/csc-api-v2-2/) | The current revision, and the one the EUDI reference deployment reports as `specs`. |
+| [CSC members list](https://cloudsignatureconsortium.org/about-us/our-members/) | The only membership record the consortium publishes; there is no conformance registry. |
+| [ETSI TS 119 432 V1.1.1](https://www.etsi.org/deliver/etsi_ts/119400_119499/119432/01.01.01_60/ts_119432v010101p.pdf) | Shows how the ETSI remote signature protocol references CSC constructs rather than adopting them. |
+| [ETSI TS 119 432 V1.3.1 tracking issue](https://github.com/eu-digital-identity-wallet/eudi-doc-standards-and-technical-specifications/issues/68) | Records the current edition of that standard; its CSC binding was not read. |
+| [ZealiD CSC API walkthrough](https://developer.zealid.com/docs/csc-api-in-detail) | A deployed v1 service's public request and response shapes, useful for seeing what changed in v2. |
+
+### EUDI Wallet rQES components
+
+| Source | Project use |
+| --- | --- |
+| [walletdriven-rpcentric-signer-qtsp-java](https://github.com/eu-digital-identity-wallet/eudi-srv-web-walletdriven-rpcentric-signer-qtsp-java) | The reference QTSP: the server side of the protocol a Rust client must speak. Apache-2.0. |
+| [rqes-walledriven.md](https://github.com/eu-digital-identity-wallet/eudi-srv-web-walletdriven-rpcentric-signer-qtsp-java/blob/main/docs/rqes-walledriven.md) | The step-by-step wallet-driven flow, including the `authorization_details` structure quoted in the research document. |
+| [walletdriven-signer-external-sca-java](https://github.com/eu-digital-identity-wallet/eudi-srv-web-walletdriven-signer-external-sca-java) | The wallet-driven signature creation application; shows what openSzigno would implement in Rust instead. |
+| [rpcentric-signer-sca-java](https://github.com/eu-digital-identity-wallet/eudi-srv-web-rpcentric-signer-sca-java) | The RP-centric counterpart; not applicable to a CLI, kept for contrast. |
+| [trustprovider-signer-java](https://github.com/eu-digital-identity-wallet/eudi-srv-web-trustprovider-signer-java) | A CSC-compliant remote signature service provider that runs without an HSM or external CA; the lightest local server to stand up. |
+| [eudi-lib-jvm-rqes-csc-kt](https://github.com/eu-digital-identity-wallet/eudi-lib-jvm-rqes-csc-kt) | Reference CSC client in the wallet's role, targeting CSC 2.2; documents which operations it does and does not cover. |
+| [eudi-lib-ios-rqes-csc-swift](https://github.com/eu-digital-identity-wallet/eudi-lib-ios-rqes-csc-swift) | The Swift equivalent of the same client. |
+| [eudi-lib-android-rqes-core](https://github.com/eu-digital-identity-wallet/eudi-lib-android-rqes-core) | Android rQES kit; wallet integration layer above the CSC client. |
+| [eudi-lib-ios-rqes-kit](https://github.com/eu-digital-identity-wallet/eudi-lib-ios-rqes-kit) | iOS rQES kit. |
+| [eudi-lib-android-rqes-ui](https://github.com/eu-digital-identity-wallet/eudi-lib-android-rqes-ui) | Android rQES user interface library; consent and selection screens. |
+| [eudi-lib-ios-rqes-ui](https://github.com/eu-digital-identity-wallet/eudi-lib-ios-rqes-ui) | iOS rQES user interface library. |
+| [walletdriven-tester-py](https://github.com/eu-digital-identity-wallet/eudi-app-web-walletdriven-tester-py) | The wallet tester; names the hosted reference deployment the research document probed. |
+| [walletdriven-signer-relyingparty-py](https://github.com/eu-digital-identity-wallet/eudi-srv-web-walletdriven-signer-relyingparty-py) | Wallet-driven relying party test site. |
+| [rpcentric-signer-relyingparty-py](https://github.com/eu-digital-identity-wallet/eudi-srv-web-rpcentric-signer-relyingparty-py) | RP-centric relying party test site. |
+| [ARF chapter 2, wallet functionalities](https://eudi.dev/latest/main/02-eudi-wallet-functionalities/) | States that qualified signatures are provided by default and free of charge in a Wallet Unit. |
+| [ARF chapter 3, ecosystem roles](https://eudi.dev/latest/main/03-roles-within-the-eudi-wallet-ecosystem/) | Defines the Qualified Electronic Signature Remote Creation Provider role and the Remote Signing or Sealing Interface. |
+| [ARF annex 4.08, remote QES flow](https://eudi.dev/latest/annexes/annex-4/annex-4.08-remote-qes-creating-a-signature-channeled-by-eudi-wallet.pdf) | The signature creation flow diagram for a wallet-channelled remote QES. |
+| [ARF 2.4.0 rendering](https://eudi.dev/2.4.0/architecture-and-reference-framework-main/) | The version the section numbers 2.4, 3.9 and 4.3.3 were read from; later versions may renumber. |
+
+### eIDAS and EU law
+
+| Source | Project use |
+| --- | --- |
+| [Regulation (EU) No 910/2014, original text](https://eur-lex.europa.eu/legal-content/EN/TXT/HTML/?uri=CELEX:32014R0910) | Article 25 on the legal effect of electronic signatures and their cross-border recognition. |
+| [Regulation (EU) No 910/2014, consolidated](https://eur-lex.europa.eu/legal-content/EN/TXT/HTML/?uri=CELEX:02014R0910-20240520) | Article 5a(5)(g) and 5a(13) on wallets offering free qualified signatures to natural persons. |
+| [Regulation (EU) 2024/1183](https://eur-lex.europa.eu/eli/reg/2024/1183/oj) | The amending regulation that introduced the wallet and the free-signature obligation. |
+| [Commission Implementing Decision (EU) 2015/1506](https://eur-lex.europa.eu/legal-content/EN/TXT/HTML/?uri=CELEX:32015D1506) | The formats a Member State must recognise: XAdES, CAdES, PAdES at B, T or LT, and ASiC. Hungarian law incorporates it by reference. |
+| [EU trusted list browser](https://eidas.ec.europa.eu/efda/trust-services/browse/eidas/tls) | The human-readable way to check whether a trust service is qualified. |
+| [EU trusted list browser, Hungary](https://eidas.ec.europa.eu/efda/trust-services/browse/eidas/tls/tl/HU) | The Hungarian view of the same, used to enumerate qualified timestamp providers. |
+| [NMHH notice on the TLv6 transition](https://nmhh.hu/cikk/258606/Tajekoztatas_a_Bizalmi_lista_uj_verziojara_TLv6_valo_atallasrol) | Trusted lists move to TLv6 on 2026-04-29 with no transition period and the Hungarian list moves to HTTPS; a verify-path deadline, not a signing one. |
+
+### Hungarian law and administration
+
+| Source | Project use |
+| --- | --- |
+| [2016. evi CXXX. torveny, Pp.](https://net.jogtar.hu/jogszabaly?docid=A1600130.TV) | Sections 605, 608 and 618 on electronic filing and the sanction for filing in the wrong manner; 325(3a) on role certificates; 634(15) grandfathering AVDH documents. |
+| [2006. evi V. torveny, Ctv.](https://net.jogtar.hu/jogszabaly?docid=a0600005.tv) | Section 36(2): a qualified electronic signature and a qualified timestamp in company proceedings. The strictest requirement found. |
+| [24/2006. (V. 18.) IM rendelet](https://net.jogtar.hu/jogszabaly?docid=a0600024.im) | The company proceedings implementing decree; repeats the qualified signature and timestamp requirement. |
+| [2023. evi CIII. torveny, Daptv.](https://net.jogtar.hu/jogszabaly?docid=a2300103.tv) | The current framework: section 54 on the DAP electronic signature, section 109 on electronic private documents, section 119(2) on the AVDH sunset, section 121 repealing the previous act. |
+| [2015. evi CCXXII. torveny, repealed](https://njt.jog.gov.hu/jogszabaly/2015-222-00-00) | Historical only, repealed on 2024-09-01; kept because older material still cites it. |
+| [451/2016. (XII. 19.) Korm. rendelet](https://njt.jog.gov.hu/jogszabaly/2016-451-20-22) | Section 12(1) on what makes an electronic document authentic; sections 112 and 113 on AVDH and its probative force. |
+| [137/2016. (VI. 13.) Korm. rendelet](https://njt.jog.gov.hu/jogszabaly/2016-137-20-22.0) | Section 7(c) binds Hungarian signature requirements to Decision (EU) 2015/1506. |
+| [322/2024. (XI. 6.) Korm. rendelet](https://net.jogtar.hu/jogszabaly?docid=A2400322.KOR) | Sections 72/A and 72/B: the FEDOR service that replaced citizen AVDH. |
+| [birosag.hu, electronic contact](https://birosag.hu/ugyfeleknek/elektronikus-ugyintezes/elektronikus-kapcsolattartas-birosagokkal) | The court service's entry point for electronic filing. |
+| [birosag.hu, IT guidance](https://birosag.hu/ugyfeleknek/elektronikus-ugyintezes/elektronikus-kapcsolattartas-birosagokkal/e-per/e-kapcsolattartas-az-egyes-ugytipusokban/polgari-gazdasagi-munkaugyi-es-kozigazgatasi-ugyek/informatikai-segedlet-az-elektronikus-beadvanyok) | The accepted attachment containers, including `.es3` and `.dosszie`, the size caps, and the statement that opening a court e-akta needs e-Szigno or MOKKA. |
+| [birosag.hu, e-litigation FAQ](https://birosag.hu/ugyfeleknek/elektronikus-ugyintezes/elektronikus-kapcsolattartas-birosagokkal/e-per/gyik) | Which signature levels remove the need for a separate document authentication service. |
+| [Ceginformacios Szolgalat, documents in a request](https://ceginformaciosszolgalat.kormany.hu/kerelem-tartalma-iratok) | The accepted attachment formats and scanning rules for company proceedings. |
+| [Ceginformacios Szolgalat, authority gateway channel](https://ceginformaciosszolgalat.kormany.hu/cegbirosagi-elektronikus-kommunikacio-hivatali-kapun-keresztul) | The e-akta requirement, the XAdES-T frame signature, and the statement that an eIDAS certificate from any Member State is acceptable. |
+| [Ceginformacios Szolgalat certificate profile](https://ceginformaciosszolgalat.kormany.hu/download/7/24/82000/tanusitvanyprofil_1_0_vegleges.pdf) | The binding profile for accepted end-user certificates; text extraction was lossy, so its field detail is unverified. |
+| [e-cegjegyzek technical page, 2023 archive snapshot](https://web.archive.org/web/20230923035747/https://www.e-cegjegyzek.hu/e-cegeljaras/e_cegeljaras_technika.htm) | The statement that the statutory requirement means XAdES-T, with XAdES-X-L and XAdES-A allowed. The live URL now returns HTTP 400. |
+| [SZEUSZ FEDOR service page](https://szeusz.gov.hu/szeusz/FEDOR) | What FEDOR produces and its explicit statement that the result is not a private document of full probative force. |
+| [hiteles.gov.hu, DAP eAlairas](https://hiteles.gov.hu/cikk/165/dap_ealairas_szolgaltatas) | Confirms the DAP signature is qualified, free of charge, and certifies no role. |
+| [services.gov.hu, eAlairas](https://services.gov.hu/dap-keretszolgaltatasok/ealairas) | The delivery model: a mobile application and an in-app qualified signing certificate. |
+| [kormanyhivatalok.hu, AVDH in ePapir](https://kormanyhivatalok.hu/hirek/januar-1-tol-az-avdh-hitelesites-az-epapir-szolgaltatasban-erheto-el) | Corroborates the 2025-01-01 move of AVDH into ePapir. |
+| [e-akta specification v1.5](http://static.e-szigno.hu/e-akta/e-akta_specifikacio_v1.5.pdf) | Microsec's own statement that the e-akta's structure and content are defined by XAdES. |
+
+### Remote signature service providers
+
+Vendor documentation, surveyed for the provider table. None of these was
+tested beyond an unauthenticated `info` call where one was possible.
+
+| Source | Project use |
+| --- | --- |
+| [Microsec e-Szigno Hitelesito Szerver](https://srv.e-szigno.hu/doc/eszigno_hitelesito_szerver/eszigno_hitelesito_szerver.html) | The only public Microsec signing REST interface found; an on-premise product with local keys, not a cloud service. |
+| [MicroSigner](https://eszigno.microsigner.com/esign/) | Microsec's hash-signing proxy product; login-gated, with no developer documentation on a Microsec domain. |
+| [NETLOCK Sign Enterprise](https://netlock.hu/termekek/netlock-sign-enterprise/) | States that signing is reachable through a REST API with a hash-only mode; no API documentation is public. |
+| [NETLOCK price tables](https://netlock.hu/dijtablazatok/) | The published price list; the figures themselves were not extracted. |
+| [Swisscom Trust Services downloads](https://trustservices.swisscom.com/en/esignature-hub/downloads-and-documents) | All-in Signing Service documentation; a proprietary REST and SOAP interface, not CSC. |
+| [Swisscom Trust Services on GitHub](https://github.com/SwisscomTrustServices) | Vendor sample code for the same service. |
+| [InfoCert CSC API](https://developers.infocert.digital/e-signature-and-e-sealing/csc-api/) | A named CSC product; the version is not stated publicly. |
+| [Namirial developer documentation](https://docs.namirial.app/) | eSignAnyWhere and signing web service documentation. |
+| [Namirial demo API](https://demo.esignanywhere.net/Api) | A public Swagger surface on the vendor's demo host. |
+| [Intesi Group integration](https://www.intesigroup.com/en/digital-signature-integration/) | PkBox Remote, stated to support CSC APIs without naming a version. |
+| [D-Trust sign-me API](https://www.d-trust.net/en/solutions/sign-me-api) | The German eID-backed remote signature product and its published portal pricing. |
+| [Evrotrust integration documentation](https://docs.evrotrust.com/docs/integration) | A proprietary REST interface with a named sandbox host. |
+| [Certinomis CSC member page](https://cloudsignatureconsortium.org/member/certinomis/) | States that customers connect through the CSC protocol. |
+| [Certinomis](https://www.certinomis.fr/) | The provider's own site. |
+| [Entrust Remote Signing Service datasheet](https://www.entrust.com/sites/default/files/documentation/datasheets/remote-signing-service-ds.pdf) | Names CSC 0.1.7.9 for the remote signing service. |
+| [Entrust Signing Automation Service guide](https://api.managed.entrust.com/sas/Entrust_Signing_Automation_Service_-_User_Guide.pdf) | Names CSC 1.0.4.0 for the remote signing engine; the seal-oriented product. |
+| [GlobalSign Digital Signing Service API](https://www.globalsign.com/en/resources/apis/api-documentation/digital-signing-service-api-documentation.html) | A proprietary REST interface from a CSC member. |
+| [GlobalSign DSS documentation](https://docs.globalsign.com/solutions/services/dss) | The same service's reference documentation. |
+| [Ascertia CSC page](https://www.ascertia.com/products/cloud-signature-consortium/) | SigningHub as a CSC 1.0.4.0 client, and ADSS as a CSC server; a software vendor, not a trust service provider. |
+| [PrimeSign hash signing API](https://primesign.cryptas.com/en/hash-signing-api) | The clearest published CSC version statement found: 1.0.4.0 and 2.1.0.1, with 2.1.0.1 recommended. |
+| [PrimeSign developer page](https://primesign.cryptas.com/en/developer) | Test access and a Postman collection for the same service. |
+| [Cleverbase signing API reference](https://cleverbase.com/en/dev-docs/signing/api-reference/) | The production CSC 1.0.4.0 interface. |
+| [Cleverbase signing v2 beta](https://cleverbase.com/en/dev-docs/signing-v2-beta/) | The CSC 2.2.0.0 testbed whose `info` response is quoted in the research document. |
+| [Buypass developer space](https://buypassdev.atlassian.net/wiki/spaces/BCSS/pages/3413311489/) | States that parts of CSC 2.0 are implemented, with a formal test onboarding. |
+| [A-Trust CSC_HashSignClient](https://github.com/A-Trust/CSC_HashSignClient) | A vendor sample client naming CSC 1.4 and shipping test credentials. |
+| [Digidentity CSC flow](https://connect.digidentity.com/flows/CSC/) | Documents a CSC v1 endpoint layout. |
+| [Universign API documentation](https://apps.universign.com/docs/api/) | A proprietary REST interface from a CSC member, with an alpha host. |
+| [Uanataca developer portal](https://developers.uanataca.com/) | Proprietary one-shot and cloud signing APIs with a test mode. |
+| [certSIGN remote electronic signature](https://www.certsign.ro/en/products/eidas-trust-services/remote-electronic-signature/) | States a CSC implementation without naming a version. |
+| [Trans Sped CSC member page](https://cloudsignatureconsortium.org/member/trans-sped/) | Membership record; no public API documentation found. |
+| [TrustPro electronic signature](https://www.trustpro.eu/electronic-signature/) | One of the few providers publishing per-signature prices. |
+| [Camerfirma remote signature certificate](https://www.camerfirma.com/certificados-digitales/certificado-digital-firma-remota/) | A published certificate price; signing goes through the parent group's product. |
+| [Smart-ID for e-service providers](https://www.smart-id.com/e-service-providers/smart-id-digital-signing-for-your-e-service/) | A widely used Baltic signing service that is deliberately not CSC. |
+| [Halcom One integration](https://one.halcom.si/en/halcom-one-integration) | A proprietary XML over HTTP interface. |
+| [Bit4id SignCloud](https://www.bit4id.com/en/solutions/signcloud/) | A proprietary remote signing platform. |
+| [CertEurope signature API](https://www.certeurope.fr/solutions-sur-mesure/api-de-signature/) | A proprietary signature API. |
+| [Izenpe technical documentation](https://www.izenpe.eus/descarga-de-certificados/webize01-cndoctecnica/es/) | Cloud certificates for professionals; interface unclear. |
+| [ANF AC signature API](https://www.anf.ac/api-firma/) | A proprietary signature API. |
+| [DigiSign electronic signature](https://digisign.ro/products-services/electronic-signature/) | Qualified certificates with no public API documentation. |

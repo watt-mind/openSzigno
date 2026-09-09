@@ -1,0 +1,1 @@
+A second synthetic input, so the fixture holds two documents.

@@ -36,9 +36,20 @@ checked.
 - CMS recipient forms other than `KeyTransRecipientInfo`, and content
   encryption outside the subset in [Decryption](#decryption).
 
+Authoring is no longer a non-goal: `create` writes a new, unsigned dossier
+and encrypts its documents for a recipient, `sign` writes a signed copy of
+one, and `sign --csc` signs through a remote service that holds the key.
+What is still planned in [roadmap.md](roadmap.md) is a container
+`es:TimeStamp`, timestamping a dossier without signing it, and the
+interactive `openszigno csc login` an `oauth2`-mode credential needs; none of
+the three exists yet. Nothing below is softened by any of it: `sign` produces
+a signature and checks none of it, and even `--csc`, which keeps the key out
+of this process entirely, asserts nothing about what it wrote (see
+[remote-signing.md](remote-signing.md)).
+
 Permanent non-goals for this tool:
 
-- creating, editing, signing, timestamping, or encrypting dossiers;
+- editing a dossier in place, or rewriting one it did not build;
 - declaring a dossier legally valid, which is a legal judgement rather than a
   cryptographic result;
 - silently accepting arbitrary XML that merely has an `.es3` suffix.
@@ -48,11 +59,14 @@ Permanent non-goals for this tool:
 ```text
 crates/
   openszigno-core/    # XML model, bounded decoding, transforms, stable codes
+  openszigno-author/  # deterministic dossier writing: XML, MIME, ZIP, titles
   openszigno-verify/  # canonicalization, XMLDSig, certificate paths
   openszigno-cli/     # clap commands, human output, JSON protocol, exit codes
 ```
 
-`openszigno-core` does not write files or print output. The CLI owns all
+`openszigno-core` does not write files or print output, and it never writes a
+dossier either: `openszigno-author` is the only crate that builds one, and it
+does that in memory. The CLI owns all
 filesystem policy and serialisation. This keeps the parser testable and makes
 future library use possible without weakening CLI safety.
 
@@ -93,7 +107,13 @@ crates/openszigno-cli/src/
   response.rs         # the JSON envelope, CliError, and its exit statuses
   render/             # writing the envelope (json.rs) and the summary (human.rs)
   commands/           # one module per command: inspect, list, validate,
-                      #   extract, verify, skill
+                      #   extract, verify, create, sign, skill
+  key_material.rs     # where a key, a certificate and a passphrase may come
+                      #   from, shared by `extract --decrypt-key` and `sign`
+  csc/                # `sign --csc`: the remote signing backend
+    mod.rs            #   the flow and the Signer implementation
+    config.rs         #   the --csc file: what it may say, and its secrets
+    client.rs         #   one bounded POST per CSC operation
   extract/            # select.rs (--document), plan.rs (decode, names, nesting),
                       #   names.rs (filename safety), write.rs (writing and
                       #   rollback), output_dir.rs (race-resistant output)
@@ -142,6 +162,38 @@ re-exported from `decrypt::mod` at their original path.
 | `cms` | `ContentInfo` / `EnvelopedData` / `RecipientInfo` parsing and validation, and unwrapping the content-encryption key (RSAES-PKCS1-v1_5, RSAES-OAEP). |
 | `ciphers` | Content-encryption algorithm identification and AES-128/192/256-CBC and DES-EDE3-CBC decryption. |
 | `keys` | Loading the recipient's PKCS#8 private key (DER or PEM, plain or passphrase-protected), PEM scanning, and certificate matching by `issuerAndSerialNumber` or `subjectKeyIdentifier`. |
+
+### Module map: `openszigno-author`
+
+```text
+crates/openszigno-author/src/
+  lib.rs      # DossierSpec/DocumentSpec, the limit checks, and build()
+  render.rs   # the XML text: element order, escaping, fixed whitespace
+  mime.rs     # extension to media type, and the caller's own type/subtype
+  sign/       # the signer behind `sign`: mod.rs (what to sign and the three
+              #   passes that fill it in), dsig.rs (ds:SignedInfo and the
+              #   octets each reference digests), xades.rs (the qualifying
+              #   properties), signer.rs (the Signer seam and SoftwareSigner),
+              #   tsa.rs (RFC 3161 requests and responses, bytes in and out),
+              #   csc.rs (CSC API v2 request bodies, response readers and the
+              #     algorithm mapping; no I/O),
+              #   error.rs (the codes a refused signing run reports)
+  title.rs    # the title rules extraction and authoring both apply
+  archive.rs  # the one-member ZIP a `zip -> base64` document carries
+  encrypt/    # the CMS EnvelopedData an `encrypt` document carries
+    mod.rs      # the message: content cipher, key transport, DER framing
+    recipient.rs # reading a recipient certificate and naming it in CMS
+  error.rs    # the stable codes a refused build reports
+```
+
+The crate reads no file, opens no socket, and calls no clock: the caller
+passes the bytes, the creation date, and the signing time in, reaches the
+private key through the `Signer` trait, and carries every RFC 3161 request to
+the timestamp authority itself. Its one non-deterministic corner is
+`encrypt/`, which draws a content key, an initialisation vector, and
+key-transport padding from `OsRng`; without recipients it consults no random
+source at all. See [The create command](#the-create-command) and
+[The sign command](#the-sign-command).
 
 ## Format scope
 
@@ -371,8 +423,9 @@ decoded text, the tree, and the decoded payloads are all held at once).
 ## Limits
 
 The limits are compile-time defaults, reported verbatim by `inspect --json`
-under `data.limits`. They are not yet configurable on the command line; see
-[roadmap.md](roadmap.md).
+under `data.limits`. They bound writing as well as reading: `create` refuses
+to build a dossier that would exceed any of them. They are not yet
+configurable on the command line; see [roadmap.md](roadmap.md).
 
 | Limit | Default | Enforced by | Purpose |
 | --- | --- | --- | --- |
@@ -380,7 +433,7 @@ under `data.limits`. They are not yet configurable on the command line; see
 | `max_documents` | 256 | core | `es:Document` elements per dossier. |
 | `max_base64_chars` | 100663296 (96 MiB) | core | Base64 characters in one payload after whitespace removal. |
 | `max_decoded_document_bytes` | 67108864 (64 MiB) | core | Decoded size of one document. |
-| `max_total_decoded_bytes` | 268435456 (256 MiB) | CLI | Aggregate decoded size of one extraction, across the whole embedded-dossier tree. |
+| `max_total_decoded_bytes` | 268435456 (256 MiB) | CLI, author | Aggregate decoded size of one extraction, across the whole embedded-dossier tree, and of one `create` run. |
 | `max_zip_members` | 16 | core | Members in a `zip` transform archive; the format stores exactly one, so this is defence in depth. |
 | `max_zip_expanded_bytes` | 67108864 (64 MiB) | core | Expanded size of the ZIP member. |
 | `max_zip_compression_ratio` | 100 | core | Expanded/compressed ratio, checked on actual decoded bytes. |
@@ -398,11 +451,15 @@ under `data.limits`. They are not yet configurable on the command line; see
 | `extract FILE --decrypt-key KEY` | The same, additionally decrypting documents whose transform chain contains `encrypt`. See [Decryption](#decryption). | No |
 | `validate-structure FILE` | Apply the project's strict structural rules without validating signatures. | No |
 | `verify FILE` | Verify every `ds:Signature`: canonicalization, reference digests, the signature value, the e-dossier reference-scope rules, the XAdES signed `SigningCertificate` binding, RFC 3161 signature timestamps, the certificate path, and revocation. Reports a per-signature verdict of `valid`, `invalid`, or `indeterminate`. | No |
+| `create --output FILE --title TITLE` | Build one new, unsigned dossier from files on disk, without overwriting anything. The only command that writes a dossier. See [The create command](#the-create-command). | No: it reads its inputs only |
+| `sign FILE --output FILE --key KEY` | Write a signed copy of a dossier: one enveloped XMLDSig/XAdES signature per selected document, or one over the dossier. It verifies nothing. See [The sign command](#the-sign-command). | No: it reads its input only |
 | `skill` | Write the agent skill the binary embeds (`crates/openszigno-cli/skills/openszigno/SKILL.md`) to stdout, byte for byte and with nothing added. Reads no dossier and emits no envelope. | No |
 
-In every command except `skill` `FILE` is either a path to a regular file or
+In every command except `create` and `skill` `FILE` is either a path to a
+regular file or
 `-`, which reads the dossier from standard input; see
-[Reading from stdin](#reading-from-stdin). `skill` takes no `FILE` and no
+[Reading from stdin](#reading-from-stdin). `create` reads no dossier and
+takes no `FILE`. `skill` takes no `FILE` and no
 flags of its own; see [The skill command](#the-skill-command).
 
 These flags apply to every command that reads a dossier:
@@ -429,6 +486,41 @@ These flags apply to every command that reads a dossier:
 | `--decrypt-cert <FILE>` | The certificate belonging to `--decrypt-key`, PEM or DER. Optional when the key file is PEM and carries the certificate too. Requires `--decrypt-key`. |
 | `--decrypt-passphrase-file <FILE>` | Read the passphrase of an encrypted key from this file. Requires `--decrypt-key`. |
 | `--allow-legacy-ciphers` | Also decrypt DES-EDE3-CBC content. Requires `--decrypt-key`. |
+
+`create` takes no `FILE` and accepts:
+
+| Flag | Meaning |
+| --- | --- |
+| `-o`, `--output <FILE>` | The dossier to write. Required. An existing file is never overwritten. |
+| `--title <TITLE>` | The dossier's own title. Required. |
+| `--document <PATH[::TITLE[::MIME]]>` | One document to place in the dossier. Repeatable. |
+| `--zip` | Store every `--document` payload as `zip -> base64`. |
+| `--embed <FILE>` | An existing dossier to embed as one document. Repeatable. |
+| `--encrypt-for <CERT>` | Encrypt every `--document` payload for this recipient certificate, PEM or DER, as CMS `EnvelopedData`. Repeatable; any one recipient's private key reads the document back. An `--embed` dossier is never encrypted. See [Encrypting for a recipient](#encrypting-for-a-recipient). |
+| `--legacy-key-transport` | Wrap the content-encryption key with RSAES-PKCS1-v1_5 instead of RSAES-OAEP. Requires `--encrypt-for`. |
+| `--created <TIME>` | The creation date, as an RFC 3339 timestamp. Without it the current time is used. |
+| `--json` | Emit exactly one JSON object on stdout. |
+| `--allow-namespace <URI>` | Also accept an `--embed` dossier rooted in this namespace. Repeatable. |
+
+`sign` takes a `FILE` and accepts:
+
+| Flag | Meaning |
+| --- | --- |
+| `-o`, `--output <FILE>` | The signed dossier to write. Required. An existing file is never overwritten. |
+| `--key <FILE>` | The signing key: PKCS#8, DER or PEM, plain or passphrase-protected, RSA or NIST P-256. Required unless `--csc` is given, and never taken from `argv`. |
+| `--cert <FILE>` | The certificate belonging to `--key`, PEM or DER. Optional when the key file is PEM and carries the certificate too. Not accepted with `--csc`. |
+| `--csc <FILE>` | Sign through a Cloud Signature Consortium API v2 service instead of a local key. The file is a small TOML table naming the service and a bearer token obtained out of band. Mutually exclusive with `--key`, `--cert`, `--passphrase-file` and `--algorithm`. See [Signing through a CSC service](#signing-through-a-csc-service). |
+| `--csc-credential <ID>` | The CSC credential to sign with, overriding the configuration file. Without one the service must offer exactly one. Requires `--csc`. |
+| `--passphrase-file <FILE>` | Read the passphrase of an encrypted `--key` from this file. It takes precedence over `OPENSZIGNO_DECRYPT_PASSPHRASE`. |
+| `--chain <FILE>` | A certificate for `xades:CertificateValues`, so a verifier can build the signer's path without a store of its own. Repeatable; a PEM bundle may hold several. |
+| `--scope <document\|dossier>` | What the signature covers. `document` (the default) writes one signature per selected document; `dossier` writes one over the whole dossier. |
+| `--document <SELECTOR>` | Sign only the named documents, by `object_ref` or as `#<index>`. Repeatable. Without it every document is signed. See [Selecting documents](#selecting-documents). |
+| `--tsa <URL>` | Ask this RFC 3161 timestamp authority for a token over each signature value. With `--csc`, one of the two things that make `sign` open a socket. |
+| `--tsa-cert <FILE>` | A timestamp authority certificate for `xades:CertificateValues`. Repeatable. |
+| `--signing-time <TIME>` | The `xades:SigningTime` to write, RFC 3339, normalised to UTC seconds. Without it the current time is used. |
+| `--algorithm <NAME>` | `rsa-sha256` (default for an RSA key), `rsa-pss-sha256`, or `ecdsa-p256-sha256` (default for a P-256 key). Not accepted with `--csc`, where the credential's own `key/algo` list decides. |
+| `--online-allow-private` | Permit `--tsa` and `--csc` to contact loopback, private, link-local and unique-local addresses, and permit a plain `http` CSC service. Requires `--tsa` or `--csc`. |
+| `--online-proxy <URL>` | Route the `--tsa` and `--csc` requests through this proxy. Requires `--tsa` or `--csc`. |
 
 In JSON mode, stdout contains exactly one JSON object and diagnostics go to
 stderr. Document ordering is the source XML order. No command writes XML
@@ -532,7 +624,7 @@ The envelope fields are always present:
 | --- | --- | --- |
 | `schema_version` | number | Currently `1`. |
 | `ok` | boolean | `false` on any failure. |
-| `command` | string | `inspect`, `list`, `extract`, `validate-structure`, `verify`, or `usage`. `skill` never appears: it emits no envelope. |
+| `command` | string | `inspect`, `list`, `extract`, `validate-structure`, `verify`, `create`, `sign`, or `usage`. `skill` never appears: it emits no envelope. |
 | `input` | object | `format` is `"microsec-es3"` or `null`; `bytes` is the input size or `null`. |
 | `data` | object or null | Command-specific; `null` on failure. |
 | `warnings` | array | Objects with stable `code` and human `message`. |
@@ -602,6 +694,8 @@ writes one compact line; this is pretty-printed:
 | `list` | `dossier`, plus `documents`: an array in source order with `index`, `title`, `creation_date`, `mime_type` (`media_type`, `subtype`, `extension`, `charset`), `source_size`, `object_ref`, `transforms`, and `nested_dossier`. `source_size` is `null` when the profile omits `SourceSize`. |
 | `extract` | `extracted` (array of `document_index`, `dossier_path`, `filename`, `path`, `bytes`, `detected_type`, `declared_type`, `decrypted`), `extracted_count`, `skipped_count`, `nested_dossiers_extracted`, `selected`. |
 | `validate-structure` | `valid_structure`, `documents`, `conformance_warnings`, `cryptographic_verification_performed` (always `false`). |
+| `create` | `output`, `bytes`, `created`, and `documents`: an array in the order written with `index`, `title`, `mime_type`, `source_size`, `transforms`, `nested_dossier`, and `object_ref`. See [The create command](#the-create-command). |
+| `sign` | `output`, `bytes`, and `signatures`: an array in the order written with `id`, `scope`, `document_index`, `algorithm`, `signing_time`, `timestamped`, and `signer` (`software` or `csc`). A `csc` entry also carries `credential_id` and `csc_specs`, the `specs` version the service reported. Neither is a secret; the bearer token never appears. See [The sign command](#the-sign-command). |
 | `verify` | `verdict`, `verification_time`, `policy`, `limits`, `counts`, `checks`, `documents`, `signatures`, `timestamps`. `documents` is the per-document coverage inventory and `timestamps` the container `es:TimeStamp` reports; both are always present, as empty arrays when there is nothing to report. See [The `verify` command](#the-verify-command). |
 
 `valid_structure` stays `true` whenever parsing succeeded;
@@ -774,14 +868,14 @@ I/O and extraction policy.
 | `invalid_attribute` | core | 4 | A required attribute is absent or malformed. |
 | `duplicate_id` | core | 4 | An XML ID is empty or repeated. |
 | `unresolved_objref` | core | 4 | An `OBJREF` does not resolve to exactly one ID, or not to the expected element. |
-| `too_many_documents` | core | 4 | More than `max_documents` documents. |
-| `decoded_too_large` | core | 4 or 5 | A declared or decoded payload exceeds a size limit (4 when detected during parsing, 5 during extraction). |
+| `too_many_documents` | core, author | 4 | More than `max_documents` documents, read or written. |
+| `decoded_too_large` | core, author, CLI | 4 or 5 | A declared or decoded payload exceeds a size limit (4 when detected during parsing or while building a dossier, 5 during extraction). `create` also reports it for an input file over `max_decoded_document_bytes`. |
 | `invalid_base64` | core | 5 | Payload is not canonical Base64. |
 | `source_size_mismatch` | core | 5 | Decoded length differs from the declared `SourceSize`. |
 | `invalid_zip` | core | 5 | ZIP payload is malformed or cannot be expanded. |
 | `zip_member_limit` | core | 5 | The archive does not contain exactly one member. |
 | `zip_size_limit` | core | 5 | The ZIP member exceeds the expanded-size limit. |
-| `zip_ratio_limit` | core | 5 | The ZIP member exceeds the compression-ratio limit. |
+| `zip_ratio_limit` | core, author | 4 or 5 | The ZIP member exceeds the compression-ratio limit (4 when `create --zip` refuses to write one, 5 when extraction refuses to expand one). |
 | `unsafe_zip_member` | core | 5 | The member is a directory, a symlink, or has a non-basename path. |
 | `unsupported_zip_member` | core | 5 | The member uses encryption or an unsupported compression method. |
 | `invalid_decryption_key` | core | 4 | `--decrypt-key` is not an RSA private key in PKCS#8 DER or PEM form, or its passphrase is missing or wrong. The two are deliberately not told apart. |
@@ -790,20 +884,46 @@ I/O and extraction policy.
 | `decryption_key_mismatch` | core | 4 | The certificate's public key is not the given key's public key. |
 | `invalid_cms` | core | 5 | An encrypted payload is not a well-formed CMS `EnvelopedData` `ContentInfo`, carries no encrypted content, or has a malformed initialisation vector or block length. |
 | `decrypt_failed` | core | 5 | Decryption failed. The message is exactly `decryption failed` and never says which step failed. |
+| `no_documents` | author | 4 | `create` was given no `--document` and no `--embed`. |
+| `unsafe_document_title` | author | 4 | A `create` document title fails the rules extraction applies to a filename, so the dossier would not be extractable. |
+| `invalid_dossier_title` | author | 4 | The `create --title` value is empty, over 1024 bytes, or holds a control character. |
+| `unknown_mime_type` | author | 4 | No media type is registered for a `create` document's extension and none was given. |
+| `invalid_mime_type` | author | 4 | A `create` document's media type is not a bare `type/subtype`. |
+| `zip_failed` | author | 4 | A `create --zip` payload could not be packed into a ZIP archive. Not reachable through any input this tool accepts. |
+| `invalid_recipient_certificate` | author, CLI | 4 | A `create --encrypt-for` file is not a readable X.509 certificate, in DER or in a PEM `CERTIFICATE` block, or is larger than 1 MiB. |
+| `unsupported_recipient_key` | author | 4 | A `create --encrypt-for` certificate carries a public key that is not RSA, or an RSA key too small to wrap the content-encryption key. |
+| `no_recipients` | author | 4 | Encryption was asked for with no recipient certificate. Unreachable through the CLI, which only builds an encryption request from `--encrypt-for`. |
+| `encrypt_failed` | author | 4 | The CMS `EnvelopedData` could not be built. Not reachable through any input this tool accepts: every value in it is built by this tool and within every bound the DER encoders check. |
+| `invalid_signing_key` | author | 4 | `--key` is not an RSA or NIST P-256 private key in PKCS#8 DER or PEM form, its passphrase is missing or wrong, or `--algorithm` names a scheme that key cannot produce. "Wrong passphrase" is deliberately not told apart from "not a PKCS#8 file". |
+| `invalid_signing_certificate` | author | 4 | `--cert`, `--chain`, `--tsa-cert`, or the certificate inside the key file is not a readable X.509 certificate. |
+| `signing_certificate_required` | author | 4 | `--key` was given with no `--cert` and the key file carries none, so nothing would bind the signature to a certificate. |
+| `signing_key_mismatch` | author | 4 | The certificate's public key is not the signing key's public key. |
+| `document_not_signable` | author | 4 | A selected document has no payload `ds:Object` or no `es:DocumentProfile` with an `Id`, so the mandated reference set cannot be written for it. |
+| `document_already_signed` | author | 4 | Adding this signature would invalidate one the dossier already carries. See [Signing a dossier that is already signed](#signing-a-dossier-that-is-already-signed). |
+| `tsa_failed` | author, CLI | 5 | The `--tsa` request could not be made, was refused by the destination policy, or the answer was not a granted RFC 3161 response carrying a token over the requested imprint. The message names the reason. |
+| `csc_config_invalid` | CLI, author | 4 | The `--csc` configuration file cannot be used (a missing or empty key, an unknown key, a value outside the accepted TOML subset, a `redirect_uri` that is not a loopback URI, or a plain `http` `base_url` without `--online-allow-private`), or the service it names does not report a CSC API v2 `specs` version or will not sign a data-to-be-signed representation. Nothing is contacted and nothing is written. |
+| `csc_unreachable` | CLI | 5 | A CSC operation could not be carried out at all. The message names the operation and the transport's own failure class (`timeout`, `destination_refused: …`, `http status …`, `too large`, `redirect`, `invalid`, `transport`). |
+| `csc_rejected` | CLI, author | 5 | The service answered and what it answered cannot be used. The message carries the operation, the HTTP status and the service's own `error` string, bounded and stripped of control characters. `error_description` is never quoted, and neither is the bearer token. |
+| `csc_credential_ambiguous` | author | 4 | The account holds several signing credentials and none was named. The message lists the identifiers; pass one as `--csc-credential`. |
+| `csc_credential_unusable` | author | 4 | The named credential cannot produce a signature this build writes: its key or certificate is not enabled or valid, it published no certificate or no algorithm, its certificate is unreadable, or its `key/algo` list offers nothing this build writes, including RSASSA-PSS with no `signAlgoParams`, which would mean guessing the salt length. |
+| `csc_authorization_required` | author | 4 | The credential's authorisation mode is `oauth2`, which needs a second OAuth 2.0 round with `scope=credential` and therefore a browser. This build is non-interactive; see [Signing through a CSC service](#signing-through-a-csc-service). |
+| `csc_signature_invalid` | author | 5 | The signature the service returned does not verify against the certificate it published. Nothing is written. A hash-only service signs a digest it never sees the document behind, so this is the one check that tells a right signature from a well-formed wrong one. |
+| `sign_failed` | author | 5 | Signing could not be completed: an identifier the signature needs is already used in the dossier, an element could not be canonicalized, or the key refused to sign. |
+| `invalid_output_path` | CLI | 4 | The `create --output` or `sign --output` path does not name a file. |
 | `unsafe_output_name` | CLI | 5 | A document title or declared extension cannot be used as a filename, or the derived `<file>.d` directory name would be too long. |
 | `output_name_collision` | CLI | 5 | Residual: two outputs still map to the same name in one directory after deduplication. |
 | `output_exists` | CLI | 5 | A destination file already exists or cannot be created safely. |
-| `document_not_found` | CLI | 4 | A `--document` selector matches no document, is not a decimal index after `#`, or names a document inside an embedded dossier. |
+| `document_not_found` | CLI, author | 4 | A `--document` selector matches no document, is not a decimal index after `#`, or names a document inside an embedded dossier. `sign` reports it for its own selectors. |
 | `document_ambiguous` | CLI | 4 | A `--document` `object_ref` selector matches more than one document. Unreachable through a parsed dossier, whose XML IDs are unique. |
 | `stdout_requires_single_document` | CLI | 4 | `--stdout` did not resolve to exactly one document, or the one it resolved to embeds a dossier while recursion is on. |
 | `document_not_extractable` | CLI | 5 | The document `--stdout` selected is encrypted or uses an unsupported transform chain. |
 | `trust_store_invalid` | CLI | 3 | `--trust-store` does not name a readable directory, holds a file that is not PEM or DER certificate data, or holds no trust anchor. A partially loaded store would silently change what "trusted" means, so the run fails instead. |
 | `trust_list_invalid` | CLI | 3 | A `--trust-list`, `--lotl`, or `--trust-list-signer` file could not be read or parsed. A trusted list that loaded only in part would silently change what "trusted" means, so the run fails instead. |
 | `revocation_store_invalid` | CLI | 3 | `--revocation-store` does not name a readable directory, holds more files than the loader will read, holds a file larger than `MAX_REVOCATION_ITEM_BYTES`, or holds a file that is neither a CRL nor an OCSP response. |
-| `online_options_invalid` | CLI | 3 | The `--online` transport could not be built, which today means `--online-proxy` is not a usable proxy URL. |
+| `online_options_invalid` | CLI | 3 or 4 | The network transport could not be built, which today means `--online-proxy` is not a usable proxy URL. `verify --online` reports it as exit 3; `sign --tsa` and `sign --csc` report it as exit 4. |
 | `online_cache_invalid` | CLI | 3 | The `--online-cache` directory could not be opened safely, or a cache file could not be written. A name inside it that already holds something else is not this error; that is one `online_fetch_failed` with the class `cache_collision`, and the run continues. |
 | `unsafe_output_directory` | CLI | 5 | The output path contains a symlink or reparse point, or is not a real directory. |
-| `total_size_limit` | CLI | 5 | Aggregate decoded size exceeds `max_total_decoded_bytes`. |
+| `total_size_limit` | CLI, author | 4 or 5 | Aggregate decoded size exceeds `max_total_decoded_bytes` (4 when `create` refuses to write, 5 during extraction). |
 
 Warning codes. Warnings never change the exit status by themselves:
 
@@ -824,6 +944,11 @@ Warning codes. Warnings never change the exit status by themselves:
 | `signature_inventory_truncated` | all commands | More than 64 `ds:Signature` or 64 `es:TimeStamp` elements are present, so the inventory describes only the first 64 of that kind. `signatures_present` and `timestamps_present` still count them all. |
 | `output_name_deduplicated` | `extract` | A document's output name was already taken in its directory, so it was renamed. |
 | `nested_dossier_depth_limit` | `extract` | An embedded dossier was kept as a file because `--max-depth` was reached. |
+| `recipient_certificate_expired` | `create` | An `--encrypt-for` certificate has already expired; the document was encrypted for it anyway, because decryption never consults a recipient certificate's validity. The message names the recipient by its position on the command line. |
+| `created_dossier_unsigned` | `create` | The dossier that was written carries no signature and no timestamp. Every successful `create` reports it, last. |
+| `signed_dossier_unverified` | `sign` | A signature was produced and nothing was checked. Every successful `sign` reports it. |
+| `csc_config_permissive` | `sign --csc` | The `--csc` configuration file is readable by other users on this machine and may hold a bearer token. The mode is never enforced, only reported. Unix only. |
+| `csc_key_unused` | `sign --csc` | The configuration names `redirect_uri`, `client_secret` or `client_secret_file`, which belong to the interactive `csc login` flow and are not used by this run. |
 | `nested_dossier_invalid` | `extract` | An embedded dossier could not be parsed; the raw payload was kept and the run continued. |
 
 ## The `verify` command
@@ -2687,6 +2812,608 @@ because the token's revocation check is folded into the signature's check list
 in its own right. A TSA certificate that was actually revoked makes the check
 `failed`, which sinks both.
 
+## The create command
+
+`create` is the only command that writes a dossier. It builds one unsigned
+`es:Dossier` from files on disk, in the default e-Szignó 3.0 namespace, and
+does nothing else: it signs nothing, and reads no dossier except the ones
+`--embed` names. With `--encrypt-for` it also encrypts, which is the one
+thing it does beyond writing XML; see
+[Encrypting for a recipient](#encrypting-for-a-recipient). The writing
+itself lives in `openszigno-author`, which never touches the filesystem;
+`openszigno-core` stays read-only.
+
+```sh
+openszigno create --output FILE.es3 --title TITLE \
+  [--document PATH[::TITLE[::MIME]]]... [--zip] [--embed DOSSIER.es3]... \
+  [--encrypt-for CERT]... [--legacy-key-transport] \
+  [--created RFC3339] [--json]
+```
+
+### What it writes
+
+The layout is fixed. A dossier with one text document is exactly this, with
+the payload Base64 on one line:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<es:Dossier xmlns:es="https://www.microsec.hu/ds/e-szigno30#" xmlns:ds="http://www.w3.org/2000/09/xmldsig#">
+  <es:DossierProfile Id="dossier" OBJREF="documents">
+    <es:Title>Synthetic created dossier</es:Title>
+    <es:E-category>electronic dossier</es:E-category>
+    <es:CreationDate>2026-01-01T00:00:00Z</es:CreationDate>
+  </es:DossierProfile>
+  <es:Documents Id="documents">
+    <es:Document>
+      <es:DocumentProfile Id="profile0" OBJREF="obj0">
+        <es:Title>hello.txt</es:Title>
+        <es:E-category>electronic data</es:E-category>
+        <es:CreationDate>2026-01-01T00:00:00Z</es:CreationDate>
+        <es:Format><es:MIME-Type type="text" subtype="plain" extension="txt"/></es:Format>
+        <es:SourceSize sizeValue="54" sizeUnit="B"/>
+        <es:BaseTransform><es:Transform Algorithm="base64"/></es:BaseTransform>
+      </es:DocumentProfile>
+      <ds:Object Id="obj0">SGVsbG8gLi4uCg==</ds:Object>
+    </es:Document>
+  </es:Documents>
+</es:Dossier>
+```
+
+`tests/fixtures/created.es3` is that output for the two committed inputs
+under `tests/fixtures/create/`, and the golden matrix rebuilds it on every
+run.
+
+| Element | Value |
+| --- | --- |
+| `es:DossierProfile` | `Id="dossier"`, `OBJREF="documents"`, so the profile resolves to the one `es:Documents` element. |
+| `es:E-category` | `electronic dossier` on the dossier, `electronic data` on every document. Not configurable. |
+| `es:CreationDate` | `--created`, normalised to RFC 3339 UTC seconds, on the dossier and on every document alike. Without `--created` it is the current time in the same form, which is the only thing that makes two runs differ. |
+| `es:DocumentProfile` | `Id="profile<index>"`, `OBJREF="obj<index>"`, indexes counted from 0 in the order the documents were given. |
+| `es:MIME-Type` | `type`, `subtype`, and `extension`, the three attributes the reader reads. No `charSet` is written. |
+| `es:SourceSize` | The decoded length in bytes, `sizeUnit="B"`, always present. |
+| `es:BaseTransform` | `base64`, or `zip` then `base64` under `--zip`; `--encrypt-for` inserts `encrypt` before `base64`. |
+| `ds:Object` | `Id="obj<index>"`, holding the Base64 payload with no line breaks. |
+
+### Determinism
+
+The same inputs with the same `--created` produce a byte-identical file.
+Element order, indentation, and the identifiers above are fixed, no
+identifier is random, Base64 is unwrapped, and the ZIP a `--zip` document
+carries pins its member's modification time to the ZIP epoch. Only the
+default creation date depends on the clock.
+
+**`--encrypt-for` gives that up, by design.** An encrypted document carries a
+content-encryption key, an initialisation vector, and key-transport padding
+that must all be unpredictable, so two runs over the same inputs with the
+same `--created` produce different bytes. A fixed value anywhere in that list
+would make every document this tool wrote readable by anyone who read the
+source. Without `--encrypt-for` nothing in the writer consults a random
+source and the guarantee above is unchanged.
+
+### Documents
+
+`--document PATH[::TITLE[::MIME]]` names one document, and is repeatable.
+`--embed DOSSIER.es3` names one existing dossier to embed, and is repeatable
+too. Documents are written in the order given, every `--document` first and
+every `--embed` after them.
+
+| Part | Default |
+| --- | --- |
+| `TITLE` | The file's basename. It becomes `es:Title`, and it is the name `extract` writes the payload under. |
+| `MIME` | The `type/subtype` registered for the title's extension. A title whose extension has no registered type is refused as `unknown_mime_type` rather than guessed; pass the type to write it anyway. |
+
+The declared `extension` is the title's own suffix, when that suffix is a
+short ASCII alphanumeric one; otherwise no extension is declared and the
+reader falls back to content sniffing.
+
+Titles are written in one canonical Unicode composition (NFC), the same one
+the extraction sanitizer writes a filename in, so the title in the dossier
+and the name the payload comes back out under are the same string.
+
+A title is checked against exactly the rules
+[Extraction policy](#extraction-policy) applies before writing a file, using
+one shared implementation in `openszigno-author`. A title `extract` would
+refuse is `unsafe_document_title` here, so a created dossier is always
+extractable.
+
+`--zip` stores every `--document` payload as `zip -> base64`, in a
+one-member archive named after the document. An embedded dossier is always
+stored as `base64`, and is never encrypted either. A payload that deflates
+better than `max_zip_compression_ratio` is refused as `zip_ratio_limit`,
+because the reader would refuse to expand it.
+
+An `--embed` file is parsed before it is embedded, so `create` never writes
+an embedded document this tool cannot read back; a file that does not parse
+fails with the structural code the parser produced. It is titled
+`<stem>.dosszie` and declared `application/nldossier2`, which is what makes
+`list` report it as a nested dossier and `extract` expand it.
+
+### Encrypting for a recipient
+
+`--encrypt-for CERT` encrypts every `--document` payload as a CMS
+`EnvelopedData` addressed to that certificate, which is exactly the form
+[Decryption](#decryption) reads back. It is repeatable: every recipient gets
+its own `KeyTransRecipientInfo`, so any one of their private keys recovers
+the document, and `extract --decrypt-key` reports `decrypted: true`.
+
+An `--embed` dossier is **not** encrypted. It stays `base64`, so `list` can
+still report what is inside it and the documents within keep whatever
+transforms they already carry. Encrypting a whole nested dossier would hide
+its structure behind one opaque blob for no gain, since its own documents can
+be encrypted individually before they are embedded.
+
+The transform chain is written in the forward order the specification fixes,
+which the reader reverses:
+
+| Flags | `es:BaseTransform` | What is encrypted |
+| --- | --- | --- |
+| `--encrypt-for` | `encrypt`, `base64` | The document bytes. |
+| `--encrypt-for --zip` | `zip`, `encrypt`, `base64` | The one-member ZIP archive: the plaintext of the CMS message *is* the ZIP, and the reader expands it after decrypting. |
+
+`es:SourceSize` stays the plaintext length in both cases, because that is
+what the reader compares the fully decoded bytes against.
+
+What is written, and nothing else:
+
+| Layer | Written |
+| --- | --- |
+| Container | A bare DER `ContentInfo` with `id-envelopedData` (RFC 5652 §6), version 0. No MIME wrapper. |
+| Recipient | One `KeyTransRecipientInfo` per `--encrypt-for`, version 0, named by `issuerAndSerialNumber`. Every certificate can be named that way, whereas `subjectKeyIdentifier` needs an extension a certificate need not carry; the reader accepts both. |
+| Key transport | RSAES-OAEP with SHA-256 and MGF1-SHA-256 and the default empty label. `--legacy-key-transport` writes RSAES-PKCS1-v1_5 instead. |
+| Content encryption | AES-256-CBC, with a fresh content-encryption key and initialisation vector for every document. |
+
+**DES-EDE3-CBC is never written.** The reader accepts it behind
+`--allow-legacy-ciphers` because real dossiers carry it, which is a reason to
+read it and not a reason to produce more of it.
+
+`--legacy-key-transport` exists for interoperability with a reader that
+cannot do OAEP. What the sources in this repository actually establish about
+the Microsec reference tool is narrower than the flag's name suggests: its
+documented `-encryptor_symm_alg` option takes OpenSSL cipher names and
+defaults to `des-ede3-cbc`, which is a statement about the *content* cipher
+only. No source available here says which key transport it writes, and it
+documents no option to choose one. RSAES-PKCS1-v1_5 is what an OpenSSL CMS
+backend produces for `rsaEncryption` unless OAEP is asked for explicitly, so
+it is the likely default, but that is inference and not evidence. Prefer
+RSAES-OAEP; reach for the flag only when something on the other side has
+actually refused an OAEP message.
+
+Recipient certificates are public material, so unlike a decryption key they
+are read with the ordinary bounded reader; each is capped at 1 MiB. Nothing
+derived from one reaches the envelope, and a refusal names the recipient by
+its position on the command line and never by path or by subject. **No key
+material of any kind is written or reported**: the content-encryption key
+exists only inside the process and is zeroed when it is dropped, and
+`create` never reads a private key at all.
+
+| Situation | Result |
+| --- | --- |
+| The certificate is not readable X.509, in DER or in a PEM `CERTIFICATE` block, or is over 1 MiB | `invalid_recipient_certificate`, exit 4. |
+| The certificate carries a public key that is not RSA | `unsupported_recipient_key`, exit 4. |
+| The RSA key is too small to wrap a 32-byte content key under the chosen transport | `unsupported_recipient_key`, exit 4. |
+| The certificate has expired | `recipient_certificate_expired` **warning**, exit 0, and the document is encrypted for it anyway. |
+| The file cannot be opened or read | `io_error`, exit 3, as for `--document`. |
+
+Expiry is a warning and not a refusal because nothing in the format or in the
+reader consults a recipient certificate's validity: the private key still
+unwraps the content key the day after the certificate lapses, and refusing
+would make a legitimate "encrypt this for the key I hold" impossible. The
+warning says the operator should check they meant it. Nothing else about the
+certificate is checked either: `create` builds no path, checks no revocation,
+and asserts nothing about who the recipient is. Encrypting says who can read
+a document; it says nothing about who wrote it, and the dossier is still
+unsigned.
+
+### Writing the output
+
+The output file is created with `O_EXCL` through the same descriptor-relative
+machinery `extract` uses, so the same rules hold: an existing destination is
+`output_exists`, a path component that is a symlink or is not a directory is
+`unsafe_output_directory`, and missing parent directories are created. The
+whole dossier is rendered in memory and checked before the file is created,
+and a failed write removes what this run created, so a run either writes a
+complete dossier or leaves the destination untouched.
+
+Every [limit](#limits) that bounds reading bounds writing too: the document
+count, one document's decoded size, the aggregate decoded size, the Base64
+character count, and the ZIP compression ratio.
+
+### The JSON shape
+
+`input` describes the format, not a file that was read: `format` is
+`"microsec-es3"`, the format this command writes, and `bytes` is `null`
+because `create` reads no dossier. On failure both are `null`, as they are
+for every other command whose input could not be used.
+
+| `data` field | Type | Meaning |
+| --- | --- | --- |
+| `output` | string | The output path exactly as the caller gave it. It is never resolved or made absolute. |
+| `bytes` | number | The size of the file written. |
+| `created` | string | The creation date written, RFC 3339 UTC seconds. |
+| `documents` | array | One entry per document written, in source order. |
+
+| `documents[]` field | Type | Meaning |
+| --- | --- | --- |
+| `index` | number | Position in the dossier, from 0. |
+| `title` | string | The `es:Title` written. |
+| `mime_type` | object | `media_type`, `subtype`, `extension`, `charset`, as `list` reports them. `charset` is always `null`. |
+| `source_size` | number | The decoded length declared in `es:SourceSize`. |
+| `transforms` | array | `["base64"]`, or `["zip", "base64"]`; with `--encrypt-for`, `["encrypt", "base64"]` or `["zip", "encrypt", "base64"]`. |
+| `nested_dossier` | boolean | Whether the declared type marks the document as an embedded dossier. |
+| `encrypted` | boolean | Whether the payload was written as a CMS `EnvelopedData`, so that only a recipient's private key can read it back. `false` for every document without `--encrypt-for`, and for every `--embed` dossier. |
+| `object_ref` | string | The `ds:Object` `Id`, which is also the `extract --document` selector for it. |
+
+Every successful run warns `created_dossier_unsigned`. Creating a dossier
+proves nothing about its contents, and the envelope says so on every run.
+
+## The sign command
+
+`sign` writes a signed copy of a dossier. It is the only command that produces
+a signature, and it is not the command that judges one: producing a signature
+and checking one are different operations, and this tool keeps them in
+different commands on purpose. Every successful run warns
+`signed_dossier_unverified`.
+
+```sh
+openszigno sign FILE.es3 --output SIGNED.es3 --key KEY.pem --cert CERT.pem \
+  [--passphrase-file F] [--chain CA.pem]... [--scope document|dossier] \
+  [--document SELECTOR]... [--tsa URL] [--tsa-cert CERT]... \
+  [--signing-time RFC3339] [--algorithm NAME] \
+  [--online-allow-private] [--online-proxy URL] [--json]
+
+openszigno sign FILE.es3 --output SIGNED.es3 --csc CONFIG.toml \
+  [--csc-credential ID] [the same --scope/--document/--tsa/... flags] [--json]
+```
+
+The signing itself lives in `openszigno-author`, which reads no file and opens
+no socket: the CLI reads the dossier and the key material, reaches the private
+key through the `Signer` trait, and carries every RFC 3161 request to the
+timestamp authority itself. That split is what makes a remote signing backend
+a matter of implementing one trait, and `--csc` is the second implementation
+of it; see [Signing through a CSC service](#signing-through-a-csc-service) and
+[remote-signing.md](remote-signing.md).
+
+### What it writes
+
+One `ds:Signature` per signature, placed where the e-dossier format puts it:
+inside the `es:Document` for `--scope document`, and as a direct child of
+`es:Dossier` for `--scope dossier`. This is the shape, with the Base64 values
+trimmed:
+
+```xml
+<ds:Signature xmlns:ds="http://www.w3.org/2000/09/xmldsig#" Id="sig-doc0">
+  <ds:SignedInfo>
+    <ds:CanonicalizationMethod Algorithm="http://www.w3.org/2001/10/xml-exc-c14n#"/>
+    <ds:SignatureMethod Algorithm="http://www.w3.org/2001/04/xmldsig-more#rsa-sha256"/>
+    <ds:Reference Id="ref-sig-doc0-object" URI="#obj0">
+      <ds:Transforms><ds:Transform Algorithm="http://www.w3.org/2001/10/xml-exc-c14n#"/></ds:Transforms>
+      <ds:DigestMethod Algorithm="http://www.w3.org/2001/04/xmlenc#sha256"/>
+      <ds:DigestValue>a7MWc68BhZJ5YGEE...</ds:DigestValue>
+    </ds:Reference>
+    <ds:Reference Id="ref-sig-doc0-document-profile" URI="#profile0">...</ds:Reference>
+    <ds:Reference Id="ref-sig-doc0-signature-profile" URI="#profile-sig-doc0">...</ds:Reference>
+    <ds:Reference Id="ref-sig-doc0-signed-properties" URI="#signed-props-sig-doc0"
+                  Type="http://uri.etsi.org/01903#SignedProperties">...</ds:Reference>
+  </ds:SignedInfo>
+  <ds:SignatureValue>h3Gu+iByx4xAmcZr...</ds:SignatureValue>
+  <ds:KeyInfo><ds:X509Data><ds:X509Certificate>MIIC+TCC...</ds:X509Certificate></ds:X509Data></ds:KeyInfo>
+  <ds:Object Id="profile-sig-doc0">
+    <es:SignatureProfile xmlns:es="https://www.microsec.hu/ds/e-szigno30#" Id="sigprof-sig-doc0">
+      <es:Type>signature</es:Type><es:Generator>openSzigno</es:Generator>
+    </es:SignatureProfile>
+  </ds:Object>
+  <ds:Object Id="xades-sig-doc0">
+    <xades:QualifyingProperties xmlns:xades="http://uri.etsi.org/01903/v1.3.2#" Target="#sig-doc0">
+      <xades:SignedProperties Id="signed-props-sig-doc0">
+        <xades:SignedSignatureProperties>
+          <xades:SigningTime>2026-01-02T00:00:00Z</xades:SigningTime>
+          <xades:SigningCertificateV2><xades:Cert><xades:CertDigest>
+            <ds:DigestMethod Algorithm="http://www.w3.org/2001/04/xmlenc#sha256"/>
+            <ds:DigestValue>+cSXgp1X6XtBY5rx...</ds:DigestValue>
+          </xades:CertDigest></xades:Cert></xades:SigningCertificateV2>
+        </xades:SignedSignatureProperties>
+        <xades:SignedDataObjectProperties>
+          <xades:DataObjectFormat ObjectReference="#ref-sig-doc0-object">
+            <xades:MimeType>text/plain</xades:MimeType>
+          </xades:DataObjectFormat>
+        </xades:SignedDataObjectProperties>
+      </xades:SignedProperties>
+      <xades:UnsignedProperties><xades:UnsignedSignatureProperties>
+        <xades:SignatureTimeStamp>
+          <xades:EncapsulatedTimeStamp>MIIF...</xades:EncapsulatedTimeStamp>
+        </xades:SignatureTimeStamp>
+        <xades:CertificateValues>
+          <xades:EncapsulatedX509Certificate>MIID...</xades:EncapsulatedX509Certificate>
+        </xades:CertificateValues>
+      </xades:UnsignedSignatureProperties></xades:UnsignedProperties>
+    </xades:QualifyingProperties>
+  </ds:Object>
+</ds:Signature>
+```
+
+### What each reference covers, and why
+
+The reference set is not a choice: it is what
+[Reference scope](#reference-scope) requires the verifier to insist on, so
+writing anything less produces a signature this tool would refuse.
+
+| Placement | References written |
+| --- | --- |
+| `document` | the document's payload `ds:Object`, its `es:DocumentProfile`, the signature's own profile object, and the `xades:SignedProperties`. |
+| `dossier` | `/es:Dossier/es:DossierProfile`, `/es:Dossier/es:Documents`, the signature's own profile object, and the `xades:SignedProperties`. |
+
+Every reference is same-document (`#id`), carries exactly one transform,
+Exclusive XML Canonicalization 1.0, and is digested with SHA-256, and
+`ds:SignedInfo` is canonicalized the same way. There is no
+enveloped-signature transform anywhere, and there is nothing to remove: every
+reference names a sibling of the signature or a child of it, so no reference's
+node set ever contains the signature it is written in. That is also why the
+`xades:SignedProperties` and the signature-profile object each get a reference
+of their own rather than riding along inside a `URI=""` one, which would
+cover neither.
+
+The `xades:SignatureTimeStamp` is the one exception to "exclusive
+everywhere". It covers the canonicalized `ds:SignatureValue` **element**, and
+because the element this build writes names no `ds:CanonicalizationMethod`,
+XAdES clause 7.1.4.3.1 makes inclusive C14N 1.0 the default for it. The
+signer computes the inclusive form for exactly that reason: the two differ by
+the ancestor namespace declarations `ds:SignatureValue` does not visibly use,
+and a token over the wrong one is a token nobody recomputes.
+
+### Identifiers and determinism
+
+| Element | `Id` |
+| --- | --- |
+| `ds:Signature` | `sig-doc<N>` for document scope, `sig-dossier` for dossier scope. |
+| the signature-profile `ds:Object` | `profile-<signature id>`. |
+| the qualifying-properties `ds:Object` | `xades-<signature id>`. |
+| `xades:SignedProperties` | `signed-props-<signature id>`. |
+| each `ds:Reference` | `ref-<signature id>-<what it covers>`. |
+
+No identifier is random, and one already in use in the dossier is a refusal
+rather than a collision. Given the same input, key, signing time and flags,
+**RSA PKCS#1 v1.5 produces byte-identical output**: the signature is a
+deterministic function of what it signs. RSA-PSS salts its input and ECDSA
+draws a nonce, so those two do not, and `--signing-time` is what pins the one
+other moving part; without it the current time is written.
+
+A dossier declared ISO-8859-2 is decoded to UTF-8 before it is signed and its
+declaration is rewritten to say so. That changes no signature already in the
+file: canonical XML is UTF-8 whatever the source encoding was, so every
+existing digest is computed over exactly the same octets as before.
+
+### Algorithms
+
+| `--algorithm` | `ds:SignatureMethod` | Deterministic |
+| --- | --- | --- |
+| `rsa-sha256` (default for an RSA key) | `...xmldsig-more#rsa-sha256` | Yes |
+| `rsa-pss-sha256` | `...2007/05/xmldsig-more#sha256-rsa-MGF1` | No |
+| `ecdsa-p256-sha256` (default for a P-256 key) | `...xmldsig-more#ecdsa-sha256` | No |
+
+RSA PKCS#1 v1.5 with SHA-256 is the default rather than PSS because it is what
+Hungarian e-akta verifiers universally accept. All three are inside the pinned
+[algorithm policy](#algorithm-policy) `verify` enforces, and an ECDSA
+signature is written as the raw `r || s` pair XMLDSig prescribes.
+
+### Timestamping
+
+`--tsa URL` posts an RFC 3161 `TimeStampReq` (`application/timestamp-query`,
+SHA-256 imprint, `certReq` set, no nonce) for each signature, and embeds the
+token it gets back as an `xades:SignatureTimeStamp` with the implicit data
+selection. It is the only thing that makes `sign` open a socket, and it goes
+through the same transport `verify --online` uses: the same destination
+policy (`http`/`https` only, no userinfo, and no loopback, private,
+link-local or unique-local address without `--online-allow-private`), the
+same address pinning, the same timeouts, the same refusal to follow a redirect
+to another host, and no proxy from the environment.
+
+The answer is checked for the two things a caller cannot check: that it is a
+granted response carrying a token, and that the token stamps the imprint that
+was asked about. Anything else is `tsa_failed`, the output file is never
+written, and nothing partial is left behind. A token is embedded evidence, not
+a verified one: only `verify` checks a timestamp's signature, its authority's
+`extendedKeyUsage`, and its path.
+
+A signing time later than the token's `genTime` is worth avoiding: `verify`
+reports `timestamp_before_signing_time` for it, which leaves the token
+unverified. `--signing-time` should not be in the future.
+
+### Signing through a CSC service
+
+`--csc CONFIG.toml` replaces the local key with a Cloud Signature Consortium
+API v2 service, so a qualified certificate held by a remote signature creation
+device, or in an EUDI Wallet, signs the same XAdES structure the software
+signer produces. **Only the digest ever leaves the machine.** The dossier, the
+payloads and the titles stay where they are; what is sent is one base64
+SHA-256 digest of the canonicalised `ds:SignedInfo` per signature, the
+credential identifier, and a bearer token in an `Authorization` header.
+
+The backend is a second implementation of the same `Signer` trait
+`SoftwareSigner` implements, and it reports `prefers_digest() == true`, so the
+author crate hands it the digest instead of the octets. Nothing about what a
+signature covers, where the element sits, or what it digests changes.
+
+#### The request sequence
+
+Discovery runs before the dossier is touched, because the signing certificate
+has to exist before a `ds:SignedInfo` can be built: `xades:SigningCertificateV2`
+digests it, so there is nothing to sign until it is in hand.
+
+| Step | Request | What it settles |
+| --- | --- | --- |
+| 1 | `POST info` | `specs`, `methods`, `supportsRar`, `supportedHashTypes` and `signAlgorithms`. A `1.x` service, or one that will not sign a data-to-be-signed representation, stops the run here. |
+| 2 | `POST credentials/list` | Only when no credential was named. Exactly one is taken; several is `csc_credential_ambiguous` with the identifiers. |
+| 3 | `POST credentials/info` | With `certificates: "chain"` and `certInfo: true`: the signing certificate, the rest of the chain, the key's algorithms and the authorisation mode. |
+| 4 | `POST credentials/authorize` | Once per signature, with `numSignatures: 1`, the real digest, `hashAlgorithmOID` `2.16.840.1.101.3.4.2.1`, and `PIN`/`OTP` from the files the configuration names. Answers with Signature Activation Data. |
+| 5 | `POST signatures/signHash` | The credential, the SAD, the same hash, and `signAlgo` with `signAlgoParams` where the scheme needs them. |
+
+The real hashes go into step 4, never placeholders, and `numSignatures` is the
+count actually being produced: a SAD that is not bound to the data it covers
+authorises signing anything for its lifetime.
+
+The chain from step 3 becomes `xades:CertificateValues`, so `--chain` stays
+optional for a CSC run: the service already published what a verifier needs to
+build the path.
+
+#### Discovery is read, never assumed
+
+The three deployments surveyed in
+[remote-signing.md](remote-signing.md#35-sandboxes-reached-directly) disagree
+on every discovery field: `supportedHashTypes` is the keyword `dtbsr` on one
+service and the SHA-256 OID on another, `supportsRar` is true on one and false
+on the next, and `specs` ranges over `2.1.0.1` and `2.2.0.0`. No vendor profile
+is compiled in. `supportedHashTypes` is accepted when it is `dtbsr`, when it is
+the SHA-256 OID, and when it is absent: an early v2 service signed digests and
+nothing else.
+
+The algorithm is chosen from the credential's own `key/algo` list, because
+`ds:SignatureMethod` in the document has to agree with what the service
+actually did and only the credential knows that. A scheme OID beats a bare key
+OID; RSASSA-PSS is last of the RSA candidates for the same reason PKCS#1 v1.5
+is the local default, and is refused outright when the service published no
+`signAlgoParams` for it.
+
+| Credential `key/algo` | Written as | `signAlgo` sent |
+| --- | --- | --- |
+| `1.2.840.113549.1.1.11` sha256WithRSA | `rsa-sha256` | the same OID |
+| `1.2.840.113549.1.1.1` rsaEncryption | `rsa-sha256` | the same OID |
+| `1.2.840.10045.4.3.2` ecdsa-with-SHA256 | `ecdsa-p256-sha256` | the same OID |
+| `1.2.840.10045.2.1` ecPublicKey | `ecdsa-p256-sha256` | `1.2.840.10045.4.3.2` |
+| `1.2.840.113549.1.1.10` RSASSA-PSS | `rsa-pss-sha256` | the same OID, with `signAlgoParams` |
+
+An ECDSA signature comes back as either the DER `SEQUENCE` or the fixed-width
+`r || s` pair, depending on the vendor; both are accepted and XMLDSig's raw
+pair is what gets written.
+
+#### The returned signature is verified before anything is written
+
+A service in `dtbsr` mode signs the digest it was handed and never sees the
+document, so a canonicalisation mistake yields a syntactically perfect
+signature over the wrong bytes, and that failure is invisible until somebody
+verifies it. So the returned signature is checked locally against the
+certificate the service published, before the signed dossier reaches the
+filesystem. A signature that does not verify is `csc_signature_invalid` and no
+file is written. This is not a courtesy check; it is the reason a CSC run can
+be trusted to have produced what it says it produced.
+
+#### The transport
+
+Every request goes through the same `online` transport `verify --online`
+fetches revocation data with: the same destination policy, the same address
+pinning, the same connect and total timeouts, the same refusal to follow a
+redirect to another host, a 256 KiB response cap, and no proxy from the
+environment. `https` is required unless `--online-allow-private` is given,
+because the bearer token travels in a request header and plaintext hands it to
+anyone on the path; that same flag is what permits a loopback service, which
+is how this project's own test suite serves a mock.
+
+The token is put in the `Authorization` header and nowhere else. It is not in
+a URL, not in a body, not in a message, not in a warning and not in the JSON
+envelope. A refusal quotes the HTTP status and the service's own `error`
+string; `error_description` is free text a provider writes and is never
+printed.
+
+#### The configuration file
+
+A small, flat TOML table. openSzigno reads a deliberately narrow subset
+(comments, blank lines, and `key = "value"` with a basic or literal string)
+and refuses a table header, an array, a number or a bare value by name rather
+than ignoring it.
+
+```toml
+base_url = "https://qtsp.example/csc/v2"
+client_id = "openszigno-cli"
+access_token_file = "token"   # or access_token = "..."
+credential_id = "cred-1a2b3c" # optional; --csc-credential overrides it
+pin_file = "pin"              # explicit-mode authorisation
+```
+
+| Key | Meaning |
+| --- | --- |
+| `base_url` | Required. The CSC API base, ending in `/csc/v2`. One trailing slash is trimmed. |
+| `client_id` | Required. The OAuth 2.0 client the token was issued to. |
+| `access_token`, `access_token_file` | Exactly one is required: the `scope=service` bearer token, obtained out of band. |
+| `credential_id` | Optional. `--csc-credential` overrides it. |
+| `pin_file`, `otp_file` | Optional. Read only for an `explicit`-mode credential. |
+| `client_secret`, `client_secret_file`, `redirect_uri` | Accepted and reserved for the interactive `csc login` flow; each earns a `csc_key_unused` warning. A `redirect_uri` that is not a loopback URI is refused. |
+
+A relative secret path is resolved against the configuration file's own
+directory, and one trailing line ending is stripped. Permissions are not
+enforced, because a mode this tool refused would be a mode somebody worked
+around, but a world-readable file earns `csc_config_permissive`.
+
+#### What is not implemented
+
+A credential whose authorisation mode is `oauth2` needs a second OAuth 2.0
+authorization-code round with `scope=credential`, which needs a browser and a
+loopback redirect listener. This round is deliberately non-interactive, so such
+a credential is `csc_authorization_required` and the message names the flow to
+complete. RFC 9396 `authorization_details`, which `supportsRar` advertises,
+belongs to that same interactive flow: it is read from `info` and reported, and
+building it is part of the follow-up `openszigno csc login` work.
+
+CSC v1 is not supported. `info` reports `specs`, so a v1 service is detected
+and refused with a clear message rather than half-supported.
+
+### Signing a dossier that is already signed
+
+A second signature can be added to a dossier that already carries one, and a
+document that already has a signature can be given another: neither
+signature's references reach inside the other, so nothing that verified stops
+verifying.
+
+Two cases are refused with `document_already_signed`, because writing them
+would silently break what is already there:
+
+- adding a document signature to a dossier that carries a dossier-level
+  signature or a dossier-level `es:TimeStamp`, both of which cover
+  `es:Documents` and would stop matching the moment a document changes;
+- adding anything to a dossier carrying a signature with a `URI=""`
+  reference, which covers everything outside itself.
+
+Nothing this tool writes falls into either case, so the limitation is about
+dossiers from elsewhere. `sign` never rewrites or removes a signature.
+
+### The JSON shape
+
+| `data` field | Type | Meaning |
+| --- | --- | --- |
+| `output` | string | The output path exactly as the caller gave it. It is never resolved or made absolute. |
+| `bytes` | number | The size of the file written. |
+| `signatures` | array | One entry per signature written, in the order written. |
+
+| `signatures[]` field | Type | Meaning |
+| --- | --- | --- |
+| `id` | string | The `Id` of the `ds:Signature` element. |
+| `scope` | string | `document` or `dossier`. |
+| `document_index` | number or null | The index of the document the signature sits in; `null` for dossier scope. |
+| `algorithm` | string | The `--algorithm` name actually used. |
+| `signing_time` | string | The `xades:SigningTime` written, RFC 3339 UTC seconds. |
+| `timestamped` | boolean | Whether an `xades:SignatureTimeStamp` was embedded. It says a token was obtained, never that it was verified. |
+| `signer` | string | Which backend produced the signature: `software` for `--key`, `csc` for `--csc`. |
+| `credential_id` | string | `--csc` runs only: the CSC credential that signed. Not a secret; the bearer token never appears. |
+| `csc_specs` | string | `--csc` runs only: the `specs` version the service reported from `info`. |
+
+### Writing the output
+
+The output file is created with `O_EXCL` through the same
+descriptor-relative machinery `create` and `extract` use, so the same rules
+hold: an existing destination is `output_exists`, a path component that is a
+symlink or is not a directory is `unsafe_output_directory`, and a failed write
+removes what this run created rather than leaving a half-written file that
+looks like a signed dossier.
+
+### Key material
+
+`--key`, `--cert` and `--passphrase-file` are files, and the passphrase may
+alternatively come from `OPENSZIGNO_DECRYPT_PASSPHRASE`, the same variable
+`extract --decrypt-key` reads, because a second variable would be a second
+place for a secret to be left set. Nothing comes from `argv`. Key bytes, the
+passphrase, and anything derived from either never appear in a message, a
+warning, or the JSON envelope, and "wrong passphrase" is deliberately not told
+apart from "not a PKCS#8 file". A certificate that does not belong to the key
+is `signing_key_mismatch` and is refused before anything is signed.
+
 ## Extraction policy
 
 - Decode Base64 as bytes, never by treating a dossier as locale-dependent
@@ -2770,9 +3497,13 @@ in its own right. A TSA certificate that was actually revoked makes the check
 ## Decryption
 
 `extract --decrypt-key` reverses the `encrypt` transform. This is the M4
-milestone. **Decryption is not verification and never becomes it**: reading a
-document proves that a key could unwrap it, not that anybody signed it, and
-not that the signer is who a certificate says. Every statement in
+milestone. The other direction, `create --encrypt-for`, writes a deliberately
+narrow subset of what is described here; see
+[Encrypting for a recipient](#encrypting-for-a-recipient).
+
+**Decryption is not verification and never becomes it**: reading a document
+proves that a key could unwrap it, not that anybody signed it, and not that
+the signer is who a certificate says. Every statement in
 [Verification boundary](#verification-boundary) is unchanged by it, `verify` is
 unaffected, and `signatures_verified` stays `false`.
 
@@ -2978,8 +3709,9 @@ trusted list whose own signature was not checked yields `indeterminate` too.
 output states the verdict and the revocation policy it was reached under on
 every run.
 
-The rule for the other four commands is unchanged: `inspect`, `list`,
-`extract`, and `validate-structure` verify nothing, `signatures_verified` and
+The rule for the other six commands is unchanged: `inspect`, `list`,
+`extract`, `validate-structure`, `create`, and `sign` verify nothing,
+`signatures_verified` and
 `cryptographic_verification_performed` stay `false`, and the warning
 `cryptographic_verification_not_performed` keeps its meaning for them. The
 signature inventory `inspect` and `list` report changes nothing about that
@@ -2989,6 +3721,19 @@ line, and a richer inventory is not weaker evidence or stronger evidence but no
 evidence at all. See [Signature inventory](#signature-inventory). It is
 deliberately *not* emitted by `verify`, which reports what it actually did.
 
+Creating a dossier says nothing about its contents either: `create` signs
+nothing, and every run of it warns `created_dossier_unsigned`. **Signing one
+says nothing about it either.** `sign` produces a signature with the key it
+was given over the elements the format mandates, and checks none of it: not
+the key, not the certificate, not the chain, not the token a `--tsa` returned
+beyond that it stamps the right imprint. Every successful run warns
+`signed_dossier_unverified`. Running `verify` on what `sign` wrote is the only
+way to learn whether it holds, and a `valid` verdict over a self-signed test
+chain means only that the chain the caller chose to trust verified, which is
+not a statement about anybody's identity and not a qualified electronic
+signature. A qualified signature needs a key on a qualified device, which by
+construction is not a key this process can hold; see
+[remote-signing.md](remote-signing.md).
 Extracting a document is never proof that it was signed or that the signature
 is valid, and neither is decrypting one: `--decrypt-key` shows that a key could
 unwrap a payload, which says nothing about who produced it. A rejection is

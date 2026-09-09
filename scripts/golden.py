@@ -2,6 +2,8 @@
 """Golden JSON and human output contract tests for the openSzigno CLI.
 
 Runs a fixed command matrix over every fixture in `tests/fixtures/**/*.es3`,
+plus one `create` case that builds a dossier from `tests/fixtures/create/` and
+two `sign` refusals,
 normalises the two time values that cannot be stable, and compares the result
 against the committed files under `tests/golden/`.
 
@@ -101,6 +103,84 @@ def cases(fixture, temp):
         yield f"verify.{variant}.human", base
 
 
+# The `create` case. It is not driven by a fixture: it builds one, from the
+# two committed inputs under `tests/fixtures/create/`, at a pinned creation
+# date so the output is byte-identical on every run. Its own output is
+# committed as `tests/fixtures/created.es3`, which the fixture matrix above
+# then covers like any other fixture; `crates/openszigno-cli/tests/create.rs`
+# asserts the two agree byte for byte.
+CREATE_TITLE = "Synthetic created dossier"
+CREATE_INPUTS = ("hello.txt", "note.txt")
+CREATE_CREATED = "2026-01-01T00:00:00Z"
+
+
+def create_cases(temp):
+    """The `create` matrix: `(name, argv, cwd)` triples.
+
+    Each case runs in its own throwaway working directory and writes to the
+    bare relative path `created.es3`. `create` echoes the output path the
+    caller gave it, so running from that directory is what keeps a
+    machine-local absolute path out of the golden.
+    """
+    for name in ("create", "create.human"):
+        cwd = temp / "create" / name
+        cwd.mkdir(parents=True, exist_ok=True)
+        argv = ["create", "--output", "created.es3", "--title", CREATE_TITLE]
+        for document in CREATE_INPUTS:
+            argv += ["--document", str(FIXTURES / "create" / document)]
+        argv += ["--created", CREATE_CREATED]
+        if not name.endswith(".human"):
+            argv.append("--json")
+        yield name, argv, cwd
+
+
+# The `sign` matrix. `sign` needs a private key, and this repository commits
+# none — synthetic or not — so no successful signing run can be a golden: the
+# key would have to be generated, and a generated key produces different bytes
+# every run. What is pinned instead is the refusal, which is exactly what a
+# caller who mistyped a path sees, and which is byte-identical on every
+# machine because the envelope never echoes a path it was given. The success
+# paths are covered by `crates/openszigno-cli/tests/sign.rs`.
+def sign_cases(temp):
+    """The `sign` matrix: `(name, argv, cwd)` triples, all failures."""
+    for name in ("sign.missing-key", "sign.missing-key.human"):
+        cwd = temp / "sign" / name
+        cwd.mkdir(parents=True, exist_ok=True)
+        argv = [
+            "sign",
+            str(FIXTURES / "created.es3"),
+            "--output",
+            "signed.es3",
+            "--key",
+            "no-such-key.pem",
+        ]
+        if not name.endswith(".human"):
+            argv.append("--json")
+        yield name, argv, cwd
+    # `--csc` is the same story with a second backend: no run against a real
+    # service can be a golden, and the refusal is the stable part. A
+    # configuration missing `client_id` is refused before a socket is opened,
+    # so the case needs no network and no key, and the envelope names the key
+    # that is missing without echoing the file's contents.
+    for name in ("sign.csc-config-invalid", "sign.csc-config-invalid.human"):
+        cwd = temp / "sign" / name
+        cwd.mkdir(parents=True, exist_ok=True)
+        (cwd / "csc.toml").write_text(
+            'base_url = "https://qtsp.example/csc/v2"\n', encoding="utf-8"
+        )
+        argv = [
+            "sign",
+            str(FIXTURES / "created.es3"),
+            "--output",
+            "signed.es3",
+            "--csc",
+            "csc.toml",
+        ]
+        if not name.endswith(".human"):
+            argv.append("--json")
+        yield name, argv, cwd
+
+
 def mask_json(node):
     """Mask the two time values in a parsed envelope, in place.
 
@@ -157,7 +237,7 @@ def normalise_text(raw):
     return "\n".join(lines)
 
 
-def run(binary, argv, temp):
+def run(binary, argv, temp, cwd=REPO):
     """Run one case and return `(normalised stdout, exit status)`."""
     env = {
         "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
@@ -174,7 +254,7 @@ def run(binary, argv, temp):
         env["SYSTEMROOT"] = os.environ.get("SYSTEMROOT", "")
     completed = subprocess.run(
         [str(binary)] + argv,
-        cwd=REPO,
+        cwd=cwd,
         env=env,
         capture_output=True,
         text=True,
@@ -205,6 +285,15 @@ def matrix(binary, temp):
                 body, extension = normalise_json(stdout), "json"
             produced[f"{directory}/{name}.{extension}"] = body
             produced[f"{directory}/{name}.exit"] = f"{status}\n"
+    for group, generator in (("create", create_cases), ("sign", sign_cases)):
+        for name, argv, cwd in generator(temp):
+            stdout, status = run(binary, argv, temp, cwd=cwd)
+            if name.endswith(".human"):
+                body, extension = normalise_text(stdout), "txt"
+            else:
+                body, extension = normalise_json(stdout), "json"
+            produced[f"{group}/{name}.{extension}"] = body
+            produced[f"{group}/{name}.exit"] = f"{status}\n"
     return produced
 
 

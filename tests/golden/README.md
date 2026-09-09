@@ -56,9 +56,38 @@ Variants:
 | `trusted` | `verify --trust-store <anchors> --at 2026-01-02T03:04:05Z`, signed fixtures only |
 | `trusted-in-validity` | The same, at `2027-01-01T00:00:00Z` |
 
-The commands captured are `inspect`, `list`, `validate-structure`, `verify`
-and `extract` in JSON mode, and `inspect`, `list`, `validate-structure` and
-`verify` in human mode. `extract` writes into a throwaway directory under the
+Two groups are not driven by a fixture. `tests/golden/create/` captures
+`openszigno create` building a dossier from the two committed inputs under
+`tests/fixtures/create/`, in both modes, with `--created` pinned to
+`2026-01-01T00:00:00Z` so the output is byte-identical on every run. It runs
+in its own throwaway working directory and writes the bare relative path
+`created.es3`, because `create` echoes the output path it was given and no
+golden may carry a machine-local path. Its output is committed as
+`tests/fixtures/created.es3`, which the fixture matrix then covers like any
+other fixture.
+
+`tests/golden/sign/` captures `sign` refusals, and only refusals. A
+successful signing run cannot be a golden: it needs a private key, and this
+repository commits none, synthetic or not. The two cases run over
+`tests/fixtures/created.es3` in their own throwaway working directories:
+`sign.missing-key`, where `--key` names a file that is not there
+(`io_error`, exit 3), and `sign.csc-config-invalid`, where the `--csc`
+configuration is missing `client_id` (`csc_config_invalid`, exit 4). Nothing
+is contacted in either. The paths that do sign are covered by
+`crates/openszigno-cli/tests/sign.rs` and `csc.rs`.
+
+`create --encrypt-for` is deliberately **not** in the matrix. Every encrypted
+document carries a fresh random content-encryption key, initialisation
+vector, and key-transport padding, so no two runs produce the same bytes and
+there is nothing stable to capture. It is covered by integration tests
+instead: `crates/openszigno-cli/tests/create_encrypt.rs` and
+`crates/openszigno-author/tests/encryption.rs`.
+
+The commands captured over a fixture are `inspect`, `list`,
+`validate-structure`, `verify` and `extract` in JSON mode, and `inspect`,
+`list`, `validate-structure` and `verify` in human mode; `create` and `sign`
+are captured in both modes by the two groups above. `extract` writes into a
+throwaway directory under the
 system temporary directory; the script fails the run if that directory's path
 ever appears in captured output, because the envelope must never carry an
 absolute path.

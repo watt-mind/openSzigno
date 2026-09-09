@@ -1,9 +1,11 @@
 //! One module per command, plus the dossier summary and the warning lists
 //! the reading commands share.
 
+pub(crate) mod create;
 pub(crate) mod extract;
 pub(crate) mod inspect;
 pub(crate) mod list;
+pub(crate) mod sign;
 pub(crate) mod skill;
 pub(crate) mod validate;
 pub(crate) mod verify;

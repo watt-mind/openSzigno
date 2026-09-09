@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/openszigno-core", "crates/openszigno-verify", "crates/openszigno-cli"]
+members = ["crates/openszigno-core", "crates/openszigno-author", "crates/openszigno-verify", "crates/openszigno-cli"]
 resolver = "2"
 # `fuzz/` is its own cargo-fuzz package with its own lockfile (see
 # fuzz/Cargo.toml): it needs nightly and libFuzzer instrumentation that must
@@ -13,7 +13,7 @@ exclude = ["fuzz"]
 too_many_lines = "warn"
 
 [workspace.package]
-version = "0.6.0"
+version = "0.7.0"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/Watt-Mind/openSzigno"

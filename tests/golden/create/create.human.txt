@@ -1,0 +1,4 @@
+Created created.es3 (1693 B, 2 document(s)).
+[0] hello.txt | text/plain | 54 B | ["base64"]
+[1] note.txt | text/plain | 62 B | ["base64"]
+The dossier is unsigned: creating it proves nothing about its contents.

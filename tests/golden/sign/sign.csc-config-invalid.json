@@ -1,0 +1,17 @@
+{
+  "command": "sign",
+  "data": null,
+  "errors": [
+    {
+      "code": "csc_config_invalid",
+      "message": "the --csc configuration is missing `client_id`"
+    }
+  ],
+  "input": {
+    "bytes": 1693,
+    "format": "microsec-es3"
+  },
+  "ok": false,
+  "schema_version": 1,
+  "warnings": []
+}

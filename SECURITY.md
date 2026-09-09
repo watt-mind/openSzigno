@@ -28,11 +28,24 @@ that expired before the validation time, or `--no-revocation` all yield
 `indeterminate`, which means "nothing that was checked failed" — not "this is
 authentic", and not "this is forged".
 
-**Extraction is not verification.** `inspect`, `list`, `extract`, and
-`validate-structure` check nothing cryptographic at all; `signatures_verified`
-and `cryptographic_verification_performed` stay `false` for them. A dossier
-that openSzigno parses, lists, and extracts without complaint may be entirely
-forged.
+**Extraction is not verification.** `inspect`, `list`, `extract`,
+`validate-structure`, `create`, and `sign` check nothing cryptographic at all;
+`signatures_verified` and `cryptographic_verification_performed` stay `false`
+for them. A dossier that openSzigno parses, lists, and extracts without
+complaint may be entirely forged.
+
+**Writing is not verification.** `create` and `sign` produce material; they
+assert nothing about it. `create` writes an unsigned dossier and warns
+`created_dossier_unsigned` on every run. `sign` writes a signature with the key
+it was given and checks none of it: not the key, not the certificate, not the
+chain, not the token a `--tsa` returned beyond that it stamps the right
+imprint. Every successful run warns `signed_dossier_unverified`. Running
+`verify` on what `sign` wrote, against trust material you supply, is the only
+way to learn whether it holds, and a `valid` verdict there means exactly what
+this section already says it means. It is not a qualified electronic
+signature: that needs a key on a qualified device, which by construction is
+not a key this process can hold. See
+[docs/remote-signing.md](docs/remote-signing.md).
 
 Equally, a rejection is not proof of forgery: the pinned algorithm policy
 refuses SHA-1, RSA below 2048 bits, and other weak algorithms outright, which
@@ -48,7 +61,10 @@ not change any command's verdict.
 
 ## How key material is handled
 
-`extract --decrypt-key` is the only place openSzigno touches a private key.
+`extract --decrypt-key` is the only place openSzigno holds a private key.
+`sign --key` holds one too, under exactly the same rules; `sign --csc` holds
+none at all, because the key stays in the remote signature creation device and
+only a digest is sent to it.
 
 - **Never from the command line.** The key, its certificate, and its passphrase
   all come from files, or the passphrase from the environment variable
@@ -69,9 +85,9 @@ not change any command's verdict.
   key material, and no line of this repository spells a complete PEM
   private-key armour header. A secret scanner cannot tell a synthetic key from
   a real one, so the project stores none and allowlists no scanner rule.
-- **Never sent anywhere.** Decryption is entirely local. `--online` is a
-  `verify` flag and fetches only revocation data; no command ever transmits key
-  material.
+- **Never sent anywhere.** Decryption and local signing are entirely local. No
+  command ever transmits key material, and `sign --csc` transmits a digest
+  rather than the data it was taken over.
 - **Read-only and bounded.** Key, certificate, and passphrase files are opened
   read-only and capped at 1 MiB each.
 - **Failures say nothing useful to an attacker.** A failed decryption is the
@@ -82,8 +98,32 @@ not change any command's verdict.
   as itself. A wrong passphrase and a malformed key are likewise the same
   answer.
 
-openSzigno never creates, signs, timestamps, or encrypts anything, so it holds
-a private key only for the duration of one `extract` run.
+A private key is held only for the duration of the one run that needs it.
+
+### The `--csc` bearer token
+
+`sign --csc` carries one more secret: the bearer token that reaches the Cloud
+Signature Consortium service. It is handled the way a passphrase is.
+
+- **Never from the command line.** It comes from the `--csc` configuration
+  file, or from a file that configuration names, and there is no flag that
+  takes it as an argument value. The same is true of the PIN and the one-time
+  password an `explicit`-mode credential is authorised with.
+- **Never in any output.** The token, the PIN and the one-time password never
+  appear in a message, a warning, the JSON envelope, or the dossier that is
+  written. A refusal from the service quotes the HTTP status and the service's
+  own `error` string; `error_description` is free text a provider writes and is
+  never printed. The `Debug` of the loaded configuration is written by hand so
+  that a panic cannot print one. A test asserts the token's absence on stdout,
+  on stderr and in the signed file, on a successful run and on a refused one.
+- **Zeroed after use**, like every other secret buffer.
+- **Sent to one place, in one way.** In the `Authorization` header of a request
+  to the host `base_url` names, over `https` unless `--online-allow-private`
+  was given. Never in a URL and never in a body.
+- **The configuration's own permissions are reported, not enforced.** A
+  world-readable file earns the `csc_config_permissive` warning. A mode this
+  tool refused would be a mode somebody worked around, and the file may hold no
+  secret at all when the token lives in a separate `access_token_file`.
 
 ### RSA key-transport decryption: implicit rejection
 
@@ -152,11 +192,14 @@ to know that content is genuine.
 
 ## Network exposure
 
-**openSzigno makes no network connection unless you pass `--online` to
-`verify`.** Without that flag it opens no socket at all, in any command, and
-the `openszigno-verify` crate structurally cannot: it performs no I/O except
-through injected traits, and revocation data reaches it only as bytes the
-caller already has.
+**openSzigno opens a socket only when you ask it to, with one of three
+flags: `verify --online`, `sign --tsa`, or `sign --csc`.** Without one of
+them it opens no socket at all, in any command, and the `openszigno-verify`
+crate structurally cannot: it performs no I/O except through injected traits,
+and revocation data reaches it only as bytes the caller already has. All three
+go through one transport, with one destination policy, one set of timeouts and
+one set of size caps; a second HTTP client in this binary would be a second
+place for those rules to drift.
 
 With `--online`, the CLI — never the verify crate — may connect to exactly one
 class of destination: **URLs found inside the certificates being validated**,
@@ -227,6 +270,34 @@ connects to the destination. Everything fetched is judged by exactly the
 offline rules before it is believed, so `--online` can widen where evidence
 comes from and can never relax a rule.
 [docs/trust.md](docs/trust.md#online-fetching) has the details.
+
+### What `sign --csc` sends
+
+`sign --csc` contacts exactly one host: the one `base_url` names in the
+configuration file the caller passed. It is not a URL taken from a dossier or
+from a certificate, so the trust gate above does not apply to it; the operator
+chose it.
+
+**What leaves the machine is one base64 SHA-256 digest per signature, the
+credential identifier, and the bearer token.** Nothing else. Not the dossier,
+not a payload, not a document title, not a file name, not a hash of anything
+but the canonicalised `ds:SignedInfo` the signature covers. The digest goes out
+twice, in `credentials/authorize`, so the authorisation is bound to the data
+it covers, and in `signatures/signHash`, and that binding is why it is sent at
+authorisation time rather than a placeholder.
+
+The remaining rules are the ones `--online` already imposes: the destination
+policy, the pinned address resolution, 5 s to connect and 20 s per request, at
+most three redirects and never to another host, no proxy from the environment,
+and a 256 KiB cap on a response. `https` is required unless
+`--online-allow-private` is given, because the token is in a header.
+
+What comes back is not trusted on the strength of having come back. The
+signature the service returns is verified locally, against the certificate the
+service itself published, before the signed dossier reaches the filesystem. A
+service in hash-only mode signs a digest it never sees the document behind, so
+a wrong signature is perfectly well formed; a signature that does not verify is
+`csc_signature_invalid` and no file is written.
 
 ## Threat model
 
