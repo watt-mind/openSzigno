@@ -493,7 +493,7 @@ pub(crate) fn verify_signature_timestamps(
                 revocation_policy: context.revocation_policy,
                 claimed_signing_time,
             },
-            crate::certs::AnchorStatus::new(&context.anchor_provenance),
+            context.anchor_status(),
         );
         report.checks.push(summary_check(&token.report.checks));
         // The TSA chain's own revocation answer belongs to this signature's

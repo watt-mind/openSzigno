@@ -1,19 +1,29 @@
 //! Certification-path building: the candidate pool, the bounded depth-first
-//! search that completes a chain at a configured anchor, and stage D's
+//! search that completes a chain at a configured trust anchor, and stage D's
 //! entry point.
 //!
-//! Only a trust anchor can end a path. A self-signed certificate found inside
-//! a dossier is a candidate like any other and can never make itself trusted.
+//! Only trust the caller configured can end a path — a `--trust-store` file or
+//! a trusted-list service digital identity. A certificate found inside a
+//! dossier is a candidate like any other and can never make itself trusted,
+//! self-signed or not.
 //!
-//! A trusted-list anchor may end a path only at a time its service was
+//! Following ETSI TS 119 615, a trusted list's service digital identity ends a
+//! path **where the list speaks**, which in a real national list is the
+//! *issuing* CA rather than the root above it: the Hungarian list records
+//! NetLock's qualified issuing CAs as CA/QC services and the root that signed
+//! them only as a QTST service. A path that had to climb past the issuing CA
+//! to a self-signed root would then be judged by an entry that says nothing
+//! about issuing qualified certificates. See [`AnchorStatus::terminates`].
+//!
+//! A trusted-list identity may end a path only at a time its service was
 //! *granted*: a withdrawn, supervision-ceased or deprecated CA/QC or TSA/QTST
 //! service is a service the list has stopped vouching for, and honouring it
 //! would make the status timeline decorative. See [`AnchorStatus`].
 
 use crate::codes::{Check, CheckCode, CheckStatus};
 use crate::policy::VerifyLimits;
-use crate::trust::{TrustAnchor, UnixTime};
-use crate::trustlist::ServiceType;
+use crate::trust::{ServiceIdentity, TrustAnchor, TrustServiceIdentity, UnixTime};
+use crate::trustlist::{ServiceRecord, ServiceType};
 
 use super::{ChainEntry, ParsedCertificate, PathPurpose, check_path, common_name, dedup};
 
@@ -35,12 +45,16 @@ const MAX_PATH_EXPANSIONS: usize = 256;
 /// operator put the file in the directory, and that is the whole statement — so
 /// it is unaffected.
 ///
+/// The service identities are carried alongside the anchors because they also
+/// decide *where* a path may end: see [`AnchorStatus::terminates`].
+///
 /// [`AnchorStatus::none`] records no provenance at all, which is what a caller
 /// with only a trust store has: every anchor is then usable at every time,
 /// exactly as before.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct AnchorStatus<'a> {
     anchors: &'a [(Vec<u8>, &'a TrustAnchor)],
+    services: &'a [TrustServiceIdentity],
 }
 
 impl<'a> AnchorStatus<'a> {
@@ -48,20 +62,83 @@ impl<'a> AnchorStatus<'a> {
     /// DER may appear more than once, because one certificate can be both a
     /// trust-store file and a trusted-list service identity.
     pub const fn new(anchors: &'a [(Vec<u8>, &'a TrustAnchor)]) -> Self {
-        Self { anchors }
+        Self {
+            anchors,
+            services: &[],
+        }
+    }
+
+    /// Add the trusted-list service digital identities, which is what lets a
+    /// path end at a listed issuing CA rather than only at a self-signed root.
+    #[must_use]
+    pub const fn with_services(self, services: &'a [TrustServiceIdentity]) -> Self {
+        Self {
+            anchors: self.anchors,
+            services,
+        }
     }
 
     /// No provenance is known, so nothing is withheld.
     pub const fn none() -> Self {
-        Self { anchors: &[] }
+        Self {
+            anchors: &[],
+            services: &[],
+        }
     }
 
-    fn entries(&self, der: &[u8]) -> Vec<&'a TrustAnchor> {
-        self.anchors
+    /// Whether any trusted-list service supplies a certificate at all.
+    ///
+    /// A list that names its services only by `X509SKI` or `X509SubjectName`
+    /// supplies no key and so can end no path; it says `false` here, and a run
+    /// with no store anchors either is still "no trust was configured".
+    pub fn has_listed(&self) -> bool {
+        self.services
+            .iter()
+            .any(|service| matches!(service.identity, ServiceIdentity::Certificate(_)))
+    }
+
+    /// Whether a path may *terminate* at this certificate because a trusted
+    /// list records it as the digital identity of a service.
+    ///
+    /// This is the ETSI TS 119 615 model and the reason it matters is
+    /// concrete: in a real national list the CA/QC identities are the issuing
+    /// CAs, which are intermediates, and the root above them may be listed
+    /// under some other service kind, or not at all. Climbing past the issuing
+    /// CA to reach a self-signed anchor means judging the path by an entry
+    /// that was never about issuing certificates. So a listed certificate is a
+    /// trust anchor for any path that reaches it, self-signed or not — subject
+    /// to [`may_anchor`](Self::may_anchor), exactly as a self-signed listed
+    /// anchor is.
+    ///
+    /// Whether the *nearest* listed certificate is preferred is the search's
+    /// business, not this predicate's; see [`validate_path_at`].
+    pub fn terminates(&self, der: &[u8]) -> bool {
+        self.services.iter().any(|service| {
+            matches!(&service.identity, ServiceIdentity::Certificate(bytes) if bytes.as_slice() == der)
+        })
+    }
+
+    /// Every statement the caller's trust material makes about `der`.
+    ///
+    /// `None` stands for a trust-store anchor, whose statement is
+    /// unconditional; `Some(record)` is one trusted-list service. One
+    /// certificate can be several of both at once.
+    fn records(&self, der: &[u8]) -> Vec<Option<&'a ServiceRecord>> {
+        let mut records: Vec<Option<&'a ServiceRecord>> = self
+            .anchors
             .iter()
             .filter(|(bytes, _)| bytes.as_slice() == der)
-            .map(|(_, anchor)| *anchor)
-            .collect()
+            .map(|(_, anchor)| anchor.service.as_ref())
+            .collect();
+        records.extend(
+            self.services
+                .iter()
+                .filter(|service| {
+                    matches!(&service.identity, ServiceIdentity::Certificate(bytes) if bytes.as_slice() == der)
+                })
+                .map(|service| Some(&service.service)),
+        );
+        records
     }
 
     /// Whether this anchor may end a path built for `purpose` at `time`.
@@ -91,10 +168,18 @@ impl<'a> AnchorStatus<'a> {
     ///    has been withdrawn.
     pub fn may_anchor(&self, der: &[u8], time: UnixTime, purpose: PathPurpose) -> bool {
         let wanted = wanted(purpose);
+        let records = self.records(der);
+        // Nothing is known about this certificate, so nothing is withheld:
+        // this is what `AnchorStatus::none` means, and it keeps a caller that
+        // has only a trust store behaving exactly as it did before provenance
+        // was recorded at all.
+        if records.is_empty() {
+            return true;
+        }
         let mut speaks = false;
         let mut vouches = false;
-        for anchor in self.entries(der) {
-            let Some(record) = anchor.service.as_ref() else {
+        for record in records {
+            let Some(record) = record else {
                 return true;
             };
             if record
@@ -119,11 +204,7 @@ impl<'a> AnchorStatus<'a> {
     /// The sentence explaining why this anchor could not end a path.
     fn refusal(&self, der: &[u8], time: UnixTime, purpose: PathPurpose) -> String {
         let wanted = wanted(purpose);
-        let records = || {
-            self.entries(der)
-                .into_iter()
-                .filter_map(|a| a.service.clone())
-        };
+        let records = || self.records(der).into_iter().flatten().cloned();
         // Name the service that actually decided, which is one of the kind the
         // path needed whenever the list records one.
         let record = records()
@@ -158,6 +239,21 @@ const fn wanted(purpose: PathPurpose) -> ServiceType {
         PathPurpose::Signing | PathPurpose::OcspSigning => ServiceType::CaQc,
         PathPurpose::TimeStamping => ServiceType::TsaQtst,
     }
+}
+
+/// Why a pool entry may end a path, and whether the search should look past it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Termination {
+    /// An ordinary untrusted candidate: it can only ever be a link.
+    None,
+    /// A trusted-list service digital identity. It ends a path — and the
+    /// search still climbs past it, because a listed certificate whose service
+    /// was not granted at the validation time must not shadow a store anchor
+    /// or a listed CA above it.
+    Listed,
+    /// A configured trust anchor. Nothing above it is looked at: it is the
+    /// top of the path by construction.
+    Anchor,
 }
 
 const fn wanted_name(purpose: PathPurpose) -> &'static str {
@@ -223,11 +319,23 @@ pub fn validate_path(
 
 /// [`validate_path`], told what the caller knows about each anchor.
 ///
-/// `status` decides whether a completed path may *end* at the anchor it
-/// reached: a trusted-list anchor whose service was not granted at `time`
-/// yields [`CheckCode::TrustListServiceNotGranted`] rather than
-/// [`CheckCode::CertPathOk`], and the search carries on to the other candidate
-/// paths first, because another anchor may still be entitled to end one.
+/// `status` decides two things.
+///
+/// **Where a path may end.** Besides `anchors`, any certificate a trusted list
+/// records as a service digital identity terminates a path, self-signed or
+/// not: that is where the list actually speaks, and in a real national list it
+/// is the issuing CA rather than the root. The nearest such certificate along
+/// a chain is preferred, so a root listed only as a QTST service cannot
+/// override the granted CA/QC entry of the issuing CA below it — the search
+/// records the shorter path first and still climbs past the listed
+/// intermediate, so that a listed certificate whose service was not granted
+/// then falls through to whatever store anchor or listed CA sits above it.
+///
+/// **Whether it may end there.** A trusted-list anchor whose service was not
+/// granted at `time` yields [`CheckCode::TrustListServiceNotGranted`] rather
+/// than [`CheckCode::CertPathOk`], and the search carries on to the other
+/// candidate paths first, because another anchor may still be entitled to end
+/// one.
 ///
 /// The refusal is not evidence against the signature. It says the trust the
 /// caller configured does not reach this certificate at this instant, which is
@@ -244,7 +352,7 @@ pub fn validate_path_at(
     purpose: PathPurpose,
 ) -> PathOutcome {
     let leaf_only = vec![leaf.chain_entry(false)];
-    if anchors.is_empty() {
+    if anchors.is_empty() && !status.has_listed() {
         return PathOutcome {
             code: CheckCode::CertPathUnknown,
             message: "no trust anchors were configured, so the chain could not be checked"
@@ -255,18 +363,26 @@ pub fn validate_path_at(
         };
     }
 
-    let mut pool: Vec<(&ParsedCertificate, bool)> = Vec::new();
+    let mut pool: Vec<(&ParsedCertificate, Termination)> = Vec::new();
     for certificate in candidates.iter().take(limits.max_certificates) {
         // The leaf is never its own issuer candidate, and a certificate the
         // trust store already anchors is used in that role only: otherwise a
         // dossier's copy of an anchor would appear twice in the same path.
         let is_anchor = anchors.iter().any(|anchor| anchor.der == certificate.der);
         if certificate.der != leaf.der && !is_anchor {
-            pool.push((certificate, false));
+            // A candidate a trusted list names is also a place a path may
+            // end, while staying an ordinary link for the paths that climb
+            // past it.
+            let termination = if status.terminates(&certificate.der) {
+                Termination::Listed
+            } else {
+                Termination::None
+            };
+            pool.push((certificate, termination));
         }
     }
     for certificate in anchors.iter().take(limits.max_certificates) {
-        pool.push((certificate, true));
+        pool.push((certificate, Termination::Anchor));
     }
     let considered = pool.len();
 
@@ -380,9 +496,13 @@ pub fn validate_path_at(
 ///
 /// Returns whether the expansion budget ran out, which is a distinct outcome
 /// from "no path exists": the tool stopped looking rather than concluded.
+///
+/// A completed path is recorded **before** the search climbs any further, so
+/// the nearest place a chain may end comes first in `paths` and is the one
+/// [`validate_path_at`] prefers.
 fn build_paths(
     leaf: &ParsedCertificate,
-    pool: &[(&ParsedCertificate, bool)],
+    pool: &[(&ParsedCertificate, Termination)],
     chain: &mut Vec<usize>,
     paths: &mut Vec<Vec<usize>>,
     limits: &VerifyLimits,
@@ -398,9 +518,21 @@ fn build_paths(
     // Completion is checked *before* the length bound, so a chain of exactly
     // `max_chain_length` certificates that ends at an anchor is a path rather
     // than one the search refused to look at: a limit of 8 admits 8, not 7.
-    if chain.len() > 1 && pool[*chain.last().expect("chain is not empty")].1 {
+    let termination = if chain.len() > 1 {
+        pool[*chain.last().expect("chain is not empty")].1
+    } else {
+        Termination::None
+    };
+    if termination != Termination::None {
         paths.push(chain.clone());
-        return false;
+        // A configured anchor is the top of the path by construction, and
+        // nothing above it is looked at. A trusted-list identity that is not
+        // one is a link as well as a terminus: the search climbs past it, so
+        // that a service the list was not vouching for at the validation time
+        // still falls through to whatever anchor sits above.
+        if termination == Termination::Anchor || paths.len() >= limits.max_paths {
+            return false;
+        }
     }
     if chain.len() >= limits.max_chain_length {
         return false;
@@ -432,7 +564,7 @@ fn build_paths(
 /// certificate reached, which is the name a caller needs to add to the store.
 fn dangling_issuer(
     leaf: &ParsedCertificate,
-    pool: &[(&ParsedCertificate, bool)],
+    pool: &[(&ParsedCertificate, Termination)],
     limits: &VerifyLimits,
 ) -> Option<String> {
     let mut current = leaf;
@@ -488,7 +620,7 @@ pub(crate) fn verify_signer_path(
         signer,
         &candidates,
         &context.anchors,
-        AnchorStatus::new(&context.anchor_provenance),
+        context.anchor_status(),
         signature_time,
         &context.options.limits,
         PathPurpose::Signing,

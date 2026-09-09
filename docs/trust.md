@@ -44,9 +44,11 @@ openszigno verify dossier.es3 --json \
 
 A directory holding certificate files directly, with no `anchors`
 subdirectory, is read the same way. The split is a convention, not a grant:
-**a certificate is a trust anchor if and only if it is self-signed**, so
-dropping an intermediate into `anchors/` makes it an extra untrusted path
-candidate rather than a trusted one.
+**a certificate in this directory is a trust anchor if and only if it is
+self-signed**, so dropping an intermediate into `anchors/` makes it an extra
+untrusted path candidate rather than a trusted one. A trusted list is the other
+way round: a certificate it names anchors a path whether or not it is
+self-signed, because the list says so.
 
 Every file is parsed at load time. One malformed entry fails the whole store
 (`trust_store_invalid`, exit 3), because a half-loaded store would silently
@@ -164,6 +166,23 @@ every `X509Certificate` in the service digital identity becomes a trust anchor,
 carrying the service's status timeline: the current `ServiceStatus` with its
 `StatusStartingTime`, plus every `ServiceHistoryInstance`.
 
+**A listed certificate anchors a path whether or not it is self-signed.** In a
+real national list the CA/QC identities are the *issuing* CAs, which are
+intermediates: the Hungarian list records NetLock's qualified issuing CAs as
+CA/QC services with pre-eIDAS history, and the root that signed them only as a
+qualified timestamping service granted from 2018. Following ETSI TS 119 615,
+the path ends where the list speaks — at the issuing CA — rather than climbing
+to the root and being judged by an entry that was never about issuing
+certificates. The nearest listed certificate along a chain wins, so a root's
+entry cannot override the issuing CA's below it; when the nearest one's service
+was not granted at the validation time, the search carries on upward, and only
+refuses if no listed certificate and no `--trust-store` anchor above it will
+end the path either. The terminating certificate is the trust anchor: nothing
+above it is validated, it is the last entry of the reported `chain` with
+`trust_anchor_origin: "trust_list"`, its revocation is not checked (an anchor's
+never is), and `qualified` follows from its service exactly as for a listed
+root.
+
 A path that ends at such an anchor is trusted only if the service was granted
 **at the validation time**. That is what lets a signature made while a CA was
 supervised still verify after that CA was withdrawn, and stops a signature made
@@ -208,7 +227,7 @@ they are not equally strong:
 
 | Form | What it can do |
 | --- | --- |
-| `X509Certificate` | Becomes a **trust anchor**, and can establish that a chain certificate *was issued by* the listed service — a verified signature, not a name match. |
+| `X509Certificate` | Becomes a **trust anchor** — self-signed or not, so a listed issuing CA ends a path — and can establish that a chain certificate *was issued by* the listed service: a verified signature, not a name match. |
 | `X509SKI` | Recognises a certificate already in the validated chain by its `subjectKeyIdentifier`. Contributes **no anchor** and grants no trust; it can only decide `qualified`. |
 | `X509SubjectName` | The same, matched attribute by attribute against the certificate's subject, exactly as written — no case folding, no normalisation. The weakest form. |
 
