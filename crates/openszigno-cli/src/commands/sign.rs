@@ -30,7 +30,7 @@ use openszigno_author::sign::{
     SignRequest, SignScope, SignatureAlgorithm, SoftwareSigner, parse_certificates,
     sign as sign_dossier, timestamp_request,
 };
-use openszigno_core::ParseOptions;
+use openszigno_core::{MAX_DISPLAY_CHARS, ParseOptions, sanitize_display};
 use openszigno_verify::{Clock, SystemClock, format_rfc3339};
 use serde_json::json;
 
@@ -137,10 +137,14 @@ fn run(args: &SignArgs, options: &ParseOptions, bytes: &[u8]) -> Result<Success,
             // Which credential at which service produced this signature, so a
             // run against a remote QSCD is reproducible from its own report.
             // Neither value is a secret: the token is what is secret, and it
-            // never appears here.
+            // never appears here. Both are strings a service chose, so both
+            // are sanitised before they reach the envelope: what the JSON
+            // carries is what human output prints, and neither may carry a
+            // control sequence into a terminal.
             if let Backend::Csc(csc) = &backend {
-                value["credential_id"] = json!(csc.credential_id());
-                value["csc_specs"] = json!(csc.specs());
+                value["credential_id"] =
+                    json!(sanitize_display(csc.credential_id(), MAX_DISPLAY_CHARS));
+                value["csc_specs"] = json!(sanitize_display(csc.specs(), MAX_DISPLAY_CHARS));
             }
             value
         })

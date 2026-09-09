@@ -2,6 +2,7 @@
 
 use std::io::{self, Write};
 
+use openszigno_core::{MAX_DISPLAY_CHARS, sanitize_display};
 use serde_json::Value;
 
 use crate::render::write_diagnostic;
@@ -377,7 +378,12 @@ pub(crate) fn write_human_success(command: &str, response: &Response) -> io::Res
                 if let Some(who) = signature["signer"].as_str() {
                     line.push_str(&format!(" | signer={who}"));
                 }
+                // Sanitised again on the way out. The envelope already holds
+                // a sanitised value, but a terminal is where a control
+                // sequence would act, so nothing a service chose reaches one
+                // unfiltered on the strength of having been filtered earlier.
                 if let Some(credential) = signature["credential_id"].as_str() {
+                    let credential = sanitize_display(credential, MAX_DISPLAY_CHARS);
                     line.push_str(&format!(" | credential={credential}"));
                 }
                 writeln!(out, "{line}")?;

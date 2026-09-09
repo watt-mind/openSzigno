@@ -103,12 +103,12 @@ fn described(body: &[u8]) -> String {
 
 /// Bound and strip a value taken from a remote answer before it reaches a
 /// message, exactly as every other value taken from input is bounded.
+///
+/// The shared sanitiser drops control *and* format characters, so a service
+/// cannot put an ANSI escape or a bidirectional override into a refusal a
+/// terminal then acts on.
 fn sanitize(value: &str) -> String {
-    value
-        .chars()
-        .filter(|character| !character.is_control())
-        .take(120)
-        .collect()
+    openszigno_core::sanitize_display(value, 120)
 }
 
 #[cfg(test)]

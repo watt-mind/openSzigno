@@ -11,6 +11,7 @@ mod model;
 mod parse;
 mod scan;
 mod sniff;
+mod text;
 mod xml;
 
 pub use decode::{DecodeOutcome, DecodedDocument, UnsupportedReason, decode_document_with};
@@ -23,6 +24,7 @@ pub use model::{
     StructuralWarning, StructuralWarningCode, TimestampPlacement, TimestampSummary,
 };
 pub use sniff::{DetectedType, sniff};
+pub use text::{MAX_DISPLAY_CHARS, sanitize_display};
 pub use xml::{EncodingDeclaration, XmlSource, declared_encoding, id_map};
 
 /// The XML parser this crate builds every tree with. Re-exported so that a

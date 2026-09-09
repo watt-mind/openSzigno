@@ -86,6 +86,33 @@ fn unusable(what: impl Into<String>) -> SignError {
     SignError::new(SignErrorCode::CscCredentialUnusable, what)
 }
 
+/// The longest one service-supplied value may be in a message.
+const MAX_SERVICE_VALUE_CHARS: usize = 64;
+
+/// The most service-supplied values one message lists.
+const MAX_SERVICE_VALUES: usize = 16;
+
+/// Spell out a list of values a service sent, safely.
+///
+/// Nothing a service says is typed by the operator, and every one of these
+/// strings ends up in an error message and on a terminal. Each value goes
+/// through the shared display sanitiser, which drops control and format
+/// characters — an ANSI escape and a bidirectional override alike — and bounds
+/// its length; the list itself is bounded too, so no service can turn a
+/// refusal into a screenful.
+fn service_values(values: &[String]) -> String {
+    let mut text = values
+        .iter()
+        .take(MAX_SERVICE_VALUES)
+        .map(|value| openszigno_core::sanitize_display(value, MAX_SERVICE_VALUE_CHARS))
+        .collect::<Vec<_>>()
+        .join(", ");
+    if values.len() > MAX_SERVICE_VALUES {
+        text.push_str(", ...");
+    }
+    text
+}
+
 // ---------------------------------------------------------------------------
 // info
 // ---------------------------------------------------------------------------
@@ -226,7 +253,7 @@ pub fn parse_sole_credential(body: &[u8]) -> Result<String, SignError> {
             SignErrorCode::CscCredentialAmbiguous,
             format!(
                 "this account holds several signing credentials; name one with --csc-credential: {}",
-                list.credential_ids.join(", ")
+                service_values(&list.credential_ids)
             ),
         )),
     }
@@ -617,7 +644,7 @@ pub fn choose_algorithm(
     }
     Err(unusable(format!(
         "no signature algorithm this build writes is offered by this credential: {}",
-        credential.key_algorithms.join(", ")
+        service_values(&credential.key_algorithms)
     )))
 }
 

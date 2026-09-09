@@ -103,7 +103,8 @@ part of the public contract — it is where to look, not what is promised.
 crates/openszigno-cli/src/
   main.rs             # fn main: dispatch, then write the response and exit
   args.rs             # clap types, and the shared --allow-namespace plumbing
-  input.rs            # the bounded reader for a file or stdin, InputInfo, load
+  input.rs            # the bounded reader for a file or stdin, the one every
+                      #   other caller-supplied file is read with, InputInfo
   response.rs         # the JSON envelope, CliError, and its exit statuses
   render/             # writing the envelope (json.rs) and the summary (human.rs)
   commands/           # one module per command: inspect, list, validate,
@@ -383,7 +384,10 @@ input passes through these stages, each with an explicit limit:
 
 1. **Input size.** The file is read with a hard cap (`max_input_bytes`,
    64 MiB). The CLI also refuses a path that is not a regular file. Larger
-   inputs fail with `input_too_large` before parsing.
+   inputs fail with `input_too_large` before parsing. The file is opened once
+   and both checks are made against that one open descriptor, with the cap
+   enforced on the bytes that arrive; see
+   [Bounded file reads](#bounded-file-reads).
 2. **Encoding.** Only the `encoding` pseudo-attribute of the XML declaration
    itself is consulted; comments or later content cannot select an encoding.
    UTF-8 and ISO-8859-2 are decoded strictly; anything else is
@@ -527,6 +531,36 @@ stderr. Document ordering is the source XML order. No command writes XML
 payload bytes to stdout except `extract --stdout`, which writes the selected
 document's payload and nothing else.
 
+### Bounded file reads
+
+Every file the CLI reads because a caller named it goes through one helper,
+`input::read_bounded_file`: the dossier, `--decrypt-key` and `--key` with their
+certificates and passphrase files, the `--csc` configuration and the secrets it
+names, and each entry of a `--trust-store` and a `--revocation-store`.
+
+- The path is opened once. The type and the size come from an `fstat` on that
+  descriptor, and the bytes are read through it, so replacing or growing the
+  file after a check cannot change what is read.
+- The open refuses a symlink rather than following one, with `O_NOFOLLOW` on
+  Unix and `FILE_FLAG_OPEN_REPARSE_POINT` on Windows. The dossier path is the
+  one exception: it is the caller's own and has always been readable through a
+  link.
+- Reading stops one byte past the cap, and the file is refused at that point,
+  so a reported length that is not the truth is bounded all the same. A file of
+  exactly the cap is read; one byte more is not.
+
+The caps are `max_input_bytes` (64 MiB) for a dossier, 1 MiB for key material
+and the `--csc` configuration, 4 MiB for one trust-store entry or trusted list,
+and `MAX_REVOCATION_ITEM_BYTES` (16 MiB) for one CRL or OCSP response. Each
+caller words its own refusal, with the code that path already used, and no
+message names the file, because the path may be private.
+
+An input that is not a regular file, a directory most often, is `io_error`
+(exit 3) with `input.bytes` reported as `null` on every operating system. A
+directory has a length of its own on some filesystems and none on others, and
+it is a byte count of nothing the caller asked for either way, so the envelope
+says it does not know rather than repeating it.
+
 ### Reading from stdin
 
 `FILE` may be `-`, which reads the dossier from standard input instead of from
@@ -538,9 +572,9 @@ for a file.
   `input_too_large` (exit 4), the same code a file over the cap produces, and
   `input.bytes` is `null` because the true size of a stream that was not read
   to its end is unknown.
-- The cap is enforced on the bytes actually read. No filesystem metadata is
-  consulted, because a pipe has none and a file's metadata can change between
-  the check and the read.
+- The cap is enforced on the bytes actually read, on this path and on the file
+  path alike. A pipe has no filesystem metadata to consult, and a file's can
+  change between a check and the read.
 - The dossier is buffered in memory in full. That is inherent to the format:
   the XML must be parsed as one tree, and payloads are decoded from it.
 - Standard input and standard output are independent, so `-` combines with
@@ -625,7 +659,7 @@ The envelope fields are always present:
 | `schema_version` | number | Currently `1`. |
 | `ok` | boolean | `false` on any failure. |
 | `command` | string | `inspect`, `list`, `extract`, `validate-structure`, `verify`, `create`, `sign`, or `usage`. `skill` never appears: it emits no envelope. |
-| `input` | object | `format` is `"microsec-es3"` or `null`; `bytes` is the input size or `null`. |
+| `input` | object | `format` is `"microsec-es3"` or `null`; `bytes` is the input size, or `null` when it is not known, which includes an input that is not a regular file and a stream that was not read to its end. |
 | `data` | object or null | Command-specific; `null` on failure. |
 | `warnings` | array | Objects with stable `code` and human `message`. |
 | `errors` | array | Objects with stable `code` and human `message`. |
@@ -1837,14 +1871,15 @@ tool's allowlist. The classification never grants trust on its own — nothing
 found inside a dossier is ever an anchor, however it is signed.
 
 Files are read in sorted order so the same store always builds the same paths;
-subdirectories and symlinks are skipped rather than followed. **Every entry is
-parsed as an X.509 certificate at load time**, so a store that loads is one
-whose every byte was understood: one malformed entry among good ones fails the
-whole store. A file above 4 MiB, a directory holding more than 1024 entries, an
-entry that is not a valid certificate, and an empty store are all
-`trust_store_invalid` (exit 3), and the message names the entry's ordinal, never
-the file, because the path may be private. No trust anchors are compiled into
-the binary.
+subdirectories and symlinks are skipped rather than followed, and a symlink is
+refused by the open itself (see [Bounded file reads](#bounded-file-reads)).
+**Every entry is parsed as an X.509 certificate at load time**, so a store that
+loads is one whose every byte was understood: one malformed entry among good
+ones fails the whole store. A file above 4 MiB, a directory holding more than
+1024 entries, an entry that is not a valid certificate, and an empty store are
+all `trust_store_invalid` (exit 3), and the message names the entry's ordinal,
+never the file, because the path may be private. No trust anchors are compiled
+into the binary.
 
 ### Trusted lists
 
