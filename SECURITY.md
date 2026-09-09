@@ -103,8 +103,10 @@ A private key is held only for the duration of the one run that needs it.
 
 ### The `--csc` bearer token
 
-`sign --csc` carries one more secret: the bearer token that reaches the Cloud
-Signature Consortium service. It is handled the way a passphrase is.
+`sign --csc` and `csc login` carry one more secret: the bearer token that
+reaches the Cloud Signature Consortium service. It is handled the way a
+passphrase is, and so are the refresh token, the authorization code, the PKCE
+verifier and the client secret the login round adds.
 
 - **Never from the command line.** It comes from the `--csc` configuration
   file, or from a file that configuration names, and there is no flag that
@@ -125,6 +127,48 @@ Signature Consortium service. It is handled the way a passphrase is.
   world-readable file earns the `csc_config_permissive` warning. A mode this
   tool refused would be a mode somebody worked around, and the file may hold no
   secret at all when the token lives in a separate `access_token_file`.
+- **What `csc login` stores, it stores privately.** The access token goes to
+  the file `access_token_file` names, and the expiry, the refresh token and the
+  token endpoint into `<access_token_file>.record.json`. Both are created with
+  mode `0600` on Unix, and the mode is set **at creation** rather than after:
+  a file created `0644` and chmod-ed afterwards is world-readable for the
+  length of the write, which is exactly the window that matters for a token.
+  Neither file's contents are ever printed; the report carries the path and the
+  expiry instant, nothing more.
+- **The client secret goes in one of two places and no third.** The token
+  request body, or an HTTP Basic `Authorization` header when the service's
+  `info` says it takes `basic` client authentication. Never in a URL, never in
+  `argv`, never in the authorization URL that is printed for a person to open.
+
+### What the loopback redirect listener accepts
+
+`csc login`, and `sign --csc` when it runs the credential round, bind a TCP
+listener on `127.0.0.1` to receive the authorization redirect (RFC 8252
+section 7.3). It is the only listening socket this tool ever opens, and it is
+deliberately narrow.
+
+- **Loopback only, and by address.** The bind address is `127.0.0.1`, whatever
+  host the configuration's `redirect_uri` wrote, so a name that resolves
+  elsewhere cannot move the listener off the machine. The port is ephemeral
+  unless the configuration pins one, because a deployment may have registered
+  an exact redirect.
+- **One path.** A request to any other path gets a `404` and is not read
+  further. The request head is read under a 16 KiB cap and a five-second read
+  timeout, and nothing after the head is read at all.
+- **The `state` is checked before the code is looked at.** A redirect carrying
+  a `state` this run did not issue stops the run with `csc_state_mismatch`,
+  and the code that arrived is discarded unused: it is never sent to the token
+  endpoint, and it is never printed.
+- **PKCE, always `S256`.** A 32-byte verifier from the operating system's
+  random source, and its SHA-256 as the challenge (RFC 7636). `plain` is never
+  offered. The verifier stays in this process until it goes into the token
+  request body.
+- **It stops.** On the first answered redirect, or after five minutes. A login
+  nobody completes ends rather than leaving a socket open, and
+  `--no-interactive` refuses the round rather than binding anything at all.
+- **The page it serves says nothing.** One line of plain text with
+  `Cache-Control: no-store`. The browser is somebody's ordinary browser, and a
+  page that echoed a code or a token would put it in a history entry.
 
 ### RSA key-transport decryption: implicit rejection
 
@@ -271,8 +315,9 @@ not put a token, a credential identifier or a user's name in it.
 
 ## Network exposure
 
-**openSzigno opens a socket only when you ask it to, with one of three
-flags: `verify --online`, `sign --tsa`, or `sign --csc`.** Without one of
+**openSzigno opens an outbound socket only when you ask it to, with one of
+three flags: `verify --online`, `sign --tsa`, or `sign --csc`, or by running
+`csc login`, which exists to make a network exchange.** Without one of
 them it opens no socket at all, in any command, and the `openszigno-verify`
 crate structurally cannot: it performs no I/O except through injected traits,
 and revocation data reaches it only as bytes the caller already has. All three
@@ -374,10 +419,14 @@ offline rules before it is believed, so `--online` can widen where evidence
 comes from and can never relax a rule.
 [docs/trust.md](docs/trust.md#online-fetching) has the details.
 
-### What `sign --csc` sends
+### What `sign --csc` and `csc login` send
 
 `sign --csc` contacts exactly one host: the one `base_url` names in the
-configuration file the caller passed. It is not a URL taken from a dossier or
+configuration file the caller passed. `csc login`, and the credential round
+`sign --csc` may run, additionally contact the OAuth 2.0 authorization and
+token endpoints, which are either written in that same configuration or
+published by that same service under `info`'s `oauth2` field. Every one of them
+is a destination the operator chose. It is not a URL taken from a dossier or
 from a certificate, so the trust gate above does not apply to it; the operator
 chose it.
 
@@ -389,10 +438,15 @@ twice, in `credentials/authorize`, so the authorisation is bound to the data
 it covers, and in `signatures/signHash`, and that binding is why it is sent at
 authorisation time rather than a placeholder.
 
+A token request carries the authorization code, the PKCE verifier and, for a
+confidential client, the client secret; it never carries a digest, a document
+or a title.
+
 The remaining rules are the ones `--online` already imposes: the destination
 policy, the pinned address resolution, 5 s to connect and 20 s per request, at
 most three redirects, never to another host and never from `https` to `http`,
-no proxy from the environment, and a 256 KiB cap on a response. `https` is
+no proxy from the environment, and a 256 KiB cap on a response (64 KiB for a
+token response). `https` is
 required on every hop, the first included, because the token is in a header
 and a `credentials/authorize` body carries the PIN and the one-time password
 as well; every CSC request is marked sensitive for that reason. The one

@@ -92,9 +92,51 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
   timestamp where an existing signature or timestamp covers the insertion
   point is `document_already_signed`, the refusal `sign` already makes,
   applied by the same code.
+- `openszigno csc login CONFIG.toml`: the OAuth 2.0 authorization-code round
+  a Cloud Signature Consortium service needs, so a token no longer has to be
+  obtained out of band. It is RFC 8252 in shape (a loopback listener on
+  `127.0.0.1`, an ephemeral port unless `redirect_uri` pins one) with RFC 7636
+  PKCE `S256`, checks the `state` before it reads the code, and prints the
+  authorization URL rather than opening a browser unless `--open` is given.
+  The token it obtains is written to the file `access_token_file` names, mode
+  `0600` on Unix, with its expiry, its refresh token and its token endpoint in
+  `<access_token_file>.record.json` beside it; none of them is ever printed,
+  and none is ever taken from or put into `argv`. `--credential ID` also
+  reports that credential's authorisation mode. New flags on the command:
+  `--credential`, `--open`, `--json`, `--online-allow-private`,
+  `--online-proxy`.
+- `sign --csc` can now sign with an `oauth2`-mode credential. It runs the
+  `scope=credential` authorization round itself, between credential discovery
+  and `signatures/signHash`, because only the signing run knows the hashes: it
+  prints a URL, waits on a loopback listener, and the token that round yields
+  is the Signature Activation Data. The parameters go in as `credentialID`,
+  `numSignatures`, `hashes` and `hashAlgorithmOID`, or as one RFC 9396
+  `authorization_details` object when the service's `info` reports
+  `supportsRar: true`. The new `sign --no-interactive` refuses the round
+  instead, and reports `csc_authorization_required` during discovery, which is
+  what every `oauth2` credential did before.
+- `sign --csc` renews an expired stored access token with its refresh token
+  before anything is contacted, and warns `csc_token_refreshed`, instead of
+  letting the expiry surface as the service's own `csc_rejected`.
+- New stable error codes `csc_login_failed` (exit 5), `csc_state_mismatch`
+  (exit 5) and `csc_token_unusable` (exit 4), and new warning codes
+  `csc_token_refreshed` and `csc_no_refresh_token`. `openszigno-author`'s
+  `SignErrorCode` gains the three corresponding variants, and `ServiceInfo`
+  gains the `oauth2` field a service publishes its authorization server in.
+- Four new `--csc` configuration keys: `authorization_url`, `token_url`, and
+  `client_secret`/`client_secret_file` and `redirect_uri` now being read
+  rather than reserved. Without the two endpoint keys, the ones under the
+  `oauth2` base the service's `info` publishes are used.
 
 ### Changed
 
+- The `csc_key_unused` warning is gone: `redirect_uri`, `client_secret` and
+  `client_secret_file` are used by the login round now rather than reserved
+  for it. A `--csc` configuration that names them no longer warns.
+- A `--csc` configuration may now carry no access token at all, because
+  `csc login` is what writes one; `sign --csc` still refuses to run without
+  one, with the same `csc_config_invalid` code and a message that names
+  `csc login` as the way to obtain it.
 - Tracked Markdown no longer uses em-dashes in prose, per CONTRIBUTING.md's
   Documentation style rules; sentences are rewritten with periods, colons,
   commas, or parentheses instead. `scripts/check-prose.py` now fails CI's
