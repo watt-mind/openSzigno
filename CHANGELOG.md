@@ -89,6 +89,18 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
   per name; `output_name_collision` is kept for the case where all 64 are
   taken. The first candidate, and so every name a dossier that does not
   collide on purpose produces, is unchanged.
+- The `--online` destination policy refuses seven more address ranges, each of
+  which reaches somewhere no certificate legitimately publishes: carrier-grade
+  NAT (`100.64.0.0/10`), IETF protocol assignments (`192.0.0.0/24`),
+  benchmarking (`198.18.0.0/15`), the deprecated IPv6 site-local prefix
+  (`fec0::/10`), and the three prefixes that carry an IPv4 destination inside
+  an IPv6 address — 6to4 (`2002::/16`), Teredo (`2001::/32`) and the
+  well-known NAT64 prefix (`64:ff9b::/96`), which were a way of writing a
+  private IPv4 destination the IPv4 rules never saw. The IPv4-compatible form
+  `::a.b.c.d` is now judged by the address it carries, as the IPv4-mapped
+  `::ffff:a.b.c.d` form already was, so `::169.254.169.254` is refused as the
+  metadata address it is. `--online-allow-private` waives the new rules
+  exactly as it waives the old ones.
 
 ## [0.7.1] - 2026-09-09
 

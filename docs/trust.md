@@ -523,11 +523,21 @@ openszigno verify dossier.es3 --json \
   | unspecified | `0.0.0.0/8`, `::` |
   | broadcast | `255.255.255.255` |
   | multicast | `224.0.0.0/4`, `ff00::/8` |
+  | carrier-grade NAT | `100.64.0.0/10` |
+  | IETF protocol assignments | `192.0.0.0/24` |
+  | benchmarking | `198.18.0.0/15` |
+  | site-local (deprecated) | `fec0::/10` |
+  | 6to4 | `2002::/16` |
+  | Teredo | `2001::/32` |
+  | NAT64 (well-known prefix) | `64:ff9b::/96` |
   | cloud instance metadata | `169.254.169.254`, `fd00:ec2::254` |
   | by name | `localhost`, `*.localhost` |
 
-  An IPv4-mapped IPv6 address (`::ffff:127.0.0.1`) is judged as the IPv4
-  address it carries. `--online-allow-private` waives these address rules, and
+  The last four IPv6 rows are there because each carries an IPv4 destination
+  inside the address, which the IPv4 rules above would otherwise never see.
+
+  An IPv4-mapped IPv6 address (`::ffff:127.0.0.1`) and the IPv4-compatible
+  form (`::127.0.0.1`) are both judged as the IPv4 address they carry. `--online-allow-private` waives these address rules, and
   only these, for an internal CA that really does publish on your own network.
 - **The check is bound to the connection.** The addresses the policy approved
   are the only ones the request may be sent to: they are handed to the HTTP

@@ -16,10 +16,16 @@
 //!   **link-local** (`169.254/16`, `fe80::/10`), **unique-local**
 //!   (`fc00::/7`), **unspecified** (`0.0.0.0`, `::`, and the rest of
 //!   `0.0.0.0/8`), **broadcast** (`255.255.255.255`), **multicast**
-//!   (`224/4`, `ff00::/8`), the **cloud metadata** addresses
-//!   `169.254.169.254` and `fd00:ec2::254`, and the name `localhost` (and any
-//!   `*.localhost`). An IPv4-mapped IPv6 address is judged as the IPv4
-//!   address it carries, so it is not a way round any of the above. A dossier
+//!   (`224/4`, `ff00::/8`), **carrier-grade NAT** (`100.64.0.0/10`), **IETF
+//!   protocol assignments** (`192.0.0.0/24`), **benchmarking**
+//!   (`198.18.0.0/15`), the deprecated **site-local** prefix (`fec0::/10`),
+//!   and the tunnel prefixes that carry an IPv4 destination inside the
+//!   address — **6to4** (`2002::/16`), **Teredo** (`2001::/32`) and the
+//!   well-known **NAT64** prefix (`64:ff9b::/96`) — plus the **cloud
+//!   metadata** addresses `169.254.169.254` and `fd00:ec2::254`, and the name
+//!   `localhost` (and any `*.localhost`). An IPv4-mapped (`::ffff:a.b.c.d`)
+//!   or IPv4-compatible (`::a.b.c.d`) IPv6 address is judged as the IPv4
+//!   address it carries, so neither is a way round any of the above. A dossier
 //!   that could point the verifier at `http://169.254.169.254/` or at a
 //!   service on the operator's own subnet would have turned a signature check
 //!   into a port scanner and an SSRF primitive.
@@ -222,11 +228,14 @@ enum Verdict {
 /// metadata services, the group addresses that reach more than one host, and
 /// the IPv6 equivalents of each.
 fn verdict(address: IpAddr) -> Verdict {
-    // An IPv4-mapped address is an IPv4 destination written the other way
-    // round, and must not be a way past the IPv4 rules.
+    // An IPv4-mapped (`::ffff:a.b.c.d`) or IPv4-compatible (`::a.b.c.d`)
+    // address is an IPv4 destination written the other way round, and neither
+    // may be a way past the IPv4 rules. `Ipv6Addr::to_ipv4` covers both forms:
+    // it is the whole `::/96` prefix, so `::` and `::1` come out as `0.0.0.0`
+    // and `0.0.0.1`, which `0.0.0.0/8` refuses exactly as the IPv6 rules did.
     let address = match address {
-        IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
-            Some(mapped) => IpAddr::V4(mapped),
+        IpAddr::V6(v6) => match v6.to_ipv4() {
+            Some(embedded) => IpAddr::V4(embedded),
             None => IpAddr::V6(v6),
         },
         other => other,
@@ -241,6 +250,7 @@ fn verdict(address: IpAddr) -> Verdict {
 }
 
 fn is_restricted_v4(address: Ipv4Addr) -> bool {
+    let octets = address.octets();
     address.is_loopback()
         || address.is_private()
         || address.is_link_local()
@@ -248,17 +258,42 @@ fn is_restricted_v4(address: Ipv4Addr) -> bool {
         || address.is_broadcast()
         || address.is_multicast()
         // 0.0.0.0/8, "this network", which some stacks route to the host.
-        || address.octets()[0] == 0
+        || octets[0] == 0
+        // 100.64.0.0/10, carrier-grade NAT (RFC 6598). It is the operator's
+        // own side of a provider network, not a destination a CA publishes.
+        || (octets[0] == 100 && (64..=127).contains(&octets[1]))
+        // 192.0.0.0/24, IETF protocol assignments (RFC 6890), which includes
+        // the DS-Lite `192.0.0.1` and NAT64's `192.0.0.170`/`.171`.
+        || (octets[0] == 192 && octets[1] == 0 && octets[2] == 0)
+        // 198.18.0.0/15, benchmarking (RFC 2544): local test equipment.
+        || (octets[0] == 198 && (octets[1] == 18 || octets[1] == 19))
 }
 
 fn is_restricted_v6(address: Ipv6Addr) -> bool {
+    let segments = address.segments();
     address.is_loopback()
         || address.is_unspecified()
         || address.is_multicast()
         // fc00::/7, unique local (RFC 4193).
-        || (address.segments()[0] & 0xfe00) == 0xfc00
+        || (segments[0] & 0xfe00) == 0xfc00
         // fe80::/10, link local (RFC 4291).
-        || (address.segments()[0] & 0xffc0) == 0xfe80
+        || (segments[0] & 0xffc0) == 0xfe80
+        // fec0::/10, the deprecated site-local prefix (RFC 3879). Deprecated
+        // is not unroutable: stacks that still honour it reach the operator's
+        // own site, which is the whole point of refusing it.
+        || (segments[0] & 0xffc0) == 0xfec0
+        // 2002::/16, 6to4 (RFC 3056). The IPv4 address is embedded in the
+        // prefix, so this is a way of writing an arbitrary IPv4 destination —
+        // a private one included — that the IPv4 rules would never see.
+        || segments[0] == 0x2002
+        // 2001::/32, Teredo (RFC 4380), which likewise tunnels to an IPv4
+        // destination carried inside the address.
+        || (segments[0] == 0x2001 && segments[1] == 0x0000)
+        // 64:ff9b::/96, the well-known NAT64 prefix (RFC 6052): the low 32
+        // bits are an IPv4 address the translator will dial for us.
+        || (segments[0] == 0x0064
+            && segments[1] == 0xff9b
+            && segments[2..6] == [0, 0, 0, 0])
 }
 
 /// Whether a host names an address the policy refuses. Tests only: the policy
@@ -533,6 +568,78 @@ mod tests {
         assert!(!restricted_literal("2606:4700::1111"));
         assert!(!restricted_literal("8.8.8.8"));
         assert!(!restricted_literal("172.32.0.1"));
+    }
+
+    /// One case per range for the ones that are not "the machine itself" but
+    /// still reach somewhere no certificate legitimately publishes: a provider
+    /// network, a protocol assignment, test equipment, or a tunnel prefix that
+    /// carries an arbitrary IPv4 destination inside the address.
+    #[test]
+    fn the_shared_transition_and_tunnel_ranges_are_restricted_too() {
+        for (host, what) in [
+            ("100.64.0.1", "100.64.0.0/10, carrier-grade NAT"),
+            ("100.127.255.254", "the top of 100.64.0.0/10"),
+            ("192.0.0.1", "192.0.0.0/24, IETF protocol assignments"),
+            ("192.0.0.170", "the NAT64 discovery address"),
+            ("198.18.0.1", "198.18.0.0/15, benchmarking"),
+            ("198.19.255.254", "the top of 198.18.0.0/15"),
+            ("fec0::1", "fec0::/10, deprecated site-local"),
+            ("2002:7f00:1::1", "2002::/16, 6to4"),
+            ("2001:0:1234::1", "2001::/32, Teredo"),
+            ("64:ff9b::c000:221", "64:ff9b::/96, NAT64"),
+        ] {
+            assert!(restricted_literal(host), "{host} is {what}");
+            assert!(
+                matches!(
+                    permitted(&format!("http://[{host}]/ca.crl"), false),
+                    Err(Refusal::Refused(REFUSED_LITERAL))
+                ) || matches!(
+                    permitted(&format!("http://{host}/ca.crl"), false),
+                    Err(Refusal::Refused(REFUSED_LITERAL))
+                ),
+                "{host} must be refused as a destination"
+            );
+        }
+        // The neighbours of each range stay reachable: these are not blanket
+        // refusals of the surrounding /8.
+        for host in [
+            "100.63.255.255",
+            "100.128.0.1",
+            "192.0.1.1",
+            "198.17.255.255",
+            "198.20.0.1",
+            "2001:db8::1",
+            "2003::1",
+            "64:ff9c::1",
+            // Just below fe80::/10 and fec0::/10, which together own
+            // fe80::-feff:: entirely.
+            "fe00::1",
+        ] {
+            assert!(!restricted_literal(host), "{host} must stay reachable");
+        }
+    }
+
+    /// The IPv4-compatible form `::a.b.c.d` is judged by the address it
+    /// carries, exactly as the IPv4-mapped `::ffff:a.b.c.d` form already was.
+    /// Without that, `::169.254.169.254` was a plain IPv6 address to this
+    /// policy and reached the metadata service of any host whose stack still
+    /// routes the prefix.
+    #[test]
+    fn an_ipv4_compatible_address_is_judged_by_the_address_it_carries() {
+        assert_eq!(
+            permitted("http://[::169.254.169.254]/latest/meta-data", false),
+            Err(Refusal::Refused(REFUSED_METADATA_LITERAL))
+        );
+        for host in ["::127.0.0.1", "::10.0.0.1", "::192.168.1.1"] {
+            assert!(restricted_literal(host), "{host} carries a private address");
+        }
+        // The two shortest members of the prefix keep the verdict they had:
+        // `::` and `::1` come out as `0.0.0.0` and `0.0.0.1`, which
+        // `0.0.0.0/8` refuses.
+        assert!(restricted_literal("::"));
+        assert!(restricted_literal("::1"));
+        // A public address written this way is still public.
+        assert!(!restricted_literal("::8.8.8.8"));
     }
 
     #[test]

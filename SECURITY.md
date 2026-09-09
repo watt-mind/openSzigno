@@ -307,10 +307,16 @@ attacker-supplied until something the operator configured vouches for it:
   loopback (`127.0.0.0/8`, `::1`), private (`10.0.0.0/8`, `172.16.0.0/12`,
   `192.168.0.0/16`), link-local (`169.254.0.0/16`, `fe80::/10`), unique-local
   (`fc00::/7`), unspecified (`0.0.0.0/8`, `::`), broadcast
-  (`255.255.255.255`), multicast (`224.0.0.0/4`, `ff00::/8`), and the cloud
+  (`255.255.255.255`), multicast (`224.0.0.0/4`, `ff00::/8`), carrier-grade
+  NAT (`100.64.0.0/10`), IETF protocol assignments (`192.0.0.0/24`),
+  benchmarking (`198.18.0.0/15`), the deprecated site-local prefix
+  (`fec0::/10`), the tunnel prefixes that carry an IPv4 destination inside the
+  address — 6to4 (`2002::/16`), Teredo (`2001::/32`) and the well-known NAT64
+  prefix (`64:ff9b::/96`) — and the cloud
   instance metadata addresses `169.254.169.254` and `fd00:ec2::254`, plus the
-  names `localhost` and `*.localhost`. An IPv4-mapped IPv6 address is judged as
-  the IPv4 address it carries. The host's *resolved* addresses are checked
+  names `localhost` and `*.localhost`. An IPv4-mapped IPv6 address
+  (`::ffff:127.0.0.1`) and the IPv4-compatible form (`::127.0.0.1`) are both
+  judged as the IPv4 address they carry. The host's *resolved* addresses are checked
   against the same list before connecting, so a public name that resolves
   inwards is refused too. Refusals are reported as `online_fetch_failed`
   (`info`) with the class `destination_refused` and the rule that refused the
