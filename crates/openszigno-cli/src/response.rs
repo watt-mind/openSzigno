@@ -103,6 +103,7 @@ impl From<OpenError> for CliError {
     fn from(error: OpenError) -> Self {
         match error {
             OpenError::Unsafe(message) => Self::unsafe_output("unsafe_output_directory", message),
+            OpenError::Exists(message) => Self::unsafe_output("output_exists", message),
             OpenError::Io(message) => Self::io(message),
         }
     }
@@ -147,6 +148,11 @@ mod tests {
         assert_eq!(unsafe_directory.exit, 5);
         let io = CliError::from(OpenError::Io("cannot inspect"));
         assert_eq!(io.code, "io_error");
+        // An extraction subdirectory whose name is already taken is the same
+        // no-clobber refusal as an existing output file, not an I/O failure.
+        let exists = CliError::from(OpenError::Exists("already there"));
+        assert_eq!(exists.code, "output_exists");
+        assert_eq!(exists.exit, 5);
         assert_eq!(io.exit, 3);
     }
 }

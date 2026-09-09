@@ -52,6 +52,13 @@ Every file is parsed at load time. One malformed entry fails the whole store
 (`trust_store_invalid`, exit 3), because a half-loaded store would silently
 change what "trusted" means.
 
+The store is bounded twice: 4 MiB per file, 1024 files per directory, and
+**64 MiB across the whole store**, counting `anchors/` and `intermediates/`
+together so a store cannot be padded out by splitting it. Every file is read
+before any of it is parsed, so a store over the total is refused for its size,
+not for whatever the file that crossed the line held. Exceeding it is the same
+`trust_store_invalid` refusal, and a refusal it stays: nothing is truncated.
+
 ### Where the Hungarian roots come from
 
 Microsec publishes its CA certificates at
@@ -271,6 +278,13 @@ not by where it sits or what it is called. A file that is neither a CRL nor an
 OCSP response fails the run (`revocation_store_invalid`, exit 3) — "no
 revocation data" is itself an answer that changes a verdict, so a store that
 quietly dropped half its contents would be worse than no store at all.
+
+The store is bounded twice: `MAX_REVOCATION_ITEM_BYTES` (16 MiB) per file,
+4096 files per directory, and **256 MiB across the whole store**, counting
+`crls/` and `ocsp/` together. Every file is read before any of it is
+classified, so a store over the total is refused for its size rather than for
+the contents of whichever file crossed the line, with the same
+`revocation_store_invalid` code.
 
 ### Where the data comes from, and which answer wins
 
@@ -523,12 +537,23 @@ openszigno verify dossier.es3 --json \
   | unspecified | `0.0.0.0/8`, `::` |
   | broadcast | `255.255.255.255` |
   | multicast | `224.0.0.0/4`, `ff00::/8` |
+  | carrier-grade NAT | `100.64.0.0/10` |
+  | IETF protocol assignments | `192.0.0.0/24` |
+  | benchmarking | `198.18.0.0/15` |
+  | site-local (deprecated) | `fec0::/10` |
+  | 6to4 | `2002::/16` |
+  | Teredo | `2001::/32` |
+  | NAT64 (well-known prefix) | `64:ff9b::/96` |
   | cloud instance metadata | `169.254.169.254`, `fd00:ec2::254` |
   | by name | `localhost`, `*.localhost` |
 
-  An IPv4-mapped IPv6 address (`::ffff:127.0.0.1`) is judged as the IPv4
-  address it carries. `--online-allow-private` waives these address rules, and
-  only these, for an internal CA that really does publish on your own network.
+  The last four IPv6 rows are there because each carries an IPv4 destination
+  inside the address, which the IPv4 rules above would otherwise never see.
+
+  An IPv4-mapped IPv6 address (`::ffff:127.0.0.1`) and the IPv4-compatible
+  form (`::127.0.0.1`) are both judged as the IPv4 address they carry.
+  `--online-allow-private` waives these address rules, and only these, for an
+  internal CA that really does publish on your own network.
 - **The check is bound to the connection.** The addresses the policy approved
   are the only ones the request may be sent to: they are handed to the HTTP
   client as the resolution for that host and port, and a name that was not

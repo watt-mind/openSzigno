@@ -548,12 +548,32 @@ names, and each entry of a `--trust-store` and a `--revocation-store`.
 - Reading stops one byte past the cap, and the file is refused at that point,
   so a reported length that is not the truth is bounded all the same. A file of
   exactly the cap is read; one byte more is not.
+- On Unix the open is non-blocking (`O_NONBLOCK`), and the flag is cleared on
+  the descriptor once the `fstat` above has established that it is a regular
+  file. Opening a FIFO for reading otherwise blocks inside `open(2)` until
+  somebody opens the writing end, which is the caller's choice and not this
+  tool's, so a dossier path or a `--decrypt-key` pointing at a named pipe would
+  wait indefinitely before the type check could refuse it. It now returns at
+  once and is refused as not a regular file. On Windows the order is unchanged:
+  the open, then the type check.
 
 The caps are `max_input_bytes` (64 MiB) for a dossier, 1 MiB for key material
 and the `--csc` configuration, 4 MiB for one trust-store entry or trusted list,
 and `MAX_REVOCATION_ITEM_BYTES` (16 MiB) for one CRL or OCSP response. Each
 caller words its own refusal, with the code that path already used, and no
 message names the file, because the path may be private.
+
+A store is a directory, so it is bounded twice: per file, and in total. A
+`--trust-store` may hold 1024 files per directory and **64 MiB across the whole
+store**; a `--revocation-store` may hold 4096 files per directory and **256 MiB
+across the whole store**. The total spans both of a store's directories
+(`anchors/` and `intermediates/`, `crls/` and `ocsp/`), so a store cannot be
+padded out by splitting it, and every file is read before any of it is parsed,
+so a store over the total is refused for its size rather than for whatever the
+file that crossed the line happened to contain. Exceeding either total is
+`trust_store_invalid` or `revocation_store_invalid` — the store's own code,
+exit 3 — and it is a refusal, never a truncation: a partially loaded store
+would silently change what "trusted" or "not revoked" means.
 
 An input that is not a regular file, a directory most often, is `io_error`
 (exit 3) with `input.bytes` reported as `null` on every operating system. A
@@ -963,15 +983,15 @@ I/O and extraction policy.
 | `sign_failed` | author | 5 | Signing could not be completed: an identifier the signature needs is already used in the dossier, an element could not be canonicalized, or the key refused to sign. |
 | `invalid_output_path` | CLI | 4 | The `create --output` or `sign --output` path does not name a file. |
 | `unsafe_output_name` | CLI | 5 | A document title or declared extension cannot be used as a filename, or the derived `<file>.d` directory name would be too long. |
-| `output_name_collision` | CLI | 5 | Residual: two outputs still map to the same name in one directory after deduplication. |
+| `output_name_collision` | CLI | 5 | Residual: two outputs still map to the same name in one directory after all 64 deduplicated candidates were taken. |
 | `output_exists` | CLI | 5 | A destination file already exists or cannot be created safely. |
 | `document_not_found` | CLI, author | 4 | A `--document` selector matches no document, is not a decimal index after `#`, or names a document inside an embedded dossier. `sign` reports it for its own selectors. |
 | `document_ambiguous` | CLI | 4 | A `--document` `object_ref` selector matches more than one document. Unreachable through a parsed dossier, whose XML IDs are unique. |
 | `stdout_requires_single_document` | CLI | 4 | `--stdout` did not resolve to exactly one document, or the one it resolved to embeds a dossier while recursion is on. |
 | `document_not_extractable` | CLI | 5 | The document `--stdout` selected is encrypted or uses an unsupported transform chain. |
-| `trust_store_invalid` | CLI | 3 | `--trust-store` does not name a readable directory, holds a file that is not PEM or DER certificate data, or holds no trust anchor. A partially loaded store would silently change what "trusted" means, so the run fails instead. |
+| `trust_store_invalid` | CLI | 3 | `--trust-store` does not name a readable directory, holds more files than the loader will read, holds a file larger than 4 MiB or more than 64 MiB in total, holds a file that is not PEM or DER certificate data, or holds no trust anchor. A partially loaded store would silently change what "trusted" means, so the run fails instead. |
 | `trust_list_invalid` | CLI | 3 | A `--trust-list`, `--lotl`, or `--trust-list-signer` file could not be read or parsed. A trusted list that loaded only in part would silently change what "trusted" means, so the run fails instead. |
-| `revocation_store_invalid` | CLI | 3 | `--revocation-store` does not name a readable directory, holds more files than the loader will read, holds a file larger than `MAX_REVOCATION_ITEM_BYTES`, or holds a file that is neither a CRL nor an OCSP response. |
+| `revocation_store_invalid` | CLI | 3 | `--revocation-store` does not name a readable directory, holds more files than the loader will read, holds a file larger than `MAX_REVOCATION_ITEM_BYTES` or more than 256 MiB in total, or holds a file that is neither a CRL nor an OCSP response. |
 | `online_options_invalid` | CLI | 3 or 4 | The network transport could not be built, which today means `--online-proxy` is not a usable proxy URL. `verify --online` reports it as exit 3; `sign --tsa` and `sign --csc` report it as exit 4. |
 | `online_cache_invalid` | CLI | 3 | The `--online-cache` directory could not be opened safely, or a cache file could not be written. A name inside it that already holds something else is not this error; that is one `online_fetch_failed` with the class `cache_collision`, and the run continues. |
 | `unsafe_output_directory` | CLI | 5 | The output path contains a symlink or reparse point, or is not a real directory. |
@@ -2354,7 +2374,7 @@ build is willing to open a socket to:
 | --- | --- | --- |
 | Scheme | `http` and `https` only | Every other scheme is refused, never rewritten into one this build speaks. |
 | Userinfo | refused, always | `user:password@host` is a way of writing a URL that reads as one host and names another, and it is credential material this tool has no business sending. `--online-allow-private` does not waive it. |
-| Address | loopback (`127/8`, `::1`), RFC 1918 private (`10/8`, `172.16/12`, `192.168/16`), link-local (`169.254/16`, `fe80::/10`), unique-local (`fc00::/7`), unspecified (`0.0.0.0/8`, `::`), broadcast (`255.255.255.255`) and multicast (`224/4`, `ff00::/8`) are all refused, as are the cloud metadata addresses `169.254.169.254` and `fd00:ec2::254` and the name `localhost` (and `*.localhost`) | Otherwise a dossier could point the verifier at `http://169.254.169.254/` — instance metadata, credentials included — or at a service on the operator's own subnet, turning a signature check into an SSRF primitive. An IPv4-mapped IPv6 address is judged as the IPv4 address it carries, so it is not a way round any of these. The two metadata addresses are named in their own refusal, because that is the one an operator wants to be told about explicitly. |
+| Address | loopback (`127/8`, `::1`), RFC 1918 private (`10/8`, `172.16/12`, `192.168/16`), link-local (`169.254/16`, `fe80::/10`), unique-local (`fc00::/7`), unspecified (`0.0.0.0/8`, `::`), broadcast (`255.255.255.255`) and multicast (`224/4`, `ff00::/8`) are all refused, as are carrier-grade NAT (`100.64.0.0/10`), IETF protocol assignments (`192.0.0.0/24`), benchmarking (`198.18.0.0/15`), the deprecated site-local prefix (`fec0::/10`), the tunnel prefixes 6to4 (`2002::/16`), Teredo (`2001::/32`) and NAT64 (`64:ff9b::/96`), the cloud metadata addresses `169.254.169.254` and `fd00:ec2::254`, and the name `localhost` (and `*.localhost`) | Otherwise a dossier could point the verifier at `http://169.254.169.254/` — instance metadata, credentials included — or at a service on the operator's own subnet, turning a signature check into an SSRF primitive. An IPv4-mapped (`::ffff:a.b.c.d`) or IPv4-compatible (`::a.b.c.d`) IPv6 address is judged as the IPv4 address it carries, so neither is a way round any of these; the three tunnel prefixes are refused outright for the same reason, since each carries an IPv4 destination the IPv4 rules would never see. The two metadata addresses are named in their own refusal, because that is the one an operator wants to be told about explicitly. |
 | Resolved address | re-checked against the same ranges before connecting | A public name that resolves to `127.0.0.1` is refused on the address, not on the name, so DNS rebinding does not walk past the rule. |
 | The address that is dialled | exactly the addresses the check approved | The policy hands its resolution to `ureq` as a pinned answer for that host and port, and a name that was not vetted for the fetch in hand does not resolve at all: there is no second lookup, so a zone that answers with a public address and then with a private one has no window between the check and the socket. A host that resolves to nothing is a `transport` failure and nothing is contacted. |
 | The name that is verified | unchanged | Pinning is an address decision only. The URL is sent as published, so the `Host` header, the TLS SNI value and the certificate host-name verification all still use the name the certificate named. |
@@ -3674,13 +3694,21 @@ is `signing_key_mismatch` and is refused before anything is signed.
   payload file, so a renamed embedded dossier lands in `court-7.dosszie.d`;
   a directory name that clashes on its own is renamed by the same rule. Each
   rename is reported as `output_name_deduplicated`, naming the document index
-  and its `dossier_path` only. Comparison stays case-insensitive, and a name
-  that still collides after renaming is the residual error
-  `output_name_collision`, which aborts the run with nothing written.
+  and its `dossier_path` only. Comparison stays case-insensitive. A renamed
+  candidate that is itself taken — which a title crafted to spell it makes
+  easy — does not end the run: the candidates keep counting,
+  `ruling-7.pdf`, then `ruling-7-2.pdf`, `ruling-7-3.pdf` and on, up to 64
+  candidates per name. Only a name still taken after all 64 is the residual
+  error `output_name_collision`, which aborts the run with nothing written.
 - All documents in the whole tree are decoded in memory and all output names,
   collisions, and destination existence are checked before the output
   directory is touched; a decode failure, an unsafe name, a collision, or a
   pre-existing destination file or subdirectory aborts with no files written.
+  The existence check and the creation cannot be one operation, so a name
+  taken in between is caught by the creation itself: `O_CREAT | O_EXCL` for a
+  file, `mkdir`'s own `EEXIST` for a `<file>.d` subdirectory. Both are
+  `output_exists` (exit 5) — the no-clobber rule working, not a broken
+  filesystem — and both roll the run back.
 - Derive output names from the document title only after sanitization.
   Reject empty titles, `.` / `..`, path separators, absolute paths, control,
   format, bidirectional, invisible, and private-use characters,
@@ -3689,7 +3717,14 @@ is `signing_key_mismatch` and is refused before anything is signed.
   extension must be short and alphanumeric or the document is rejected; it
   is appended when the title does not already end with it. Names are
   NFC-normalised and collisions are detected case-insensitively on the
-  normalised form.
+  normalised form. The comparison key is a real case fold — NFC, then the full
+  Unicode uppercase mapping, then the full lowercase mapping — not a plain
+  lower-casing, which leaves U+017F (`ſ`) and U+00DF (`ß`) alone and so would
+  miss two titles a filesystem that upper-cases to compare maps onto one file.
+  It deliberately errs towards more names comparing equal than any one
+  filesystem merges: the cost of that direction is a deduplicated name and a
+  warning, the cost of the other is a lost document. The key is only ever
+  compared; the file that is written keeps the title's own NFC spelling.
 - The output directory may be new or existing. Its path must not contain
   symlinks (or reparse points on Windows). A directory created by this run
   has mode `0700` on Unix; an existing directory keeps its mode.

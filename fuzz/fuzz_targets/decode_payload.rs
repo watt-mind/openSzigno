@@ -1,6 +1,15 @@
-//! Fuzz the Base64 and `zip -> base64` document decode chains
-//! (`openszigno_core::decode`) through a synthetic minimal dossier that
-//! wraps the fuzzed bytes as one document's payload.
+//! Fuzz the document decode chains (`openszigno_core::decode`) through a
+//! synthetic minimal dossier that wraps the fuzzed bytes as one document's
+//! payload: `base64`, `zip -> base64`, and the two `encrypt` chains without a
+//! decryption key.
+//!
+//! The `encrypt` chains are here as well as in `decrypt_cms` because they are
+//! a different path: with no `--decrypt-key` the transform is never reversed,
+//! and what is exercised is the chain walker deciding that — recognising the
+//! transform, refusing to treat the payload as content, and reporting
+//! `Unsupported` rather than handing back ciphertext as if it were a
+//! document. `decrypt_cms` covers the other half, where a key is supplied and
+//! the CMS is actually parsed.
 //!
 //! `decode_document` is not itself public on an arbitrary `Document` (its
 //! `payload` field is crate-private, by design: a `Document` only ever comes
@@ -11,7 +20,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use openszigno_core::{Limits, parse};
+use openszigno_core::{DecodeOutcome, DecryptOptions, Limits, decode_document_with, parse};
 
 fn xml_escape(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
@@ -63,18 +72,36 @@ fuzz_target!(|data: &[u8]| {
         return;
     }
     let (selector, rest) = data.split_at(1);
-    let transforms: &[&str] = if selector[0] % 2 == 0 {
-        &["base64"]
-    } else {
-        &["zip", "base64"]
+    let transforms: &[&str] = match selector[0] % 4 {
+        0 => &["base64"],
+        1 => &["zip", "base64"],
+        2 => &["encrypt", "base64"],
+        // A chain the writer never produces, so that the walker's handling of
+        // an unexpected order is exercised too.
+        _ => &["encrypt", "zip", "base64"],
     };
     let payload = xml_escape(&String::from_utf8_lossy(rest));
     let xml = dossier_xml(&payload, transforms);
 
     let limits = Limits::default();
-    if let Ok(dossier) = parse(xml.as_bytes(), &limits)
-        && !dossier.documents.is_empty()
-    {
-        let _ = dossier.decode_document(0, &limits);
+    let Ok(dossier) = parse(xml.as_bytes(), &limits) else {
+        return;
+    };
+    if dossier.documents.is_empty() {
+        return;
+    }
+    // `decode_document` is `decode_document_with` under
+    // `DecryptOptions::default()`; both are driven so the convenience wrapper
+    // and the explicit form stay in step, and so the `encrypt` chains above go
+    // through the entry point that takes a decryption policy.
+    let _ = dossier.decode_document(0, &limits);
+    let no_key = DecryptOptions::default();
+    let outcome = decode_document_with(&dossier, 0, &limits, &no_key);
+    if let Ok(DecodeOutcome::Decoded(decoded)) = &outcome {
+        // Without a key nothing is ever decrypted, whatever the chain said.
+        assert!(
+            !decoded.decrypted,
+            "a decode with no key must never report a decryption"
+        );
     }
 });

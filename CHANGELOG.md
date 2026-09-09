@@ -20,6 +20,32 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
   `encoding` pseudo-attribute and reports the label together with the byte
   range holding it, so a writer restating the declaration agrees with the
   decoder byte for byte. Additive; `schema_version` stays `1`.
+- Two fuzz targets for code that had none. `extract_plan` drives the CLI's
+  extraction planner with arbitrary document titles and declared extensions
+  and asserts that no planned name is a path, that no two names in one
+  directory collide, and that planning is idempotent; `destination_url`
+  drives the `--online` destination policy and asserts that it never hands
+  the fetcher an address its own verdict refuses, that a non-HTTP scheme and
+  userinfo are refused whatever `--online-allow-private` says, and that a
+  relative redirect stays on the base URL's authority. Both include the
+  shipped module by `#[path]`, because the `openszigno` binary crate has no
+  library target to depend on, so what is fuzzed is the real source.
+  `decode_payload` now also drives the two `encrypt` chains with no
+  decryption key, through `decode_document_with`.
+- The golden output contract captures stderr. `scripts/golden.py` kept only
+  stdout, so every human-mode golden for a fixture that fails was an empty
+  file: the wording of every error and warning an operator actually reads was
+  pinned nowhere, and the "no golden may carry a machine-local path" check
+  never looked at the stream those messages go to. Each case now writes a
+  `<case>.stderr.txt` beside its stdout golden and its `.exit`, the leak check
+  runs over both streams, and an `extract --stdout` case pins the one output
+  that is not an envelope at all. This adds files and changes none: every
+  golden committed before this ran is byte-identical after it. The matrix is
+  run by both the CI `golden` job and the release smoke test, unchanged.
+- `openszigno_core::declared_encoding`, which reads the XML declaration's
+  `encoding` pseudo-attribute and reports the label together with the byte
+  range holding it, so a writer restating the declaration agrees with the
+  decoder byte for byte. Additive; `schema_version` stays `1`.
 
 ### Fixed
 
@@ -70,6 +96,76 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
   dossier's own namespace. The lookup matched on the local name alone, so a
   `DocumentProfile` from a foreign namespace, placed first, decided what the
   reference pointed at.
+- A named pipe given where a regular file is expected is refused instead of
+  waited on. The bounded reader opened the path and only then asked whether it
+  was a regular file, and opening a FIFO for reading blocks inside `open(2)`
+  until somebody opens the writing end — which is whoever laid the pipe, not
+  this tool — so `inspect /path/to/fifo`, or a `--decrypt-key` pointing at one,
+  parked the process indefinitely before the check that would have refused it
+  could run. On Unix the open now passes `O_NONBLOCK` and the flag is cleared
+  on the descriptor once `fstat` has established it is a regular file; the
+  refusal is the `io_error` (exit 3) it always should have been. Windows keeps
+  the order it had.
+- `extract` no longer abandons a whole dossier over one crafted title. Output
+  name deduplication produced exactly one candidate, `stem-<document index>`,
+  so a dossier holding a repeated title plus a document titled precisely the
+  name that deduplication would reach for raised `output_name_collision` and
+  wrote nothing at all — every innocent document in the dossier included.
+  The candidates now count upwards, `stem-<index>-2`, `-3` and on, up to 64
+  per name; `output_name_collision` is kept for the case where all 64 are
+  taken. The first candidate, and so every name a dossier that does not
+  collide on purpose produces, is unchanged.
+- The `--online` destination policy refuses seven more address ranges, each of
+  which reaches somewhere no certificate legitimately publishes: carrier-grade
+  NAT (`100.64.0.0/10`), IETF protocol assignments (`192.0.0.0/24`),
+  benchmarking (`198.18.0.0/15`), the deprecated IPv6 site-local prefix
+  (`fec0::/10`), and the three prefixes that carry an IPv4 destination inside
+  an IPv6 address — 6to4 (`2002::/16`), Teredo (`2001::/32`) and the
+  well-known NAT64 prefix (`64:ff9b::/96`), which were a way of writing a
+  private IPv4 destination the IPv4 rules never saw. The IPv4-compatible form
+  `::a.b.c.d` is now judged by the address it carries, as the IPv4-mapped
+  `::ffff:a.b.c.d` form already was, so `::169.254.169.254` is refused as the
+  metadata address it is. `--online-allow-private` waives the new rules
+  exactly as it waives the old ones.
+- `extract` compares output names with a real case fold. The key was NFC plus
+  `to_lowercase`, which is not case folding: it leaves U+017F (`ſ`, long s)
+  and U+00DF (`ß`, sharp s) exactly as written, so `ſ.txt` and `s.txt`, or
+  `straße.txt` and `STRASSE.txt`, compared as two distinct names — while
+  NTFS, which upper-cases to compare, maps each pair onto one file, and the
+  second write would have overwritten the first. The key is now NFC, the full
+  uppercase mapping, then the full lowercase mapping, which folds both. No new
+  dependency: the round trip through uppercase is what expands `ſ` to `s` and
+  `ß` to `ss`. It errs towards more names comparing equal than any one
+  filesystem merges, which costs a deduplicated name and a warning rather than
+  a document.
+- A `--trust-store` and a `--revocation-store` are bounded in total, not only
+  file by file. Each file had a cap (4 MiB and 16 MiB) and each directory a
+  file count (1024 and 4096), which still let a store of a thousand
+  just-under-cap files ask the loader for gigabytes before it decided anything.
+  The aggregate caps are 64 MiB for a trust store and 256 MiB for a revocation
+  store, counted across both of a store's directories so splitting a store does
+  not double them, and refused with the store's own code
+  (`trust_store_invalid`, `revocation_store_invalid`, exit 3). Every file is
+  now read before any of it is parsed or classified, so a store over the total
+  is refused for its size rather than for whatever the file that crossed the
+  line happened to contain.
+- `extract` reports a `<file>.d` subdirectory whose name was taken between the
+  plan's existence check and the write as `output_exists` (exit 5), the answer
+  an existing output file already got. `mkdir`'s `EEXIST` was mapped to
+  `io_error` (exit 3), which told an operator their filesystem had failed when
+  in fact the no-clobber rule had worked.
+- `scripts/coverage_gate.py` no longer lets a crate or a patch line leave the
+  gate quietly. A crate under `crates/` that produced no coverage records
+  vanished from the totals altogether, and `pct(covered, 0)` scored 100, so an
+  unmeasured crate read as a fully covered one; both are failures now. The
+  `-U0` diff behind patch coverage is parsed with a state machine keyed on
+  `diff --git` and `@@` rather than by line prefix, so an added source line
+  beginning with `++` is no longer read as a `+++ b/path` file header — which
+  silently repointed or dropped every line after it — and the diff is taken
+  with explicit `--src-prefix`/`--dst-prefix`, so a contributor's
+  `diff.noprefix` cannot change what the parser strips.
+  `--self-test` runs the parser's unit tests, and CI runs it before the
+  measurement it guards.
 - `sign` no longer rewrites the dossier's own text when it fills a signature
   in. The digest, signature-value and timestamp placeholders were substituted
   over the whole document, so a document whose title or payload read like one

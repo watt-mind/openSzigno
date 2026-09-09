@@ -1,0 +1,1 @@
+error [unresolved_objref]: every OBJREF must resolve to exactly one XML ID

@@ -29,9 +29,17 @@ const MAX_COMPARED_BYTES: u64 = openszigno_verify::MAX_REVOCATION_ITEM_BYTES as 
 pub enum OpenError {
     /// The output path is not a real directory (symlink, junction, ...).
     Unsafe(&'static str),
+    /// The name is already taken. Creating an extraction subdirectory is a
+    /// no-clobber operation like creating an output file, so an existing entry
+    /// is `output_exists` and not a failure of the filesystem.
+    Exists(&'static str),
     /// The output directory could not be created or inspected.
     Io(&'static str),
 }
+
+/// The one wording an existing output entry is reported with, whether it is a
+/// file or an extraction subdirectory.
+const EXISTS_MESSAGE: &str = "an output file already exists or cannot be created safely";
 
 /// Reject a path whose components are, or contain, links.
 ///
@@ -99,7 +107,7 @@ fn create_directory(path: &Path) -> Result<(), OpenError> {
 
 #[cfg(unix)]
 mod imp {
-    use super::{OpenError, reject_link_components};
+    use super::{EXISTS_MESSAGE, OpenError, reject_link_components};
 
     use std::ffi::OsStr;
     use std::fs::File;
@@ -209,8 +217,16 @@ mod imp {
         /// The directory is made and reopened relative to this descriptor, so
         /// a nested extraction level cannot be redirected outside the tree.
         pub fn create_subdirectory(&self, name: &str) -> Result<Self, OpenError> {
-            rustix::fs::mkdirat(&self.directory, name, Mode::RWXU)
-                .map_err(|_| OpenError::Io("could not create the output directory"))?;
+            rustix::fs::mkdirat(&self.directory, name, Mode::RWXU).map_err(|errno| {
+                match errno {
+                    // The name was taken between the plan's existence check
+                    // and this creation. That is the no-clobber rule doing its
+                    // job, not an I/O failure: it is reported exactly as an
+                    // existing output *file* is.
+                    rustix::io::Errno::EXIST => OpenError::Exists(EXISTS_MESSAGE),
+                    _ => OpenError::Io("could not create the output directory"),
+                }
+            })?;
             // A directory that was made but cannot be opened is removed again,
             // so a failure never leaves an unrecorded entry behind.
             match open_component(&self.directory, OsStr::new(name)) {
@@ -355,8 +371,10 @@ mod imp {
             self.revalidate()
                 .map_err(|_| OpenError::Unsafe("output must be a real directory, not a symlink"))?;
             let path = self.path.join(name);
-            std::fs::create_dir(&path)
-                .map_err(|_| OpenError::Io("could not create the output directory"))?;
+            std::fs::create_dir(&path).map_err(|error| match error.kind() {
+                io::ErrorKind::AlreadyExists => OpenError::Exists(super::EXISTS_MESSAGE),
+                _ => OpenError::Io("could not create the output directory"),
+            })?;
             Self::open(&path)
         }
 
@@ -419,3 +437,60 @@ mod imp {
 }
 
 pub use imp::OutputDir;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A temporary directory under a fully resolved base path: `OutputDir`
+    /// refuses a path containing a symlink, and the platform temporary
+    /// directory is one on some systems.
+    fn scratch() -> tempfile::TempDir {
+        let base = std::env::temp_dir()
+            .canonicalize()
+            .expect("the temporary directory must resolve");
+        tempfile::tempdir_in(base).expect("a temporary directory must be available")
+    }
+
+    /// The extraction plan checks that no output name is taken before
+    /// anything is written, but the check and the creation cannot be one
+    /// operation: another process can take the name in between. The `mkdir`
+    /// that then fails with `EEXIST` is the no-clobber rule working, so it is
+    /// reported as `output_exists` (exit 5) — the same answer an existing
+    /// output *file* gets — and not as `io_error`, which would have told an
+    /// operator their filesystem was broken.
+    #[test]
+    fn an_existing_subdirectory_name_is_reported_as_output_exists() {
+        let temporary = scratch();
+        let directory = OutputDir::open(temporary.path()).expect("output directory opens");
+        std::fs::create_dir(temporary.path().join("court.dosszie.d"))
+            .expect("the name is taken first");
+
+        let error = directory
+            .create_subdirectory("court.dosszie.d")
+            .expect_err("the name is already taken");
+
+        assert!(
+            matches!(error, OpenError::Exists(_)),
+            "an existing name is Exists, not {error:?}"
+        );
+        let reported = crate::response::CliError::from(error);
+        assert_eq!(reported.code, "output_exists");
+        assert_eq!(reported.exit, 5);
+    }
+
+    /// An existing *file* under the subdirectory's name is the same answer:
+    /// the name is taken, whatever holds it.
+    #[test]
+    fn an_existing_file_under_the_subdirectory_name_is_output_exists_too() {
+        let temporary = scratch();
+        let directory = OutputDir::open(temporary.path()).expect("output directory opens");
+        std::fs::write(temporary.path().join("taken.d"), b"x").expect("the name is taken first");
+
+        let error = directory
+            .create_subdirectory("taken.d")
+            .expect_err("the name is already taken");
+
+        assert_eq!(crate::response::CliError::from(error).code, "output_exists");
+    }
+}

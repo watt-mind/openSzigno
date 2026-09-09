@@ -144,6 +144,52 @@ fn seed_decode_payload(root: &Path) {
     write(&dir, "zip-empty-central-directory", &zip_magic_only);
 }
 
+/// Seeds for `extract_plan`. The target reads its documents through
+/// `arbitrary`'s `Unstructured`, which takes a `String`'s length from the
+/// *end* of the buffer, so a hand-written seed is not a readable title; what
+/// these are for is a spread of shapes — one document, several, empty — that
+/// libFuzzer can mutate from, plus the collision-prone titles spelled out in
+/// plain ASCII so the mutator has them in its dictionary.
+fn seed_extract_plan(root: &Path) {
+    let dir = root.join("extract_plan");
+    write(&dir, "empty", b"");
+    write(&dir, "one-title", b"report.txt");
+    write(&dir, "repeated-title", b"report.txtreport.txt");
+    // The shape that used to abort a whole run: a title spelling the
+    // deduplicated name another document will be given.
+    write(&dir, "crafted-deduplicated", b"a.txta-2.txta.txt");
+    write(&dir, "case-folding", b"stra\xc3\x9fe.txtSTRASSE.TXT");
+    write(&dir, "path-like", b"../escape.txtdir/file.txt");
+    write(&dir, "reserved", b"CONNUL.txtcom1");
+    write(&dir, "long", &[b'a'; 300]);
+}
+
+/// Seeds for `destination_url`: the shapes the destination policy is written
+/// against, one per rule.
+fn seed_destination_url(root: &Path) {
+    let dir = root.join("destination_url");
+    for (name, url) in [
+        ("public-http", "http://crl.example/ca.crl"),
+        ("public-https-port", "https://crl.example:8443/pki/ca.crl"),
+        ("loopback-v4", "http://127.0.0.1/ca.crl"),
+        ("loopback-v6", "http://[::1]:8080/ca.crl"),
+        ("metadata", "http://169.254.169.254/latest/meta-data"),
+        ("ipv4-compatible", "http://[::169.254.169.254]/x"),
+        ("nat64", "http://[64:ff9b::c000:221]/ca.crl"),
+        ("teredo", "http://[2001:0:1234::1]/ca.crl"),
+        ("cgnat", "http://100.64.0.1/ca.crl"),
+        ("userinfo", "http://user:password@crl.example/ca.crl"),
+        ("scheme", "ldap://directory.example/cn=ca"),
+        ("file", "file:///etc/passwd"),
+        ("localhost", "http://LOCALHOST:8080/ca.crl"),
+        ("no-host", "http:///ca.crl"),
+        ("bracket-unclosed", "http://[::1/ca.crl"),
+        ("empty", ""),
+    ] {
+        write(&dir, name, url.as_bytes());
+    }
+}
+
 fn seed_c14n(root: &Path) {
     let dir = root.join("c14n");
     let samples: [(&str, &[u8]); 6] = [
@@ -334,6 +380,8 @@ fn main() {
     seed_dossier_fixtures(&root);
     seed_decode_payload(&root);
     seed_decrypt_cms(&root);
+    seed_extract_plan(&root);
+    seed_destination_url(&root);
     seed_c14n(&root);
     seed_crl(&root);
     seed_ocsp(&root);

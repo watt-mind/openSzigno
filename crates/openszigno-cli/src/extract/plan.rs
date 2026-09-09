@@ -9,7 +9,8 @@ use openszigno_core::{
 };
 
 use crate::extract::names::{
-    claim_name, deduplicated_name, fallback_extension, join_path, name_key, safe_output_name,
+    MAX_DEDUPLICATION_ATTEMPTS, deduplicated_name, fallback_extension, join_path, name_collision,
+    safe_output_name, try_claim_name,
 };
 use crate::response::{CliError, Notice};
 
@@ -167,8 +168,12 @@ impl Plan<'_> {
     /// already taken.
     ///
     /// Real dossiers reuse titles, so a repeated name is deduplicated rather
-    /// than failing the run. Only a name that still collides after renaming is
-    /// an error.
+    /// than failing the run. The renaming keeps counting — `stem-<index>`,
+    /// then `stem-<index>-2`, `-3` and on — because a title crafted to spell
+    /// the deduplicated name a *later* document will be given would otherwise
+    /// collide once and abort the whole extraction, writing nothing at all.
+    /// Only a name still taken after [`MAX_DEDUPLICATION_ATTEMPTS`] candidates
+    /// is `output_name_collision`.
     fn claim(
         &mut self,
         names: &mut HashSet<String>,
@@ -176,17 +181,24 @@ impl Plan<'_> {
         index: usize,
         dossier_path: &str,
     ) -> Result<String, CliError> {
-        if names.insert(name_key(&name)) {
+        if try_claim_name(names, &name) {
             return Ok(name);
         }
-        let renamed = deduplicated_name(&name, index);
-        if renamed.len() > 255 {
-            return Err(CliError::unsafe_output(
-                "unsafe_output_name",
-                format!("document {dossier_path} output filename exceeds 255 bytes"),
-            ));
+        let mut renamed = None;
+        for attempt in 1..=MAX_DEDUPLICATION_ATTEMPTS {
+            let candidate = deduplicated_name(&name, index, attempt);
+            if candidate.len() > 255 {
+                return Err(CliError::unsafe_output(
+                    "unsafe_output_name",
+                    format!("document {dossier_path} output filename exceeds 255 bytes"),
+                ));
+            }
+            if try_claim_name(names, &candidate) {
+                renamed = Some(candidate);
+                break;
+            }
         }
-        claim_name(names, &renamed)?;
+        let renamed = renamed.ok_or_else(name_collision)?;
         self.warnings.push(Notice {
             code: "output_name_deduplicated".to_owned(),
             message: format!(

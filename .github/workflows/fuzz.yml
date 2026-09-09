@@ -62,7 +62,7 @@ jobs:
           TARGET: ${{ github.event.inputs.target || 'all' }}
         run: |
           set -euo pipefail
-          all='["parse_dossier","sniff","decode_payload","decrypt_cms","c14n","crl_parse","ocsp_parse","tsa_token","trustlist_parse","certificate_parse"]'
+          all='["parse_dossier","sniff","decode_payload","decrypt_cms","extract_plan","destination_url","c14n","crl_parse","ocsp_parse","tsa_token","trustlist_parse","certificate_parse"]'
           if [ "$TARGET" = "all" ]; then
             echo "targets=$all" >> "$GITHUB_OUTPUT"
           else

@@ -15,6 +15,15 @@ cargo-fuzz = true
 libfuzzer-sys = "0.4"
 openszigno-core = { path = "../crates/openszigno-core" }
 openszigno-verify = { path = "../crates/openszigno-verify" }
+# `extract_plan` includes the CLI's own naming and planning modules by path
+# (the `openszigno` binary crate has no library target to depend on), so it
+# needs what those modules use: the author crate's title rules and NFC.
+openszigno-author = { path = "../crates/openszigno-author" }
+unicode-normalization = "0.1.25"
+# Structured inputs for `extract_plan`, built from `Unstructured` by hand: the
+# `derive` feature is deliberately not enabled, so no extra crate is pulled in
+# for one struct.
+arbitrary = "1"
 base64 = "0.23.1"
 # `decrypt_cms` generates its synthetic RSA recipient key at run time, from a
 # fixed seed, exactly like `crates/openszigno-core/tests/common/envelope.rs`:
@@ -115,3 +124,23 @@ path = "fuzz_targets/certificate_parse.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "extract_plan"
+path = "fuzz_targets/extract_plan.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "destination_url"
+path = "fuzz_targets/destination_url.rs"
+test = false
+doc = false
+bench = false
+
+# The extract_plan target includes the CLI's names.rs and plan.rs by path,
+# and those use these two crates; cargo-machete cannot see through a
+# `#[path]` include, so it is told here.
+[package.metadata.cargo-machete]
+ignored = ["openszigno-author", "unicode-normalization"]
