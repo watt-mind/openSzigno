@@ -24,6 +24,8 @@ clap.workspace = true
 openszigno-author = { version = "0.9.0", path = "../openszigno-author" }
 openszigno-core = { version = "0.9.0", path = "../openszigno-core" }
 openszigno-verify = { version = "0.9.0", path = "../openszigno-verify" }
+# `OsRng`, for the PKCE verifier and the OAuth 2.0 `state` of `csc login`.
+rand_core.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

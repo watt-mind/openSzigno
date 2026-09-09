@@ -26,7 +26,9 @@ const MAX_RESPONSE_BYTES: u64 = 256 * 1024;
 pub(crate) struct Client {
     fetcher: Fetcher,
     base_url: String,
-    token: Zeroizing<String>,
+    /// The bearer token, when there is one. `csc login` calls `info` before it
+    /// has one, and `info` is the one operation a service answers unauthenticated.
+    token: Option<Zeroizing<String>>,
 }
 
 /// The error object a CSC service answers a refusal with.
@@ -37,12 +39,23 @@ struct ServiceError {
 }
 
 impl Client {
-    pub(crate) fn new(fetcher: Fetcher, base_url: &str, token: Zeroizing<String>) -> Self {
+    pub(crate) fn new(fetcher: Fetcher, base_url: &str, token: Option<Zeroizing<String>>) -> Self {
         Self {
             fetcher,
             base_url: base_url.to_owned(),
             token,
         }
+    }
+
+    /// The transport this client goes through, so the OAuth 2.0 rounds that
+    /// belong to the same run use the same one rather than building a second.
+    pub(crate) fn fetcher(&self) -> &Fetcher {
+        &self.fetcher
+    }
+
+    /// Replace the bearer token, after a refresh renewed it.
+    pub(crate) fn set_token(&mut self, token: Zeroizing<String>) {
+        self.token = Some(token);
     }
 
     /// One CSC operation: `POST <base>/<operation>` with a JSON body.
@@ -64,7 +77,13 @@ impl Client {
         let url = format!("{}/{operation}", self.base_url);
         let answer = self
             .fetcher
-            .post_json(&url, &self.token, body, MAX_RESPONSE_BYTES, true)
+            .post_json(
+                &url,
+                self.token.as_ref().map(|token| token.as_str()),
+                body,
+                MAX_RESPONSE_BYTES,
+                true,
+            )
             .map_err(|class| {
                 SignError::remote(
                     SignErrorCode::CscUnreachable,

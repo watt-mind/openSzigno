@@ -125,7 +125,7 @@ fn credentials_over_plain_http_are_refused_before_anything_is_contacted() {
     let refusal = fetcher
         .post_json(
             "http://service.invalid/csc/v2/info",
-            "synthetic-token",
+            Some("synthetic-token"),
             "{}",
             1024,
             true,
@@ -161,7 +161,7 @@ fn a_loopback_service_under_the_opt_in_may_carry_credentials_over_http() {
     let refusal = fetcher
         .post_json(
             "http://127.0.0.1:1/csc/v2/info",
-            "synthetic-token",
+            Some("synthetic-token"),
             "{}",
             1024,
             true,

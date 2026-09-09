@@ -42,6 +42,8 @@ pub(crate) enum Command {
     /// Write a copy of a dossier carrying a container timestamp. It verifies
     /// nothing.
     Timestamp(TimestampArgs),
+    /// Obtain and store the tokens a remote CSC signing service needs.
+    Csc(CscArgs),
     /// Print the agent skill (SKILL.md) that teaches an AI agent this CLI.
     Skill,
 }
@@ -332,6 +334,13 @@ pub(crate) struct SignArgs {
     /// no proxy is used at all, and none is taken from the environment.
     #[arg(long = "online-proxy", value_name = "URL", requires = "sign_network")]
     pub(crate) online_proxy: Option<String>,
+    /// Never wait for a browser. A `--csc` credential whose authorisation mode
+    /// is `oauth2` needs an authorization round bound to the hashes being
+    /// signed; without this flag `sign` prints the URL and waits on a loopback
+    /// listener, and with it the run stops with `csc_authorization_required`
+    /// before the dossier is touched.
+    #[arg(long = "no-interactive", requires = "csc")]
+    pub(crate) no_interactive: bool,
     /// Emit one stable JSON object on stdout.
     #[arg(long)]
     pub(crate) json: bool,
@@ -349,6 +358,48 @@ impl SignArgs {
     pub(crate) fn scope_is_dossier(&self) -> bool {
         self.scope == Scope::Dossier
     }
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct CscArgs {
+    #[command(subcommand)]
+    pub(crate) command: CscCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum CscCommand {
+    /// Run the OAuth 2.0 login a CSC service needs and store the tokens.
+    Login(CscLoginArgs),
+}
+
+#[derive(Clone, Debug, Args)]
+pub(crate) struct CscLoginArgs {
+    /// The same TOML configuration `sign --csc` takes. The token this run
+    /// obtains is written to the file its `access_token_file` names, which is
+    /// therefore required here.
+    pub(crate) config: PathBuf,
+    /// Report this credential's authorisation mode after logging in, so the
+    /// run says whether signing with it will need a second, interactive
+    /// authorization round. Overrides `credential_id` in the configuration.
+    #[arg(long = "credential", value_name = "ID")]
+    pub(crate) credential: Option<String>,
+    /// Hand the authorization URL to the platform's browser opener as well as
+    /// printing it. Off by default: opening a browser is an action on your
+    /// machine, and a printed URL is not.
+    #[arg(long)]
+    pub(crate) open: bool,
+    /// Emit one stable JSON object on stdout.
+    #[arg(long)]
+    pub(crate) json: bool,
+    /// Permit the exchange to contact loopback, private (RFC 1918),
+    /// link-local and unique-local addresses, and to use a plain `http`
+    /// service. Refused by default, exactly as it is for `verify --online`.
+    #[arg(long = "online-allow-private")]
+    pub(crate) online_allow_private: bool,
+    /// Route the requests through this proxy. Without it no proxy is used at
+    /// all, and none is taken from the environment.
+    #[arg(long = "online-proxy", value_name = "URL")]
+    pub(crate) online_proxy: Option<String>,
 }
 
 #[derive(Clone, Debug, Args)]
