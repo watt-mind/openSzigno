@@ -32,6 +32,25 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
   still declared ISO-8859-2. The declaration is now read with the reader's own
   parser, `openszigno_core::declared_encoding`, and only the label's own bytes
   are replaced.
+- Every file the CLI reads because a caller named it now goes through one
+  bounded reader. The key, certificate, passphrase, trust-store and
+  revocation-store loaders checked a path's size and type and then read the
+  path a second time, so replacing or growing the file in between bypassed
+  both checks. The file is now opened once, with `O_NOFOLLOW` on Unix and
+  `FILE_FLAG_OPEN_REPARSE_POINT` on Windows, its type and size come from an
+  `fstat` on that descriptor, and the bytes are read through a cap that stops
+  one byte past the limit. Every code, message and cap is what it was; a file
+  of exactly the cap is still read. See
+  [Bounded file reads](docs/architecture.md#bounded-file-reads).
+- Strings a remote Cloud Signature Consortium service chose are sanitised
+  before they reach human output, an error message or the JSON envelope:
+  credential identifiers, the reported `specs` version, the published key
+  algorithms and the `error` string of a refusal. Unicode `Cc` and `Cf`
+  characters, which is where ANSI escapes and bidirectional overrides live,
+  are dropped, and the value is bounded. A service can no longer move the
+  cursor or reorder what is printed around it. The filter is
+  `openszigno_core::sanitize_display`, which the XMLDSig structure pass now
+  shares.
 
 ### Security
 

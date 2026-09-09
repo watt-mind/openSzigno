@@ -89,7 +89,8 @@ only a digest is sent to it.
   command ever transmits key material, and `sign --csc` transmits a digest
   rather than the data it was taken over.
 - **Read-only and bounded.** Key, certificate, and passphrase files are opened
-  read-only and capped at 1 MiB each.
+  read-only and capped at 1 MiB each, through the one bounded reader described
+  under "How a file the caller named is read" below.
 - **Failures say nothing useful to an attacker.** A failed decryption is the
   fixed message `decryption failed`, which does not distinguish a failed RSA
   unwrap from a bad content-key length from bad padding — that distinction is
@@ -189,6 +190,56 @@ write the garbage, which needs both accidents at once. Decryption asserts
 nothing about authenticity in any case, which is the point made under
 "Decryption is not verification either" above; verify a signature if you need
 to know that content is genuine.
+
+## How a file the caller named is read
+
+Every file this tool reads because a caller named it goes through one bounded
+reader: the dossier itself, the private key, its certificate, the passphrase
+file, the `--csc` configuration and the secrets it names, and each entry of a
+`--trust-store` and a `--revocation-store`.
+
+- **Opened once, judged once.** The file is opened, and its type and size come
+  from an `fstat` on that one open descriptor. Nothing is decided on metadata
+  read from the path separately, because a path can be replaced and a file can
+  be grown between such a check and the read that follows it, which would let
+  a check pass on one file while another was read.
+- **Symlinks are refused rather than followed**, everywhere except the dossier
+  path itself, which is the caller's own and has always been readable through
+  a link. The refusal is the open: `O_NOFOLLOW` on Unix and
+  `FILE_FLAG_OPEN_REPARSE_POINT` on Windows, so it is the kernel that declines,
+  not a check something could race. A symlink standing in a trust store or a
+  revocation store is skipped, exactly as a subdirectory is.
+- **The cap applies to the bytes that arrive.** Reading stops one byte past the
+  limit and the file is refused at that point, so a file whose reported length
+  is not the truth is bounded all the same. The caps are 64 MiB for a dossier,
+  1 MiB for key material and the `--csc` configuration, 4 MiB for a trust-store
+  entry or a trusted list, and the verifier's own 16 MiB for one CRL or OCSP
+  response. A file of exactly the cap is read; one byte more is refused.
+- **A refusal never names the file**, because the path may be private. It names
+  the kind of file and, where an operator needs it to act, the limit.
+
+## Text a remote service supplied
+
+A Cloud Signature Consortium service chooses the credential identifiers it
+lists, the `specs` version it reports, the key algorithms it publishes, and the
+`error` string it refuses with. None of that is typed by the operator, and all
+of it ends up in a message, in the JSON envelope, or on a terminal, which reads
+more than text: an unfiltered string can move the cursor, repaint a line, or
+reverse the reading order of what is printed around it.
+
+Every such value is sanitised before it reaches any of those. Unicode `Cc`
+(the C0 and C1 control ranges, where `ESC` and therefore every ANSI sequence
+lives) and `Cf` (format characters, where the bidirectional overrides and the
+zero-width joiners live) are dropped rather than escaped, and the value is
+bounded, ending in `...` inside its cap when it was cut short. A list of such
+values is bounded in length too. The same filter bounds the element names the
+XMLDSig structure pass reports out of an untrusted signature. What a service
+sends is still shown, so a refusal stays actionable; what a terminal would act
+on is not.
+
+`error_description` is a separate matter and is never printed at all: it is
+free text a provider writes, and this tool has no way to know a provider has
+not put a token, a credential identifier or a user's name in it.
 
 ## Network exposure
 
@@ -342,6 +393,12 @@ openSzigno aims to guarantee that a hostile input cannot:
   title, a ZIP member path, an absolute path, or a symlink or reparse point in
   the output path;
 - overwrite, truncate, or replace an existing file;
+- have a file read past its cap, or a symlink read as key, trust, or
+  revocation material, by replacing or growing that file between a check and
+  the read;
+- put terminal control sequences or bidirectional overrides into human output,
+  an error message, or the JSON envelope, whether through a dossier or through
+  a remote signing service;
 - leave a partial extraction behind after a mid-run failure;
 - smuggle content into the machine-readable channel, since JSON mode emits
   exactly one object on stdout and all diagnostics go to stderr;
