@@ -30,7 +30,7 @@ change per pull request, with its tests.
 - Search existing issues and pull requests first.
 - Use the bug or feature template; blank issues are disabled.
 - Never attach a real dossier or include private paths, titles, payload
-  data, or signer details — reproduce with a synthetic input.
+  data, or signer details. Reproduce with a synthetic input.
 - Report vulnerabilities privately per [SECURITY.md](SECURITY.md), never as a
   public issue.
 
@@ -114,6 +114,7 @@ CI additionally runs, on every pull request:
 | Check | Command |
 | --- | --- |
 | Markdown lint and relative links | `npx markdownlint-cli2` over every tracked `*.md`, then `python3 scripts/check-doc-links.py` |
+| Prose style (no em-dashes) | `python3 scripts/check-prose.py` |
 | Rustdoc | `cargo doc --workspace --no-deps --locked` with `RUSTDOCFLAGS=-D warnings` |
 | Unused dependencies | `cargo machete` |
 | Licences and advisories | `cargo deny check --all-features` |
@@ -282,6 +283,7 @@ Check locally before pushing:
 npx --yes markdownlint-cli2@0.18.1 "**/*.md" "#target" "#refs" "#tmp" \
   "#samples" "#node_modules" "#fuzz/target"
 python3 scripts/check-doc-links.py
+python3 scripts/check-prose.py
 python3 scripts/check-file-length.py
 ```
 
