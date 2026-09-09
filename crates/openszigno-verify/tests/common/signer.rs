@@ -233,7 +233,7 @@ fn render_signature_policy(spec: &SignaturePolicySpec) -> String {
 }
 
 /// The `xades:SigningCertificate` or `SigningCertificateV2` property.
-fn render_signing_certificate(spec: &SigningCertificateSpec) -> String {
+pub fn render_signing_certificate(spec: &SigningCertificateSpec) -> String {
     use der::Encode as _;
 
     let mut digest = match spec.digest_uri.as_str() {

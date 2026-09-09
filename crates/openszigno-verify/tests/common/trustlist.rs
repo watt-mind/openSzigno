@@ -15,10 +15,16 @@ use openszigno_verify::c14n::{C14nAlgorithm, C14nBackend, NodeSet, RoxmltreeC14n
 use sha2::{Digest as _, Sha256};
 
 use super::cms::sign_rsa_sha256;
-use super::dossier::{C14N_EXC, DS_NS, ENVELOPED_URI, RSA_SHA256_URI, SHA256_URI};
+use super::dossier::{
+    C14N_EXC, DS_NS, ENVELOPED_URI, RSA_SHA256_URI, SHA256_URI, SIGNED_PROPERTIES_TYPE,
+    SigningCertificateSpec, XADES_NS,
+};
 use super::pki::{SigningKey, TestKey};
+use super::signer::render_signing_certificate;
 
 pub const TSL_NS: &str = "http://uri.etsi.org/02231/v2#";
+/// The `Id` of the list signature's `xades:SignedProperties`.
+const SIGNED_PROPERTIES_ID: &str = "tl-signed-props";
 pub const SVCTYPE_CA_QC: &str = "http://uri.etsi.org/TrstSvc/Svctype/CA/QC";
 pub const SVCTYPE_TSA_QTST: &str = "http://uri.etsi.org/TrstSvc/Svctype/TSA/QTST";
 pub const STATUS_GRANTED: &str = "http://uri.etsi.org/TrstSvc/TrustedList/Svcstatus/granted";
@@ -112,6 +118,11 @@ pub struct TrustListSpec {
     /// `#Id` rather than with the empty URI. TS 119 612 annex B.1.0 rule 2
     /// allows either, so both must be accepted as covering the whole list.
     pub reference_list_by_id: bool,
+    /// A signed `xades:SigningCertificateV2` property for the list's own
+    /// signature, with a second `ds:Reference` covering it. TS 119 612 annex
+    /// B.1.1 makes this the scheme operator's own signed statement of which
+    /// certificate signed the list.
+    pub signing_certificate: Option<SigningCertificateSpec>,
 }
 
 impl TrustListSpec {
@@ -128,6 +139,7 @@ impl TrustListSpec {
             pointers: Vec::new(),
             tamper: false,
             reference_list_by_id: false,
+            signing_certificate: None,
         }
     }
 
@@ -290,8 +302,33 @@ pub fn build_trust_list(spec: &TrustListSpec) -> String {
         out.push_str(&format!(
             "<ds:DigestMethod Algorithm=\"{SHA256_URI}\"/><ds:DigestValue>@@TLDIGEST@@</ds:DigestValue>"
         ));
-        out.push_str("</ds:Reference></ds:SignedInfo>");
+        out.push_str("</ds:Reference>");
+        if spec.signing_certificate.is_some() {
+            out.push_str(&format!(
+                "<ds:Reference URI=\"#{SIGNED_PROPERTIES_ID}\" Type=\"{SIGNED_PROPERTIES_TYPE}\">"
+            ));
+            out.push_str(&format!(
+                "<ds:Transforms><ds:Transform Algorithm=\"{C14N_EXC}\"/></ds:Transforms>"
+            ));
+            out.push_str(&format!(
+                "<ds:DigestMethod Algorithm=\"{SHA256_URI}\"/><ds:DigestValue>@@PROPDIGEST@@</ds:DigestValue>"
+            ));
+            out.push_str("</ds:Reference>");
+        }
+        out.push_str("</ds:SignedInfo>");
         out.push_str("<ds:SignatureValue>@@TLSIG@@</ds:SignatureValue>");
+        if let Some(certificate) = &spec.signing_certificate {
+            out.push_str(&format!(
+                "<ds:Object><xades:QualifyingProperties xmlns:xades=\"{XADES_NS}\" Target=\"#tl-signature\">"
+            ));
+            out.push_str(&format!(
+                "<xades:SignedProperties Id=\"{SIGNED_PROPERTIES_ID}\"><xades:SignedSignatureProperties>"
+            ));
+            out.push_str(&render_signing_certificate(certificate));
+            out.push_str(
+                "</xades:SignedSignatureProperties></xades:SignedProperties></xades:QualifyingProperties></ds:Object>",
+            );
+        }
         out.push_str("</ds:Signature>");
     }
     out.push_str("</tsl:TrustServiceStatusList>");
@@ -299,6 +336,9 @@ pub fn build_trust_list(spec: &TrustListSpec) -> String {
     let Some((key, _)) = &spec.signer else {
         return out;
     };
+    if spec.signing_certificate.is_some() {
+        out = out.replace("@@PROPDIGEST@@", &signed_properties_digest(&out));
+    }
     out = out.replace(
         "@@TLDIGEST@@",
         &trust_list_digest(&out, spec.reference_list_by_id),
@@ -330,6 +370,26 @@ fn trust_list_digest(xml: &str, by_id: bool) -> String {
         .canonicalize(
             source.text(),
             &set,
+            C14nAlgorithm::Exclusive { comments: false },
+            &[],
+        )
+        .expect("canonicalizes");
+    BASE64.encode(Sha256::digest(&octets))
+}
+
+/// The digest of the `xades:SignedProperties` subtree, which the second
+/// reference covers.
+fn signed_properties_digest(xml: &str) -> String {
+    let source = XmlSource::decode(xml.as_bytes(), &Limits::default()).expect("decodes");
+    let tree = source.parse_tree(&Limits::default()).expect("parses");
+    let properties = tree
+        .descendants()
+        .find(|node| node.attribute("Id") == Some(SIGNED_PROPERTIES_ID))
+        .expect("the signed properties element exists");
+    let octets = RoxmltreeC14n
+        .canonicalize(
+            source.text(),
+            &NodeSet::subtree(properties).without_comments(),
             C14nAlgorithm::Exclusive { comments: false },
             &[],
         )

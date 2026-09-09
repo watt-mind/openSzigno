@@ -12,6 +12,27 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
 
 ### Added
 
+- The certificate that signed a trusted list is now checked against what the
+  list itself says and against ETSI TS 119 612 clause 5.7.1. When a list
+  carries a signed `xades:SigningCertificateV2` (or the older
+  `xades:SigningCertificate`), which a TLv6 list signed as XAdES-B-B does, the
+  certificate the caller supplied through `--trust-list-signer` or through a
+  LOTL pointer must be the one that property designates; if it is not, the new
+  `trust_list_signer_mismatch` (`unknown`) blocks, because the caller and the
+  list disagree about who signed and this build does not pick a winner. The
+  property is read only where the list's own signature covers it. The
+  clause 5.7.1 restrictions on a scheme operator's certificate are reported as
+  `trust_list_signer_unqualified` (`info`), one check per rule, naming which
+  requirement failed: the `id-tsl-kp-tslSigning` extended key usage
+  (`0.4.0.2231.3.0`), a `keyUsage` including `digitalSignature` or
+  `nonRepudiation`, `basicConstraints` not saying `CA=true`, and an issuer that
+  is either the scheme operator itself or a certificate the list names. None of
+  those blocks: the clause makes the extended key usage a "should", and the
+  European Commission's own LOTL signing certificate carries no
+  `id-tsl-kp-tslSigning` at all, so blocking on it would refuse the one list
+  every national list is bootstrapped from. Both new codes are additive and
+  `schema_version` stays `1`; no golden changes.
+
 - AVDH-authenticated documents keep being recognised for what they are. AVDH
   (*azonositasra visszavezetett dokumentumhitelesites*) was the Hungarian
   state service that sealed a document on behalf of an identified citizen;

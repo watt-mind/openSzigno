@@ -130,7 +130,7 @@ pub fn load(
             "the trusted list's own signature was not checked, because no signer certificate was given; its anchors are used but cannot support a valid verdict",
         ));
     } else {
-        checks.push(verify_list_signature(&source, root, signers, backend));
+        checks.extend(verify_list_signature(&source, root, signers, backend));
     }
 
     // The pointers are read whatever the signature said, so that a caller can
