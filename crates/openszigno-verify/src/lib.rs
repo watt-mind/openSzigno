@@ -134,12 +134,24 @@ pub(crate) struct Context<'a, 'input, 's, 'o> {
     /// Untrusted extra path candidates: every non-self-signed trust entry and
     /// every intermediate the trust source offered.
     pub(crate) store_intermediates: Vec<ParsedCertificate>,
-    /// Every trusted-list service identity, whether or not it is also an
-    /// anchor. These decide qualified status; they never grant trust.
+    /// Every trusted-list service identity, whether or not it is also a
+    /// self-signed anchor. They decide qualified status, and — through
+    /// [`certs::AnchorStatus::terminates`] — where a path may end: a listed
+    /// issuing CA is a trust anchor for the paths that reach it.
     pub(crate) services: &'o [trust::TrustServiceIdentity],
     pub(crate) revocation_policy: trust::RevocationPolicy,
     /// The clock reading for this run.
     pub(crate) time: trust::UnixTime,
+}
+
+impl Context<'_, '_, '_, '_> {
+    /// Everything a path search needs to know about where it may end and
+    /// whether it may end there: the anchors' provenance, and the trusted-list
+    /// service identities, which terminate a path wherever the list speaks —
+    /// at a listed issuing CA as readily as at a self-signed root.
+    pub(crate) fn anchor_status(&self) -> certs::AnchorStatus<'_> {
+        certs::AnchorStatus::new(&self.anchor_provenance).with_services(self.services)
+    }
 }
 
 /// Verify every `ds:Signature` in a dossier.
@@ -430,7 +442,7 @@ pub fn verify(bytes: &[u8], options: &VerifyOptions<'_>) -> Result<VerifyReport,
                 // time, so there is no ordering claim to contradict.
                 claimed_signing_time: None,
             },
-            certs::AnchorStatus::new(&context.anchor_provenance),
+            context.anchor_status(),
         );
         dossier_checks.push(estimestamp::summarise(
             source.scope,

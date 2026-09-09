@@ -625,7 +625,7 @@ pub(crate) fn check_signer_chain(
                 role: ChainRole::Signer,
                 limits: &context.options.limits,
             },
-            crate::certs::AnchorStatus::new(&context.anchor_provenance),
+            context.anchor_status(),
         );
         for (entry, status) in chain.iter_mut().zip(outcome.per_certificate) {
             entry.revocation = Some(status);

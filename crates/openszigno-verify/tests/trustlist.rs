@@ -843,14 +843,16 @@ fn a_listed_intermediate_qualifies_the_chain() {
         report.signatures[0].qualified_service.as_deref(),
         Some("Qualified openSzigno CA 2009")
     );
-    // The anchor is still the store's root, and is reported as such.
-    assert_eq!(
-        report.signatures[0]
-            .chain
-            .last()
-            .and_then(|entry| entry.trust_anchor_origin),
-        Some(TrustAnchorOrigin::TrustStore)
-    );
+    // The path ends at the listed issuing CA, which is where the list speaks,
+    // rather than climbing past it to the root the operator pinned: the chain
+    // is the signer and the intermediate, and the intermediate is the anchor,
+    // reported with trusted-list provenance.
+    let chain = &report.signatures[0].chain;
+    assert_eq!(chain.len(), 2);
+    let anchor = chain.last().expect("the chain ends at an anchor");
+    assert!(anchor.is_trust_anchor);
+    assert_eq!(anchor.der, pki.intermediate_der);
+    assert_eq!(anchor.trust_anchor_origin, Some(TrustAnchorOrigin::TrustList));
 }
 
 /// A service identity that is not in the chain but *issued* a certificate in
