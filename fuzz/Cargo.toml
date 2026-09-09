@@ -138,3 +138,9 @@ path = "fuzz_targets/destination_url.rs"
 test = false
 doc = false
 bench = false
+
+# The extract_plan target includes the CLI's names.rs and plan.rs by path,
+# and those use these two crates; cargo-machete cannot see through a
+# `#[path]` include, so it is told here.
+[package.metadata.cargo-machete]
+ignored = ["openszigno-author", "unicode-normalization"]
