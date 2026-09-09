@@ -1,6 +1,6 @@
 //! The socket half of the CSC backend: one bounded `POST` per operation.
 //!
-//! Every request goes through the same [`Fetcher`](crate::online::Fetcher)
+//! Every request goes through the same [`Fetcher`]
 //! that `verify --online` fetches revocation data with, so a CSC exchange gets
 //! the destination policy, the pinned address resolution, the connect and
 //! total timeouts, the redirect rules and a size cap without a second HTTP

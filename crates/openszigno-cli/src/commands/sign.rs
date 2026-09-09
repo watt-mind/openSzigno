@@ -11,7 +11,7 @@
 //! # Two backends behind one seam
 //!
 //! `--key` loads a `SoftwareSigner`, which holds a private key in this
-//! process. `--csc` opens a [`CscSigner`](crate::csc::CscSigner), whose key is
+//! process. `--csc` opens a [`CscSigner`], whose key is
 //! held by a remote qualified signature creation device and which is sent one
 //! digest per signature and nothing else. The two are mutually exclusive, the
 //! author crate cannot tell them apart, and the XAdES structure written is the
