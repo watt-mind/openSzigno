@@ -42,6 +42,10 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
   that is not an envelope at all. This adds files and changes none: every
   golden committed before this ran is byte-identical after it. The matrix is
   run by both the CI `golden` job and the release smoke test, unchanged.
+- `openszigno_core::declared_encoding`, which reads the XML declaration's
+  `encoding` pseudo-attribute and reports the label together with the byte
+  range holding it, so a writer restating the declaration agrees with the
+  decoder byte for byte. Additive; `schema_version` stays `1`.
 
 ### Fixed
 
@@ -162,17 +166,6 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
   `diff.noprefix` cannot change what the parser strips.
   `--self-test` runs the parser's unit tests, and CI runs it before the
   measurement it guards.
-
-## [0.7.1] - 2026-09-09
-
-### Added
-
-- `openszigno_core::declared_encoding`, which reads the XML declaration's
-  `encoding` pseudo-attribute and reports the label together with the byte
-  range holding it, so a writer restating the declaration agrees with the
-  decoder byte for byte. Additive; `schema_version` stays `1`.
-
-### Fixed
 - `sign` no longer rewrites the dossier's own text when it fills a signature
   in. The digest, signature-value and timestamp placeholders were substituted
   over the whole document, so a document whose title or payload read like one
