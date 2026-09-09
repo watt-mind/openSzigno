@@ -78,6 +78,14 @@ configuration is missing `client_id` (`csc_config_invalid`, exit 4). Nothing
 is contacted in either. The paths that do sign are covered by
 `crates/openszigno-cli/tests/sign.rs` and `csc.rs`.
 
+`tests/golden/timestamp/` captures one `timestamp` refusal, for the same
+reason: a successful run needs a timestamp authority, and nothing in this
+matrix touches the network. `timestamp.document-not-found` asks for
+`--scope document --document '#7'` on `tests/fixtures/created.es3`, which is
+resolved before a socket would be opened (`document_not_found`, exit 4). The
+paths that do write a timestamp are covered by
+`crates/openszigno-cli/tests/timestamp.rs`.
+
 `create --encrypt-for` is deliberately **not** in the matrix. Every encrypted
 document carries a fresh random content-encryption key, initialisation
 vector, and key-transport padding, so no two runs produce the same bytes and
@@ -88,8 +96,8 @@ instead: `crates/openszigno-cli/tests/create_encrypt.rs` and
 The commands captured over a fixture are `inspect`, `list`,
 `validate-structure`, `verify` and `extract` in JSON mode, `inspect`,
 `list`, `validate-structure` and `verify` in human mode, and
-`extract --stdout`; `create` and `sign`
-are captured in both modes by the two groups above. `extract` writes into a
+`extract --stdout`; `create`, `sign` and `timestamp`
+are captured in both modes by the three groups above. `extract` writes into a
 throwaway directory under the
 system temporary directory; the script fails the run if that directory's path
 ever appears in captured output, because the envelope must never carry an
