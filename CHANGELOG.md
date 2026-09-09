@@ -25,6 +25,22 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
   See [Installing dist in CI](docs/releasing.md#installing-dist-in-ci) and
   [Bumping dist](docs/releasing.md#bumping-dist), which also records the exact
   diff to reapply after `dist generate` rewrites the workflow.
+- The online transport refuses a redirect that leaves `https` for `http`, for
+  every request kind, as `destination_refused` with the rule
+  `redirect_downgrade`. A redirect could previously stay on the host the
+  certificate or the configuration named and change the scheme, and the next
+  hop then went out in the clear carrying whatever the first one carried.
+- A request that carries credentials — a bearer token in the `Authorization`
+  header, or a body the caller marked sensitive, which every `sign --csc`
+  request now is — requires `https` on every hop, the first included, and is
+  refused as `destination_refused` with the rule `credentials_require_https`
+  otherwise. The one exemption is a loopback service under
+  `--online-allow-private`, granted on the addresses the destination policy
+  approved rather than on the host text. A refusal reaches `sign --csc` as
+  `csc_unreachable` naming the rule, and nothing is contacted.
+- The `Authorization` header is attached only after a target has passed the
+  destination policy, the credential rule and the address pin, so a target
+  that failed any check is never sent one.
 
 ## [0.7.0] - 2026-09-09
 

@@ -245,6 +245,10 @@ impl Fetcher {
                             accept: "application/ocsp-response",
                             bytes: &request,
                             authorization: None,
+                            // An OCSP request names a certificate serial and nothing
+                            // else. It is not credential material, so it does not
+                            // demand TLS the way a CSC body does.
+                            sensitive: false,
                         }),
                         MAX_OCSP_BYTES,
                     ) {

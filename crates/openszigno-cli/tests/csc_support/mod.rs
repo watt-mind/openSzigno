@@ -101,6 +101,11 @@ pub struct Mock {
     /// What `credentials/list` reports. One is the ordinary case; two is
     /// `csc_credential_ambiguous`.
     pub credential_ids: Vec<String>,
+    /// When set, `info` answers `302` with this `Location` instead of the
+    /// discovery document. A redirect is the peer's choice, and this is how a
+    /// hostile or misconfigured service asks the client to carry its bearer
+    /// token somewhere else.
+    pub redirect_info_to: Option<String>,
 }
 
 impl Mock {
@@ -111,6 +116,7 @@ impl Mock {
             require_pin: None,
             wrong_signature: false,
             credential_ids: vec![CREDENTIAL.to_owned()],
+            redirect_info_to: None,
         }
     }
 }
@@ -280,9 +286,17 @@ fn handle(
     }
 
     let (status, payload) = answer(state, &path, &body);
+    let location = match (status, &state.mock.redirect_info_to) {
+        (302, Some(target)) => format!("Location: {target}\r\n"),
+        _ => String::new(),
+    };
     let head = format!(
-        "HTTP/1.1 {status} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-        if status == 200 { "OK" } else { "Bad Request" },
+        "HTTP/1.1 {status} {}\r\n{location}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        match status {
+            200 => "OK",
+            302 => "Found",
+            _ => "Bad Request",
+        },
         payload.len()
     );
     let _ = stream.write_all(head.as_bytes());
@@ -305,6 +319,7 @@ fn answer(state: &State, path: &str, body: &[u8]) -> (u16, String) {
     // The operation is the whole suffix, not the last segment: `info` and
     // `credentials/info` end in the same word and are different operations.
     match path.strip_prefix("/csc/v2/").unwrap_or_default() {
+        "info" if mock.redirect_info_to.is_some() => (302, String::new()),
         "info" => (200, info_body(mock)),
         "credentials/list" => (
             200,

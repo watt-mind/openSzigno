@@ -81,6 +81,11 @@ pub struct Seen {
     pub body: Vec<u8>,
     /// Whether the request announced a chunked body.
     pub chunked: bool,
+    /// The `Authorization` header value, when the request carried one. A
+    /// request that reached a destination the policy should have refused is
+    /// one bug; one that carried a bearer token there is a worse one, so the
+    /// tests can say which happened.
+    pub authorization: Option<String>,
 }
 
 pub struct Server {
@@ -174,6 +179,7 @@ pub fn handle(stream: &mut TcpStream, routes: &[(&'static str, Reply)], seen: &M
         body: body.clone(),
         chunked: header(&head, "transfer-encoding")
             .is_some_and(|value| value.to_ascii_lowercase().contains("chunked")),
+        authorization: header(&head, "authorization").map(str::to_owned),
     });
 
     // --- the response --------------------------------------------------------

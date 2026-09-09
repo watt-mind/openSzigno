@@ -454,6 +454,25 @@ openszigno verify dossier.es3 --json \
 - **The scheme the CA published.** `http` and `https` are the only two schemes
   fetched, and neither is rewritten. TLS is not what makes the answer
   trustworthy — the artefact's own signature is, and it is checked either way.
+- **No downgrade on a redirect.** A redirect that leaves `https` for `http` is
+  refused, for every request kind, as `destination_refused` with the rule
+  `redirect_downgrade`. Not rewriting a published `http` URL is one thing; a
+  peer moving an exchange that had already started under TLS into the clear is
+  another, and it is the peer's choice rather than the CA's. The refusal is
+  decided before the next hop is opened, so nothing is contacted at the
+  downgraded target.
+- **Credentials need TLS on every hop.** A request that carries a bearer token
+  in the `Authorization` header, or a body the caller marked sensitive, is
+  refused unless the URL is `https` — on the first hop as well as on every
+  later one — with the rule `credentials_require_https`. A revocation fetch
+  carries no credentials and is unaffected; `sign --csc` carries both, and
+  this is the transport half of the rule its configuration already states.
+  The one exemption is a loopback service under `--online-allow-private`, and
+  it is granted on the addresses the policy approved rather than on the host
+  text. Without the flag the refusal comes before the host is even resolved.
+- **The `Authorization` header goes on last.** It is attached only after the
+  target has passed the destination policy, the credential rule and the
+  address pin, so a target that failed any check is never sent one.
 - **Only public destinations, by default.** A URL carrying userinfo
   (`http://user:secret@host/…`) is always refused. So is one naming any of
   these, whether it names them directly or *resolves* to them — the resolved
@@ -496,8 +515,8 @@ openszigno verify dossier.es3 --json \
   certificates behind one responder are two questions.
 - **Bounded.** 5 s to connect, 20 s per fetch, 16 MiB for a CRL — the same
   limit the verifier itself will parse — 64 KiB for an OCSP response, at most 3
-  redirects and **never to another host**, at most 32 certificates per run,
-  rounds included.
+  redirects, **never to another host** and **never from `https` to `http`**,
+  at most 32 certificates per run, rounds included.
 - **Judged offline.** Every fetched artefact goes through exactly the rules in
   [What makes data unusable](#what-makes-data-unusable). A CRL from the wrong
   CA, a stale one, or an HTML error page changes nothing.
@@ -535,9 +554,15 @@ the CA's current publication point and drop it into `--revocation-store` by
 hand. `invalid` means the server answered with something that is not a CRL or
 an OCSP response, which is what a captive portal or an intercepting proxy looks
 like from here. `destination_refused` means the URL named a destination the
-policy does not permit: fix the certificate's publication point, or — if it is
-an internal CA on your own network and you meant it — pass
-`--online-allow-private`.
+policy does not permit, and the rule after it says which: fix the
+certificate's publication point, or — if it is an internal CA on your own
+network and you meant it — pass `--online-allow-private`.
+`redirect_downgrade` is the server answering with a redirect from `https` to
+`http`, which is a misconfigured publication point at best, and
+`credentials_require_https` is a request that would have carried credentials
+over something other than `https`; neither is waived by
+`--online-allow-private` except for a loopback service, and neither contacts
+the refused target.
 
 ### The cache workflow
 

@@ -234,7 +234,25 @@ attacker-supplied until something the operator configured vouches for it:
   the IPv4 address it carries. The host's *resolved* addresses are checked
   against the same list before connecting, so a public name that resolves
   inwards is refused too. Refusals are reported as `online_fetch_failed`
-  (`info`) with the class `destination_refused`, and nothing is contacted.
+  (`info`) with the class `destination_refused` and the rule that refused the
+  destination, and nothing is contacted.
+- **No downgrade on a redirect** (`redirect_downgrade`). A redirect that leaves
+  `https` for `http` is refused for every request kind, even on the host the
+  certificate named. A redirect is the peer's choice, and a peer does not get
+  to move an exchange that started under TLS into the clear, carrying whatever
+  the first request carried. The refusal is decided before the next hop is
+  opened, so nothing is contacted at the downgraded target.
+- **Credentials require `https` on every hop** (`credentials_require_https`).
+  A request carrying a bearer token in the `Authorization` header, or a body
+  the caller marked sensitive, is refused unless the URL is `https`, the first
+  hop included. `--online-allow-private` waives it only for a loopback service,
+  and only on the addresses the policy approved. A revocation fetch carries no
+  credentials and is unaffected: a CRL is public and is signature-checked
+  either way.
+- **The `Authorization` header goes on last.** It is attached only after the
+  target has passed the destination policy, the credential rule and the address
+  pin, in the one place in this binary that puts a bearer token on the wire, so
+  a target that failed any check is never sent one.
 - **The check is bound to the connection.** The addresses the policy approved
   are pinned as the resolution for that host and port, so the socket goes where
   the policy looked; a name that was not vetted for the fetch in hand does not
@@ -288,9 +306,14 @@ authorisation time rather than a placeholder.
 
 The remaining rules are the ones `--online` already imposes: the destination
 policy, the pinned address resolution, 5 s to connect and 20 s per request, at
-most three redirects and never to another host, no proxy from the environment,
-and a 256 KiB cap on a response. `https` is required unless
-`--online-allow-private` is given, because the token is in a header.
+most three redirects, never to another host and never from `https` to `http`,
+no proxy from the environment, and a 256 KiB cap on a response. `https` is
+required on every hop, the first included, because the token is in a header
+and a `credentials/authorize` body carries the PIN and the one-time password
+as well; every CSC request is marked sensitive for that reason. The one
+exemption is a loopback service under `--online-allow-private`. A refusal
+reaches the caller as `csc_unreachable` naming the rule, and nothing is
+contacted.
 
 What comes back is not trusted on the strength of having come back. The
 signature the service returns is verified locally, against the certificate the
@@ -327,9 +350,14 @@ openSzigno aims to guarantee that a hostile input cannot:
 - learn anything about a decryption key from how a decryption failed, or cause
   key or passphrase material to reach stdout, stderr, the JSON envelope, or an
   extracted file;
+- put a bearer token, a PIN or a one-time password on a plaintext hop, whether
+  by naming an `http` service or by answering a request with a redirect that
+  downgrades one, or make openSzigno send an `Authorization` header to a
+  destination any check refused;
 - cause openSzigno to make a network connection without `--online`, or, with
   it, to any destination other than a URL published inside a certificate that
-  reaches a configured trust anchor — including through a redirect, an
+  reaches a configured trust anchor — including through a redirect, a redirect
+  that leaves `https` for `http` on the same host, an
   environment proxy, a scheme the certificate did not name, userinfo in a URL,
   a name that resolves to a loopback, private, link-local, unique-local,
   multicast or cloud-metadata address while `--online-allow-private` is absent,

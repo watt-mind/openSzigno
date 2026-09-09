@@ -627,3 +627,45 @@ fn a_timestamped_remote_signature_verifies_end_to_end() {
         blocking(&report)
     );
 }
+
+// ---------------------------------------------------------------------------
+// Redirects, and the header that must not follow one
+// ---------------------------------------------------------------------------
+
+/// A CSC service that answers `info` with a `302` to another loopback port is
+/// asking the client to carry its bearer token somewhere the operator never
+/// configured. The redirect is refused, and the target sees no request at all:
+/// the `Authorization` header is attached only after a target has passed the
+/// destination policy and the redirect rules, so a target that failed them
+/// never gets one.
+#[test]
+fn a_csc_redirect_off_the_configured_host_is_refused_and_the_target_sees_nothing() {
+    let (listener, sink) = reserved();
+    let sink_server = serve_on(listener, sink, vec![("/csc/v2/info", Reply::Status(200))]);
+    let mut mock = Mock::new(Flavour::Eudi);
+    mock.redirect_info_to = Some(format!("http://{sink}/csc/v2/info"));
+    let fixture = fixture(mock);
+
+    let output = sign(&fixture, &[]);
+    let report = json(&output);
+    assert_eq!(report["errors"][0]["code"], "csc_unreachable");
+    let message = report["errors"][0]["message"]
+        .as_str()
+        .expect("a message")
+        .to_owned();
+    assert!(message.contains("info"), "{message}");
+    assert!(message.contains("redirect"), "{message}");
+    assert_eq!(output.status.code(), Some(5));
+
+    // Nothing reached the redirect target, so nothing carried the token there.
+    let seen = sink_server.seen();
+    assert!(
+        seen.is_empty(),
+        "the redirect target was contacted: {seen:?}"
+    );
+    assert!(
+        seen.iter().all(|request| request.authorization.is_none()),
+        "the redirect target was sent an Authorization header"
+    );
+    assert!(!everything_printed(&output).contains(TOKEN));
+}
