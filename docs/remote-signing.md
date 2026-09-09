@@ -2,10 +2,10 @@
 
 Research date: 2026-09-09. Ticket: LAB-287.
 
-Sections 1 to 6 survey the remote signature ecosystem openSzigno would have to
-join once the planned `create` and `sign` commands exist. They are research,
-not a specification, and nothing in them asserts that any signature,
-certificate, or dossier produced by a listed service is valid.
+Sections 1 to 6 survey the remote signature ecosystem openSzigno joins now
+that `create` and `sign` exist. They are research, not a specification, and
+nothing in them asserts that any signature, certificate, or dossier produced
+by a listed service is valid.
 
 [Section 7](#7-using-openszigno-with-a-csc-service) is different: it documents
 `sign --csc`, which implements the recommendation in section 6.1 and now
@@ -1254,8 +1254,8 @@ natural persons will actually hold.
 `openszigno sign --csc CONFIG.toml` implements the hash-only backend
 [section 6.1](#61-build-one-backend-csc-api-v2-hash-signing-only) recommends:
 CSC API v2, `signatures/signHash`, and nothing else. Only the digest of the
-canonicalised `ds:SignedInfo` leaves the machine. The command's own contract —
-every flag, every error code, the algorithm mapping and the JSON it writes —
+canonicalised `ds:SignedInfo` leaves the machine. The command's own contract
+(every flag, every error code, the algorithm mapping and the JSON it writes)
 is in
 [architecture.md](architecture.md#signing-through-a-csc-service); what follows
 is how to point it at a real service.
@@ -1298,7 +1298,7 @@ plainly: **only an `explicit`-mode credential can be signed with.**
 Section 1.2 sets out the two credential authorisation modes. Under `explicit`
 the client calls `credentials/authorize` with the credential, the hashes,
 `numSignatures`, and a PIN or one-time password, and gets Signature Activation
-Data back — one call, no user agent, which is what `--csc` does. Under `oauth2`
+Data back: one call, no user agent, which is what `--csc` does. Under `oauth2`
 the client has to run a second OAuth 2.0 authorization-code round with
 `scope=credential`, and the resulting token plays the SAD role. That round
 needs a consent screen, and a consent screen needs a browser.
@@ -1338,8 +1338,8 @@ authorize endpoint rejects an unknown `client_id`. So every target below needs
 credentials obtained out of band, from the vendor, before any token exists.
 
 **The EUDI reference QTSP.** The deployment at
-`walletcentric.signer.eudiw.dev` answers `info` without credentials — that is
-where the response quoted in section 1.3 came from — and its `authType` is
+`walletcentric.signer.eudiw.dev` answers `info` without credentials, which is
+where the response quoted in section 1.3 came from, and its `authType` is
 `oauth2code` only, so there is no `auth/login` path to a token. The practical
 route is the one section 6.3 recommends: run the reference QTSP locally from
 [eudi-srv-web-walletdriven-rpcentric-signer-qtsp-java](https://github.com/eu-digital-identity-wallet/eudi-srv-web-walletdriven-rpcentric-signer-qtsp-java)
@@ -1359,8 +1359,8 @@ credentials and advertises `oauth2/pushed_authorize` alongside the standard
 methods. Onboarding is through the vendor and its extent was not established.
 
 Once a `scope=service` token is in hand from any of them, put it in
-`access_token_file` and the discovery half of `sign --csc` — `info`,
-`credentials/list`, `credentials/info` — runs against the real service and
+`access_token_file` and the discovery half of `sign --csc` (`info`,
+`credentials/list`, `credentials/info`) runs against the real service and
 reports what it found. That is worth doing on its own before any signature is
 attempted: it is the cheapest way to see a deployment's actual `specs`,
 `supportsRar`, `supportedHashTypes` and credential mode, and section 6.5 lists

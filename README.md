@@ -1,8 +1,8 @@
 # openSzigno
 
 A safe, agent-friendly command-line tool for inspecting, listing, structurally
-validating, verifying, extracting, and creating Hungarian Microsec e-Szignó
-e-dossiers (`.es3`).
+validating, verifying, extracting, creating, and signing Hungarian Microsec
+e-Szignó e-dossiers (`.es3`).
 
 [![CI](https://github.com/watt-mind/openSzigno/actions/workflows/ci.yml/badge.svg?branch=develop)](https://github.com/watt-mind/openSzigno/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
@@ -205,7 +205,7 @@ machine; see
 [Signing through a CSC service](docs/architecture.md#signing-through-a-csc-service).
 
 **Signing is not verification.** `sign` produces a signature and checks
-nothing — not the key, not the certificate, not the chain — and says so on
+nothing: not the key, not the certificate, not the chain, and it says so on
 every run. Whether what it wrote holds is a question for `verify`, against
 trust material you supply; and a `valid` verdict over a chain you built
 yourself means only that the chain you chose to trust verified. It is not a
