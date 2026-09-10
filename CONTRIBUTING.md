@@ -69,11 +69,13 @@ commit-msg hook runs), skipping merge commits and commits authored by
 `dependabot[bot]` or `github-actions[bot]`. On a release pull request into
 `master` only commits not already on `develop` are checked, since every
 commit on `develop` passed this job on the pull request that landed it.
-It also requires the pull
-request body to contain a line starting `Fixes LAB-<n>`, `Closes LAB-<n>`,
-or `Refs LAB-<n>` (case-insensitive), so every change traces to a Linear
-ticket; a bot-authored pull request is exempt, and a human-authored one
-with no ticket can opt out by adding the `no-ticket` label. The job only
+The job also has a pull request body step, which serves a maintainer-side
+convention for tracing a change back to the maintainers' own tracker.
+An external contribution needs no ticket reference: open the pull request
+with a plain description of what it changes and why. A maintainer links the
+pull request from the tracker and applies the `no-ticket` label, which that
+step honours, so the missing reference never blocks your change. A
+bot-authored pull request is exempt as well. The job only
 runs on `pull_request`, since only a pull request has a range and a body to
 check; existing commits on `develop` (older merge commits, `Merge pull
 request ...` subjects predating this rule) are unaffected.
@@ -121,7 +123,7 @@ CI additionally runs, on every pull request:
 | Crate manifests | `cargo package -p <crate> --no-verify --locked` for all four crates |
 | Release container | `docker build .`, then the CLI subcommands inside the image |
 | Workflow lint | `actionlint` with `SHELLCHECK_OPTS=--severity=warning` |
-| Commit and PR hygiene (pull requests only) | `git log --format=%s origin/<base>..HEAD` through `scripts/commit-msg.sh -`, plus a `Fixes\|Closes\|Refs LAB-<n>` line in the pull request body |
+| Commit and PR hygiene (pull requests only) | `git log --format=%s origin/<base>..HEAD` through `scripts/commit-msg.sh -`, plus a maintainer-side pull request body step an external contribution opts out of with the `no-ticket` label |
 | Source file length | `python3 scripts/check-file-length.py` |
 | Golden output contract | `python3 scripts/golden.py check --bin target/release/openszigno` |
 | Semver checks (`openszigno-core` and `openszigno-verify` against the version published on crates.io) | `cargo semver-checks -p <crate>` |

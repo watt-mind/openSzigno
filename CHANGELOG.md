@@ -10,6 +10,26 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
 
 ## [Unreleased]
 
+### Changed
+
+- `AGENTS.md` now agrees with the implemented command set. Its scope
+  sentence, its verification boundary and its CLI ownership map name
+  `timestamp` and `csc login`, the author crate row names the timestamp and
+  CSC protocol modules, and the hard-coded count of commands that verify
+  nothing is replaced by a pointer to the maintained command contract in
+  `docs/architecture.md`. Documentation only; no behaviour change.
+
+- The public documentation no longer publishes maintainer-internal issue
+  tracking. `AGENTS.md` points at a private tracker that lives in the
+  maintainer environment instead of naming a tracker, a team, a project, a
+  maintainer-local protocol path or a ticket identifier format; `CLAUDE.md`
+  and `GEMINI.md` are thin pointers to `AGENTS.md`; and `CONTRIBUTING.md`
+  states that an external contribution needs no ticket reference, since a
+  maintainer links the pull request from the tracker and applies the
+  `no-ticket` label the hygiene check honours. Public intake through GitHub
+  Issues, including the synthetic-reproducer rule, is unchanged.
+  Documentation only; no behaviour change.
+
 ### Fixed
 
 - The Security workflow's concurrency group keyed pushes on `github.ref`, so
