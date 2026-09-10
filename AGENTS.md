@@ -17,22 +17,22 @@ certificate paths; no I/O except through injected traits), and
 output, safe extraction). See `README.md`, `docs/architecture.md`,
 `docs/roadmap.md`, `CONTRIBUTING.md`, and `SECURITY.md`.
 
-## Issue tracking (Linear)
+## Issue tracking
 
-Team **`LAB`**, project **`openSzigno`**. Full protocol:
-`~/Develop/hdkiller/docs/orgs/linear.md`: read before claiming or filing tickets.
-Follow-ups discovered mid-work → file a Linear issue in `Triage` (do not expand the
-current ticket's scope). PR body: `Fixes LAB-XX`.
+Maintainers track work in a private tracker; the routing and protocol live
+in the maintainer environment, not in this repository. Follow-ups found
+mid-work are filed there by a maintainer, rather than expanding the scope of
+the change in hand.
 
 ## Public intake (GitHub Issues)
 
 This is a public repo: external contributors file GitHub Issues (templates in
 `.github/ISSUE_TEMPLATE/`, auto-labeled `type:*` + `source:human`).
-Maintainers mirror accepted public issues into Linear (same team/project as
-above, `source:human`, link back to the GitHub issue) and work them there.
+Maintainers mirror accepted public issues into the private tracker
+(`source:human`, linked back to the GitHub issue) and work them there.
 The GitHub issue stays the public face: close it with a link when done, and
-never paste Linear internals, private paths, or maintainer-local details into
-GitHub comments, commits, or PR descriptions (Linear protocol §11).
+never paste tracker internals, private paths, or maintainer-local details
+into GitHub comments, commits, or pull request descriptions.
 Triage rule: vulnerability → the `SECURITY.md` private flow, never a public
 issue; anything involving a real dossier → ask for a synthetic reproducer
 before anything else.
