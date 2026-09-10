@@ -298,7 +298,8 @@ lefthook install
 Pre-commit then runs `cargo fmt --all` (re-staged automatically) and
 `cargo clippy --workspace --all-targets --locked -- -D warnings`; commit-msg
 enforces the Conventional Commits subject shape above via
-`scripts/commit-msg.sh`. Same checks run in CI, so a red hook is a red build.
+`scripts/commit-msg.sh "{1}"`, lefthook's placeholder for the message file
+git passes to the hook. Same checks run in CI, so a red hook is a red build.
 
 ## Tests and fixtures
 
