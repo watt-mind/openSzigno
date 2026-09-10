@@ -8,6 +8,25 @@ name: Mutation testing
 # schedule, and a failure opens or refreshes a tracking issue instead of
 # blocking a merge, so a slow decline in test strength is never lost even
 # though nothing here gates a pull request.
+#
+# cargo-mutants 27.1.0 exit statuses, from its own book (`book/src/exit-codes.md`
+# in the crate, published at https://mutants.rs/exit-codes.html):
+#
+#   0  every viable mutant that was tested was caught
+#   1  usage error (bad command-line arguments and the like)
+#   2  some mutants were missed, that is they survived the test suite
+#   3  some tests timed out
+#   4  the unmutated baseline tests already fail, so nothing was tested
+#   5  the `--in-diff` diff does not match the tree
+#   6  the `--in-diff` diff could not be parsed
+#   70 internal cargo-mutants error
+#
+# Only 0, 2 and 3 mean "the run finished and `outcomes.json` describes every
+# mutant". For those three the *score*, not the exit status, decides, and
+# `scripts/mutants_gate.py` computes it. Every other status means the tool
+# never produced a usable report, so the job fails outright. Note that 4 is a
+# failing baseline, not "some mutants were unviable": unviable mutants are
+# recorded in `outcomes.json` and never change the exit status at all.
 
 on:
   schedule:
@@ -50,6 +69,7 @@ jobs:
     timeout-minutes: 90
     outputs:
       gate-status: ${{ steps.gate.outputs.status }}
+      run-status: ${{ steps.mutants.outputs.status }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -94,12 +114,23 @@ jobs:
             mutants-core/mutants.out
             mutants-core-gate-summary.md
       - name: Enforce the mutation-testing gate
+        env:
+          MUTANTS_STATUS: ${{ steps.mutants.outputs.status }}
+          GATE_STATUS: ${{ steps.gate.outputs.status }}
         run: |
-          if [ "${{ steps.mutants.outputs.status }}" != "0" ] && [ "${{ steps.mutants.outputs.status }}" != "2" ]; then
-            echo "::error::cargo mutants exited unexpectedly (status ${{ steps.mutants.outputs.status }}), not just with missed mutants"
-            exit 1
-          fi
-          if [ "${{ steps.gate.outputs.status }}" != "0" ]; then
+          set -euo pipefail
+          # See the exit-status table at the top of this file. 0, 2 and 3 all
+          # mean the run finished with a complete report, so the score decides
+          # and only the gate below can fail the job; anything else means no
+          # usable report was produced.
+          case "$MUTANTS_STATUS" in
+            0 | 2 | 3) ;;
+            *)
+              echo "::error::cargo mutants did not complete: exit status ${MUTANTS_STATUS:-none}, which is not one of 0 (all caught), 2 (mutants missed) or 3 (tests timed out)"
+              exit 1
+              ;;
+          esac
+          if [ "$GATE_STATUS" != "0" ]; then
             echo "::error::scripts/mutants_gate.py reported a mutation-testing gate failure; see the job summary or artifact"
             exit 1
           fi
@@ -111,9 +142,23 @@ jobs:
       github.event.inputs.crate == 'all' ||
       github.event.inputs.crate == 'openszigno-verify'
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    # `openszigno-verify` has 1,756 mutants against `openszigno-core`'s 694,
+    # and its per-mutant test run is no faster, so the 90 minutes that leave
+    # `openszigno-core` finishing in about 50 were never enough here: the
+    # nightly runs of 2026-09-09 and 2026-09-10 were both killed mid-run by
+    # this timeout ("The job has exceeded the maximum execution time"), which
+    # is what cancelled the job, not `fail-fast` (there is no matrix) and not
+    # the concurrency group (it sets `cancel-in-progress: false`). Scaling
+    # `openszigno-core`'s measured rate to this crate's mutant count puts a
+    # full run at roughly two hours, so budget four and keep the whole-crate
+    # measurement in one `outcomes.json`, which is what the crate's floor is
+    # defined against. If the run ever outgrows this, shard it across a
+    # matrix and aggregate the shards before gating rather than raising the
+    # ceiling again.
+    timeout-minutes: 240
     outputs:
       gate-status: ${{ steps.gate.outputs.status }}
+      run-status: ${{ steps.mutants.outputs.status }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -158,12 +203,23 @@ jobs:
             mutants-verify/mutants.out
             mutants-verify-gate-summary.md
       - name: Enforce the mutation-testing gate
+        env:
+          MUTANTS_STATUS: ${{ steps.mutants.outputs.status }}
+          GATE_STATUS: ${{ steps.gate.outputs.status }}
         run: |
-          if [ "${{ steps.mutants.outputs.status }}" != "0" ] && [ "${{ steps.mutants.outputs.status }}" != "2" ]; then
-            echo "::error::cargo mutants exited unexpectedly (status ${{ steps.mutants.outputs.status }}), not just with missed mutants"
-            exit 1
-          fi
-          if [ "${{ steps.gate.outputs.status }}" != "0" ]; then
+          set -euo pipefail
+          # See the exit-status table at the top of this file. 0, 2 and 3 all
+          # mean the run finished with a complete report, so the score decides
+          # and only the gate below can fail the job; anything else means no
+          # usable report was produced.
+          case "$MUTANTS_STATUS" in
+            0 | 2 | 3) ;;
+            *)
+              echo "::error::cargo mutants did not complete: exit status ${MUTANTS_STATUS:-none}, which is not one of 0 (all caught), 2 (mutants missed) or 3 (tests timed out)"
+              exit 1
+              ;;
+          esac
+          if [ "$GATE_STATUS" != "0" ]; then
             echo "::error::scripts/mutants_gate.py reported a mutation-testing gate failure; see the job summary or artifact"
             exit 1
           fi
@@ -172,9 +228,14 @@ jobs:
     name: Report survivors
     needs: [mutants-core, mutants-verify]
     # `always()` so this still runs when one of the two jobs above was
-    # skipped by `if.crate` on a manual dispatch; the failure check below
-    # then looks only at jobs that actually ran.
-    if: always() && contains(needs.*.result, 'failure')
+    # skipped by `if.crate` on a manual dispatch; the check below then looks
+    # only at jobs that actually ran. `cancelled` is listed alongside
+    # `failure` because a job killed by its own `timeout-minutes` reports
+    # `cancelled`, and that is exactly the case this report has to surface
+    # rather than swallow.
+    if: >-
+      always() && (contains(needs.*.result, 'failure') ||
+      contains(needs.*.result, 'cancelled'))
     runs-on: ubuntu-latest
     timeout-minutes: 15
     # The only job in this workflow that writes anything: scoped to this
@@ -187,19 +248,110 @@ jobs:
         with:
           persist-credentials: false
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        # A job killed by its `timeout-minutes` never reaches its upload
+        # step, so there may be no artifact at all to download; the report
+        # still has something worth filing in that case.
+        continue-on-error: true
         with:
           pattern: mutants-openszigno-*
           path: artifacts
           merge-multiple: false
-      - name: Build the tracking-issue body
+      - name: Classify the failure and build the tracking-issue body
+        id: classify
+        env:
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          CORE_RESULT: ${{ needs.mutants-core.result }}
+          CORE_RUN_STATUS: ${{ needs.mutants-core.outputs.run-status }}
+          CORE_GATE_STATUS: ${{ needs.mutants-core.outputs.gate-status }}
+          VERIFY_RESULT: ${{ needs.mutants-verify.result }}
+          VERIFY_RUN_STATUS: ${{ needs.mutants-verify.outputs.run-status }}
+          VERIFY_GATE_STATUS: ${{ needs.mutants-verify.outputs.gate-status }}
         run: |
           set -euo pipefail
           marker='<!-- mutants-gate -->'
+          survivors=0
+          broken=0
+          rows=''
+
+          # Prose for one cargo-mutants exit status; see the table at the top
+          # of this file.
+          describe_run_status() {
+            case "${1:-}" in
+              '') echo 'not reported (the job never finished the run)' ;;
+              0) echo '0 (every viable mutant caught)' ;;
+              1) echo '1 (usage error)' ;;
+              2) echo '2 (some mutants missed)' ;;
+              3) echo '3 (some tests timed out)' ;;
+              4) echo '4 (the unmutated baseline already fails)' ;;
+              5) echo '5 (the --in-diff diff does not match the tree)' ;;
+              6) echo '6 (the --in-diff diff could not be parsed)' ;;
+              70) echo '70 (internal cargo-mutants error)' ;;
+              *) echo "$1 (unrecognised)" ;;
+            esac
+          }
+
+          # A job counts as "survivors below the floor" only when the gate
+          # script itself exited 1, its ratchet failure. Every other way of
+          # failing, including a gate exit of 2 for a missing or empty
+          # report, is a tool error, and a `cancelled` result is the job
+          # timeout.
+          classify() {
+            name="$1"
+            result="$2"
+            run_status="${3:-}"
+            gate_status="${4:-}"
+            case "$result" in
+              success | skipped)
+                verdict='no failure'
+                ;;
+              cancelled)
+                verdict='cancelled, which for this workflow means the job timeout'
+                broken=1
+                ;;
+              *)
+                if [ "$gate_status" = '1' ]; then
+                  verdict='survivors below the floor'
+                  survivors=1
+                else
+                  verdict='tool error, so no usable mutation score'
+                  broken=1
+                fi
+                ;;
+            esac
+            rows="${rows}| \`${name}\` | ${result} | $(describe_run_status "$run_status") | ${gate_status:-not reported} | ${verdict} |
+          "
+          }
+
+          classify openszigno-core "$CORE_RESULT" "$CORE_RUN_STATUS" "$CORE_GATE_STATUS"
+          classify openszigno-verify "$VERIFY_RESULT" "$VERIFY_RUN_STATUS" "$VERIFY_GATE_STATUS"
+
+          if [ "$survivors" = 1 ] && [ "$broken" = 1 ]; then
+            title='Mutation testing: survivors below the floor, plus a tool error or cancellation'
+          elif [ "$survivors" = 1 ]; then
+            title='Mutation testing: survivors below the floor'
+          else
+            title='Mutation testing: tool error or cancellation'
+          fi
+          echo "title=$title" >> "$GITHUB_OUTPUT"
+
           {
             echo "$marker"
             echo
-            echo "Nightly mutation testing found a caught-mutant gate failure."
-            echo "Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            echo "$title"
+            echo
+            echo "Run: $RUN_URL"
+            echo
+            echo '| Crate | Job result | cargo-mutants exit status | Gate exit status | Verdict |'
+            echo '| --- | --- | --- | --- | --- |'
+            printf '%s' "$rows"
+            echo
+            echo "A cargo-mutants exit status of 0, 2 or 3 means the run finished"
+            echo "with a complete report, so the score and not the exit status"
+            echo "decides; anything else means no usable report was produced. The"
+            echo "score is \`caught / (caught + missed)\`: timeouts and unviable"
+            echo "mutants are excluded from both sides, the same definition the"
+            echo "floors in \`scripts/mutants-floors.txt\` were seeded with, so a"
+            echo "run that ends in timeouts alone is not a gate failure."
             echo
             for summary in artifacts/mutants-openszigno-core/mutants-core-gate-summary.md \
                            artifacts/mutants-openszigno-verify/mutants-verify-gate-summary.md; do
@@ -212,16 +364,22 @@ jobs:
       - name: Open or update the tracking issue
         env:
           GH_TOKEN: ${{ github.token }}
+          TITLE: ${{ steps.classify.outputs.title }}
         run: |
           set -euo pipefail
           marker='<!-- mutants-gate -->'
-          title='Mutation testing: survivors'
           repo="${{ github.repository }}"
 
+          # Match on the marker alone, never on the title: the title now says
+          # which kind of failure this is and so changes from run to run,
+          # while the marker is what makes an issue this workflow's own.
           existing=$(gh api "repos/$repo/issues" -X GET -f state=open --paginate \
-            --jq "[.[] | select(.title == \"$title\") | select(.body | startswith(\"$marker\"))][0].number // empty")
+            --jq "[.[] | select(.pull_request == null) | select(.body != null and (.body | startswith(\"$marker\")))][0].number // empty")
+          # `-F` reads the value from a file when it starts with `@`; `-f`
+          # would post the literal string "@issue-body.md", which is what it
+          # did before this was fixed.
           if [ -n "$existing" ]; then
-            gh api "repos/$repo/issues/$existing" -X PATCH -f body=@issue-body.md
+            gh api "repos/$repo/issues/$existing" -X PATCH -f title="$TITLE" -F body=@issue-body.md
           else
-            gh api "repos/$repo/issues" -X POST -f title="$title" -f body=@issue-body.md
+            gh api "repos/$repo/issues" -X POST -f title="$TITLE" -F body=@issue-body.md
           fi

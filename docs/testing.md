@@ -172,9 +172,10 @@ changed and no test caught it.
 
 This is deliberately not a pull-request check. A full run is tens of minutes
 even at `-j 2` (roughly 8 minutes for `openszigno-core`'s 559 mutants on the
-host this was seeded on; `openszigno-verify`'s 1,601 mutants extrapolate to
-about 45 minutes), which is too slow and too resource-hungry to run on every
-push. It runs nightly instead, plus on manual dispatch, and a gate failure
+host this was seeded on; on a GitHub runner that crate's now 694 mutants took
+49 minutes, and `openszigno-verify`'s 1,756 extrapolate to about two hours),
+which is too slow and too resource-hungry to run on every push. It runs
+nightly instead, plus on manual dispatch, and a gate failure
 opens or refreshes a tracking issue rather than blocking a merge, so a
 declining mutation score is never simply lost.
 
@@ -216,6 +217,40 @@ means the test suite passed whether or not that comparison used `>` or
 `>=`, which is worth a boundary-value test). Timeouts and unviable mutants
 (ones whose mutated code did not even compile) are reported separately and
 do not count as either caught or missed.
+
+### Exit statuses, and what actually fails the nightly run
+
+`cargo mutants` distinguishes several outcomes by exit status. The list below
+is [its own](https://mutants.rs/exit-codes.html), for the pinned 27.1.0:
+
+| Status | Meaning | Nightly verdict |
+| --- | --- | --- |
+| 0 | every viable mutant that was tested was caught | run completed |
+| 1 | usage error, such as bad arguments | job fails |
+| 2 | some mutants were missed, that is they survived | run completed |
+| 3 | some tests timed out | run completed |
+| 4 | the unmutated baseline tests already fail | job fails |
+| 5 | the `--in-diff` diff does not match the tree | job fails |
+| 6 | the `--in-diff` diff could not be parsed | job fails |
+| 70 | internal cargo-mutants error | job fails |
+
+Only 0, 2 and 3 mean the run finished and `outcomes.json` describes every
+mutant. For those three the score decides, not the exit status, and
+`scripts/mutants_gate.py` computes it; the workflow's own check exists purely
+to catch the other statuses, where there is no report to score. Two of those
+statuses are easy to misread. 3 does not mean failure: a mutant that hangs is
+neither proof the tests caught it nor proof of a gap, so the gate leaves
+timeouts out of `caught / (caught + missed)` on both sides, exactly as the
+floors in `scripts/mutants-floors.txt` were seeded, and a run whose only
+blemish is timeouts passes. And 4 is a failing baseline, not "some mutants
+were unviable": unviable mutants are recorded in `outcomes.json` and never
+change the exit status at all, so 4 always means no mutant was tested.
+
+A job killed by its own `timeout-minutes` reports neither an exit status nor
+a score, because it never reaches the gate step. The workflow's reporting job
+watches for a `cancelled` result as well as a `failure` one and says so in
+the tracking issue's title, so an incomplete run is never mistaken for a
+declining mutation score.
 
 ### Updating the floors
 
