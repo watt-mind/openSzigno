@@ -343,6 +343,24 @@ which a local `uses:` needs, so no reordering is involved. Grepping for
 `cargo-dist-installer` in `.github/workflows/release.yml` finds the
 regenerated steps and must find nothing once the diff is reapplied.
 
+### Artifact retention
+
+Every `actions/upload-artifact` step in `release.yml` sets
+`retention-days: 1`. Those uploads only carry the plan manifest, the
+per-target and global build outputs and the cached `dist` binary from one
+job of a run to the next; the published assets live on the GitHub release,
+so nothing is lost when the run's own artifacts expire the next day. `dist
+generate` emits no retention setting, so the five steps carry a `NOT AS
+GENERATED` comment and the setting must be reapplied after regenerating the
+workflow, the same way as the `Install dist` steps above.
+
+The nightly campaigns keep longer retention on purpose, and that is the
+documented exception to the one-day baseline: a fuzzing crash artifact
+(`fuzz.yml`) stays for 90 days because a found crashing input is not
+reproducible from the deterministic seed corpus, and a mutation-testing
+report (`mutants.yml`) stays for 14 days so two weeks of survivor lists can
+be compared. The coverage report in `ci.yml` is one day.
+
 ### Bumping dist
 
 The dist version appears in four places, and they move together:
