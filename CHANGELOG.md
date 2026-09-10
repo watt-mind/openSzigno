@@ -10,6 +10,7 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
 
 ## [Unreleased]
 
+<<<<<<< HEAD
 ### Fixed
 
 - The Security workflow's concurrency group keyed pushes on `github.ref`, so
@@ -24,6 +25,16 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
   is a file, not a directory. The local commit-msg hook silently skipped the
   Conventional Commits check there. `lefthook.yml` now passes lefthook's
   `{1}` placeholder, the message file git provides, explicitly and quoted.
+=======
+### Changed
+
+- `AGENTS.md` now agrees with the implemented command set. Its scope
+  sentence, its verification boundary and its CLI ownership map name
+  `timestamp` and `csc login`, the author crate row names the timestamp and
+  CSC protocol modules, and the hard-coded count of commands that verify
+  nothing is replaced by a pointer to the maintained command contract in
+  `docs/architecture.md`. Documentation only; no behaviour change.
+>>>>>>> 1c2063d (docs: align AGENTS.md with the implemented command set)
 
 ## [0.9.0] - 2026-09-09
 

@@ -1,12 +1,17 @@
 # openSzigno
 
 openSzigno is an open-source, agent-first Rust CLI for inspecting, listing,
-structurally validating, extracting, creating, signing, and verifying the
-signatures of Hungarian Microsec e-Szignó `.es3` e-dossiers. Four-crate
+structurally validating, extracting, creating, signing, timestamping, and
+verifying the signatures of Hungarian Microsec e-Szignó `.es3` e-dossiers.
+It also authenticates against a remote Cloud Signature Consortium service
+(`csc login`) so that `sign --csc` can sign through it. The full, maintained
+list of commands is the command contract in
+`docs/architecture.md#command-contract`. Four-crate
 workspace:
 `crates/openszigno-core` (bounded XML parsing, dossier model, Base64/ZIP
 decoding, limits), `crates/openszigno-author` (the deterministic writer
-behind `create` and `sign`), `crates/openszigno-verify` (canonicalization, XMLDSig,
+behind `create`, `sign` and `timestamp`), `crates/openszigno-verify`
+(canonicalization, XMLDSig,
 certificate paths; no I/O except through injected traits), and
 `crates/openszigno-cli` (the `openszigno` binary, human + stable `--json`
 output, safe extraction). See `README.md`, `docs/architecture.md`,
@@ -47,9 +52,14 @@ before anything else.
   `--online`), and trusted lists with qualified status. It reports `valid`
   only when every required check passed against
   the trust material the caller supplied, and any unperformed required check
-  caps the verdict at `indeterminate`. The other six commands verify nothing
-  at all, `create` and `sign` included: `create` writes an unsigned dossier and
-  says so, and `sign` writes a signature and checks none of it.
+  caps the verdict at `indeterminate`. Every command except `verify` verifies
+  nothing; see the command contract in
+  `docs/architecture.md#command-contract` for the current list, and never
+  infer that list from a count written here. Authoring and authentication are
+  not verification: `create` writes an unsigned dossier and says so, `sign`
+  writes a signature and checks none of it, `timestamp` writes a container
+  `es:TimeStamp` and checks none of it, and `csc login` only obtains the
+  tokens a remote signing service needs.
   Never claim validity outside that path, never let a change relax a
   check without tests, and never present a `valid` verdict as a statement of
   legal effect (see `docs/architecture.md#verification-boundary`).
@@ -99,10 +109,10 @@ ES3_TEST_CORPUS_DIR=/private/corpus cargo test \
 | Path | What lives there |
 | :--- | :--- |
 | `crates/openszigno-core/src/` | `lib.rs`, `parse.rs`, `xml.rs`, `model.rs`, `sniff.rs`, `scan.rs`, `decode.rs`, `decrypt/`, `inventory.rs`, `error.rs` |
-| `crates/openszigno-author/src/` | The writer side, behind `create` and `sign`: `lib.rs` (spec and limit checks), `render.rs` (the XML text), `mime.rs`, `title.rs`, `archive.rs`, `encrypt/` (the CMS `EnvelopedData` an `encrypt` document carries), `sign/` (the XMLDSig/XAdES signer behind `sign`), `error.rs`. Reads no file, opens no socket and calls no clock; only `encrypt/` draws on a random source. |
+| `crates/openszigno-author/src/` | The writer side, behind `create`, `sign` and `timestamp`: `lib.rs` (spec and limit checks), `render.rs` (the XML text), `mime.rs`, `title.rs`, `archive.rs`, `encrypt/` (the CMS `EnvelopedData` an `encrypt` document carries: `mod.rs` the message, `recipient.rs` the recipient certificate), `sign/` (the XMLDSig/XAdES signer behind `sign`, plus `stamp.rs`, the container `es:TimeStamp` behind `timestamp`, `tsa.rs`, RFC 3161 requests and responses, and `csc.rs`, the CSC API v2 request bodies and response readers, no I/O), `error.rs`. Reads no file, opens no socket and calls no clock; only `encrypt/` draws on a random source. |
 | `crates/openszigno-verify/src/` | `lib.rs`, `c14n.rs`, `dsig.rs`, `references.rs`, `scope.rs`, `countersign.rs`, `signature/`, `coverage.rs`, `xades/`, `certs/`, `revocation/`, `tsa/`, `estimestamp.rs`, `trustlist/`, `policy.rs`, `codes.rs`, `trust.rs`, `report.rs`, `embedded.rs` |
 | `crates/openszigno-verify/tests/` | Synthetic PKI and the in-tests XMLDSig signer (`common/`), which must never move into a shipped crate |
-| `crates/openszigno-cli/src/` | `main.rs` (dispatch), `args.rs`, `input.rs`, `response.rs`, `render/`, `commands/` (`inspect`, `list`, `extract`, `validate`, `verify`, `create`, `sign`, `skill`), `key_material.rs`, `csc/` (the `sign --csc` backend: `mod.rs` flow, `config.rs` file, `client.rs` transport), `extract/` (planning, naming, `output_dir.rs`), `trust.rs`, `revocation_store.rs`, `online/` (`mod.rs` transport and cache, `gaps.rs` what to fetch and for whom, `destination.rs`, `pinned.rs`) |
+| `crates/openszigno-cli/src/` | `main.rs` (dispatch), `args.rs`, `input.rs`, `response.rs`, `render/`, `commands/` (`inspect`, `list`, `extract`, `validate`, `verify`, `create`, `sign`, `timestamp`, `csc`, `skill`), `key_material.rs`, `csc/` (the `sign --csc` backend and `csc login`: `mod.rs` flow, `config.rs` file, `client.rs` transport, `oauth.rs` the authorization-code round, `tokens.rs` the stored tokens), `extract/` (planning, naming, `output_dir.rs`), `trust.rs`, `revocation_store.rs`, `online/` (`mod.rs` transport and cache, `gaps.rs` what to fetch and for whom, `destination.rs`, `pinned.rs`) |
 | `tests/fixtures/` | Synthetic `.es3` fixtures + `LICENSE` + `README.md` |
 | `docs/` | `index.md` lists them all: `architecture.md` (CLI contract), `trust.md` (trust and revocation material), `testing.md` (test layout, fixture policy), `roadmap.md` (milestones, risks), `releasing.md`, `remote-signing.md` (CSC, remote QSCDs, timestamp authorities), `es3-specification.md`, `references.md`, `research.md`, `verify-design.md` |
 | `crates/openszigno-cli/skills/openszigno/SKILL.md` | The agent skill the binary embeds and `openszigno skill` prints; it ships inside the published crate |
