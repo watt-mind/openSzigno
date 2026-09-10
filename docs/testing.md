@@ -395,9 +395,19 @@ accumulating files, so a libFuzzer-discovered addition to a target's own
 
 `.github/workflows/fuzz.yml` runs every target nightly (`-max_total_time=600`,
 one job per target, a 20-minute budget each) and on manual dispatch with a
-chosen target and duration. A crash uploads the minimised artifact and opens
-or refreshes a single tracking issue; see that workflow for the exact
+chosen target and duration. Each job builds the target first and runs it only
+if that build succeeded, so the two outcomes are reported apart: a crash
+uploads the artifact and opens or refreshes the `Fuzzing: crashes` issue,
+while anything else (a target that would not compile, a timeout) opens or
+refreshes `Fuzzing: build failed` instead. Only a target that actually wrote
+a crashing input is ever reported as a crash. See that workflow for the exact
 schedule and permissions.
+
+CI passes `--target x86_64-unknown-linux-gnu` explicitly. cargo-fuzz defaults
+`--target` to the triple its own binary was built for, not the host's, so a
+prebuilt musl cargo-fuzz otherwise asks for a statically linked target that
+AddressSanitizer refuses. A locally built `cargo install cargo-fuzz` already
+defaults to the host triple, so the flag is not needed by hand.
 
 ## Public fixtures
 
