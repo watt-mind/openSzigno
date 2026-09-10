@@ -637,7 +637,7 @@ dependencies = [
 
 [[package]]
 name = "openszigno-author"
-version = "0.7.1"
+version = "0.9.0"
 dependencies = [
  "aes",
  "base64",
@@ -664,7 +664,7 @@ dependencies = [
 
 [[package]]
 name = "openszigno-core"
-version = "0.7.1"
+version = "0.9.0"
 dependencies = [
  "aes",
  "base64",
@@ -710,7 +710,7 @@ dependencies = [
 
 [[package]]
 name = "openszigno-verify"
-version = "0.7.1"
+version = "0.9.0"
 dependencies = [
  "base64",
  "cms",
@@ -719,6 +719,7 @@ dependencies = [
  "openszigno-core",
  "p256",
  "p384",
+ "p521",
  "pem-rfc7468",
  "rsa",
  "serde",
@@ -746,6 +747,19 @@ version = "0.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fe42f1670a52a47d448f14b6a5c61dd78fce51856e68edaa38f7ae3a46b8d6b6"
 dependencies = [
+ "ecdsa",
+ "elliptic-curve",
+ "primeorder",
+ "sha2",
+]
+
+[[package]]
+name = "p521"
+version = "0.13.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0fc9e2161f1f215afdfce23677034ae137bbd45016a880c2eb3ba8eb95f085b2"
+dependencies = [
+ "base16ct",
  "ecdsa",
  "elliptic-curve",
  "primeorder",

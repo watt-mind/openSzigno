@@ -60,6 +60,19 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
   carries a body again: it was posting the literal text `@issue-body.md`,
   because `gh api -f` does not read a value from a file, which also stopped
   it recognising and updating its own earlier issue.
+- Nightly fuzzing builds again, and a broken build is no longer filed as a
+  crash. Every target had failed since the workflow was added, all twelve with
+  the same error: cargo-fuzz defaults `--target` to the triple its own binary
+  was built for, and CI installs the prebuilt `x86_64-unknown-linux-musl`
+  cargo-fuzz, so every build asked for a statically linked target that
+  AddressSanitizer refuses and whose standard library the runner does not
+  have. The workflow now names `x86_64-unknown-linux-gnu` explicitly and adds
+  the `rust-src` component the `-Z build-std` modes need. It also builds each
+  target in its own step before running it, and reports the two outcomes
+  apart: `Fuzzing: crashes` only when a target wrote a crashing input, and
+  `Fuzzing: build failed` for anything else. The tracking issue also carries
+  its body again rather than the literal text `@issue-body.md`, which had
+  defeated the marker lookup and opened a fresh issue every night.
 
 ## [0.9.0] - 2026-09-09
 

@@ -47,6 +47,15 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  # cargo-fuzz's `--target` defaults to the triple *its own binary* was built
+  # for, not the host's. taiki-e/install-action below installs the prebuilt
+  # `x86_64-unknown-linux-musl` cargo-fuzz, so without this every build asked
+  # for a statically linked musl target: AddressSanitizer refuses a static
+  # libc ("sanitizer is incompatible with statically linked libc") and the
+  # musl std is not installed on the runner anyway. Name the host gnu triple
+  # explicitly so the installation method of cargo-fuzz cannot change what
+  # the fuzz targets are built for.
+  FUZZ_TRIPLE: x86_64-unknown-linux-gnu
 
 jobs:
   plan:
@@ -91,19 +100,57 @@ jobs:
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable branch @ 2026-09-03
         with:
           toolchain: nightly
+          targets: x86_64-unknown-linux-gnu
+          # Not needed by a default `cargo fuzz build`, but cargo-fuzz's
+          # `--build-std` and `--careful` modes pass `-Z build-std`, which
+          # cannot compile the standard library without the sources.
+          components: rust-src
       - uses: taiki-e/install-action@84f5ac3124727fb3d284d4d22ee9ab3654fd09a6 # v2.87.7
         with:
           tool: cargo-fuzz@0.13.2
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: fuzz -> target
+      # Built separately from the run below so a compile error is reported as
+      # a broken build, never as a crash: only `cargo fuzz run` failing after
+      # a successful build means the target found something.
+      - name: Build the fuzz target
+        id: build
+        env:
+          FUZZ_TARGET: ${{ matrix.target }}
+        run: |
+          set +e
+          cargo +nightly fuzz build --target "$FUZZ_TRIPLE" "$FUZZ_TARGET"
+          echo "status=$?" >> "$GITHUB_OUTPUT"
+        shell: bash
+      - name: Record the build failure
+        if: steps.build.outputs.status != '0'
+        env:
+          FUZZ_TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          mkdir -p build-failure
+          printf '%s\n' "$FUZZ_TARGET" > build-failure/target.txt
+        shell: bash
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: steps.build.outputs.status != '0'
+        with:
+          name: fuzz-build-failure-${{ matrix.target }}
+          retention-days: 90
+          path: build-failure
+      - name: Fail the job on a build failure
+        if: steps.build.outputs.status != '0'
+        run: |
+          echo "::error::cargo fuzz build ${{ matrix.target }} exited with status ${{ steps.build.outputs.status }}; this is a broken fuzz build, not a crash"
+          exit 1
       - name: Run cargo fuzz
         id: run
         env:
           FUZZ_SECONDS: ${{ github.event.inputs.seconds || '600' }}
+          FUZZ_TARGET: ${{ matrix.target }}
         run: |
           set +e
-          cargo +nightly fuzz run ${{ matrix.target }} -- \
+          cargo +nightly fuzz run --target "$FUZZ_TRIPLE" "$FUZZ_TARGET" -- \
             -max_total_time="$FUZZ_SECONDS" -jobs=1
           echo "status=$?" >> "$GITHUB_OUTPUT"
         shell: bash
@@ -112,6 +159,9 @@ jobs:
         with:
           name: fuzz-crash-${{ matrix.target }}
           retention-days: 90
+          # A run that fails without writing an input is not a crash, so the
+          # report job must not see a crash artifact for it.
+          if-no-files-found: ignore
           path: |
             fuzz/artifacts/${{ matrix.target }}
       - name: Fail the job on a crash
@@ -121,7 +171,7 @@ jobs:
           exit 1
 
   report:
-    name: Report crashes
+    name: Report failures
     needs: [fuzz]
     if: always() && contains(needs.*.result, 'failure')
     runs-on: ubuntu-latest
@@ -137,43 +187,97 @@ jobs:
           persist-credentials: false
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          pattern: fuzz-crash-*
+          pattern: fuzz-*
           path: artifacts
           merge-multiple: false
+      # A crash is claimed only when a target actually wrote a crashing input.
+      # Anything else (a broken fuzz build, a timeout, an infrastructure
+      # failure) is reported as a build failure under its own marker, so a
+      # workflow that never compiled cannot masquerade as a found bug.
       - name: Build the tracking-issue body
+        id: body
         run: |
           set -euo pipefail
-          marker='<!-- fuzz-crashes -->'
-          {
-            echo "$marker"
-            echo
-            echo "Nightly fuzzing found a crash. A crash is a bug in the crate"
-            echo "under test (docs/testing.md#fuzzing): reproduce with"
-            echo '`cargo +nightly fuzz run <target> <artifact>`, minimise with'
-            echo '`cargo +nightly fuzz tmin`, and commit the minimised input'
-            echo "under \`fuzz/artifacts/<target>/\` alongside the fix."
-            echo
-            echo "Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-            echo
-            echo "Crashing targets (see the run's uploaded artifacts for the inputs):"
-            for dir in artifacts/fuzz-crash-*; do
-              [ -d "$dir" ] || continue
-              echo "- ${dir#artifacts/fuzz-crash-}"
-            done
-          } > issue-body.md
+          crashed=()
+          for dir in artifacts/fuzz-crash-*; do
+            [ -d "$dir" ] || continue
+            crashed+=("${dir#artifacts/fuzz-crash-}")
+          done
+          failed=()
+          for dir in artifacts/fuzz-build-failure-*; do
+            [ -d "$dir" ] || continue
+            failed+=("${dir#artifacts/fuzz-build-failure-}")
+          done
+
+          run_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          if [ "${#crashed[@]}" -gt 0 ]; then
+            marker='<!-- fuzz-crashes -->'
+            title='Fuzzing: crashes'
+            {
+              echo "$marker"
+              echo
+              echo "Nightly fuzzing found a crash. A crash is a bug in the crate"
+              echo "under test (docs/testing.md#fuzzing): reproduce with"
+              echo '`cargo +nightly fuzz run <target> <artifact>`, minimise with'
+              echo '`cargo +nightly fuzz tmin`, and commit the minimised input'
+              echo "under \`fuzz/artifacts/<target>/\` alongside the fix."
+              echo
+              echo "Run: $run_url"
+              echo
+              echo "Crashing targets (see the run's uploaded artifacts for the inputs):"
+              printf -- '- %s\n' "${crashed[@]}"
+              if [ "${#failed[@]}" -gt 0 ]; then
+                echo
+                echo "These targets did not build in the same run, so they were not fuzzed:"
+                printf -- '- %s\n' "${failed[@]}"
+              fi
+            } > issue-body.md
+          else
+            marker='<!-- fuzz-build-failed -->'
+            title='Fuzzing: build failed'
+            {
+              echo "$marker"
+              echo
+              echo "Nightly fuzzing did not run: no target produced a crashing"
+              echo "input, the workflow itself failed. This is a broken fuzz"
+              echo "build or job, not a bug found in the crate under test."
+              echo "Reproduce with \`cargo +nightly fuzz build <target>\`"
+              echo "(docs/testing.md#fuzzing)."
+              echo
+              echo "Run: $run_url"
+              echo
+              if [ "${#failed[@]}" -gt 0 ]; then
+                echo "Targets that failed to build:"
+                printf -- '- %s\n' "${failed[@]}"
+              else
+                echo "No target reported a build failure either; see the run log"
+                echo "for the failing job."
+              fi
+            } > issue-body.md
+          fi
+          echo "marker=$marker" >> "$GITHUB_OUTPUT"
+          echo "title=$title" >> "$GITHUB_OUTPUT"
+        shell: bash
       - name: Open or update the tracking issue
         env:
           GH_TOKEN: ${{ github.token }}
+          MARKER: ${{ steps.body.outputs.marker }}
+          TITLE: ${{ steps.body.outputs.title }}
+          REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          marker='<!-- fuzz-crashes -->'
-          title='Fuzzing: crashes'
-          repo="${{ github.repository }}"
-
-          existing=$(gh api "repos/$repo/issues" -X GET -f state=open --paginate \
-            --jq "[.[] | select(.title == \"$title\") | select(.body | startswith(\"$marker\"))][0].number // empty")
+          existing=$(gh api "repos/$REPO/issues" -X GET -f state=open --paginate \
+            --jq "[.[] | select(.title == \"$TITLE\") | select(.body | startswith(\"$MARKER\"))][0].number // empty")
+          # `gh api -f` sends the literal string, `@file` included, so the
+          # body is assembled as JSON here instead: an issue whose body was
+          # the string "@issue-body.md" also broke the marker lookup above,
+          # opening a fresh issue every night.
           if [ -n "$existing" ]; then
-            gh api "repos/$repo/issues/$existing" -X PATCH -f body=@issue-body.md
+            jq -n --rawfile body issue-body.md '{body: $body}' \
+              | gh api "repos/$REPO/issues/$existing" -X PATCH --input -
           else
-            gh api "repos/$repo/issues" -X POST -f title="$title" -f body=@issue-body.md
+            jq -n --arg title "$TITLE" --rawfile body issue-body.md \
+              '{title: $title, body: $body}' \
+              | gh api "repos/$REPO/issues" -X POST --input -
           fi
+        shell: bash
