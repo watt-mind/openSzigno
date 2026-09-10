@@ -10,6 +10,21 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
 
 ## [Unreleased]
 
+### Fixed
+
+- The Security workflow's concurrency group keyed pushes on `github.ref`, so
+  two pushes to the same branch (for example two merges into `develop`)
+  shared a group and the earlier run was cancelled, erasing its result for
+  the commit it belonged to. The group now keys pushes on `github.sha`, like
+  `ci.yml`, and only cancels in-progress runs for pull requests, where an
+  earlier revision's result is superseded on purpose.
+- `lefthook.yml` ran `scripts/commit-msg.sh` with no message-file argument,
+  so the script fell back to `.git/COMMIT_EDITMSG` and exited 0 when that
+  file was absent, which is always true in a linked worktree, where `.git`
+  is a file, not a directory. The local commit-msg hook silently skipped the
+  Conventional Commits check there. `lefthook.yml` now passes lefthook's
+  `{1}` placeholder, the message file git provides, explicitly and quoted.
+
 ## [0.9.0] - 2026-09-09
 
 ### Added

@@ -3,11 +3,15 @@
 # CONTRIBUTING.md (type required, scope optional, `core`, `author`, `cli`, or `verify`).
 #
 # Usage:
-#   scripts/commit-msg.sh          # hook mode: reads .git/COMMIT_EDITMSG,
-#                                   # a no-op if that file is absent, so it
-#                                   # works under any hook runner
-#   scripts/commit-msg.sh <file>   # checks the given message file
+#   scripts/commit-msg.sh <file>   # checks the given message file; this is
+#                                   # how lefthook's commit-msg hook invokes
+#                                   # it (lefthook.yml passes "{1}", the
+#                                   # message file git provides)
 #   scripts/commit-msg.sh -        # checks a message read from stdin
+#   scripts/commit-msg.sh          # legacy hook mode: reads
+#                                   # .git/COMMIT_EDITMSG, a no-op if that
+#                                   # file is absent; kept only for direct,
+#                                   # argument-less invocation
 #
 # The file/stdin forms are what CI's `hygiene` job (.github/workflows/ci.yml)
 # reuses to check every commit subject in a pull request's range.
