@@ -44,6 +44,22 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
   is a file, not a directory. The local commit-msg hook silently skipped the
   Conventional Commits check there. `lefthook.yml` now passes lefthook's
   `{1}` placeholder, the message file git provides, explicitly and quoted.
+- The nightly mutation-testing workflow no longer fails a run that finished
+  with a passing score. `cargo mutants` exits 3 when any test timed out, and
+  the workflow treated every status but 0 and 2 as a tool error, so the
+  `openszigno-core` job failed on its 11 timeouts even though its 92.12%
+  caught rate cleared the 91.12% floor. Statuses 0, 2 and 3 now all count as
+  "the run completed", leaving the score to `scripts/mutants_gate.py`, which
+  excludes timeouts from both sides of `caught / (caught + missed)` the way
+  the recorded floors were seeded; 1, 4 and every other status still fail the
+  job, 4 being a failing baseline rather than an unviable mutant. The
+  `openszigno-verify` job, which was being killed mid-run by its 90-minute
+  timeout, now has four hours for its 1,756 mutants, and the tracking issue
+  the workflow files says in its title and body whether the run found
+  survivors below the floor or failed to complete at all. That issue also
+  carries a body again: it was posting the literal text `@issue-body.md`,
+  because `gh api -f` does not read a value from a file, which also stopped
+  it recognising and updating its own earlier issue.
 
 ## [0.9.0] - 2026-09-09
 
