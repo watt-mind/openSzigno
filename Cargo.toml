@@ -35,7 +35,7 @@ encoding_rs = "0.8.40"
 # HMAC-SHA-256, used only to derive the deterministic synthetic
 # content-encryption key PKCS#1 v1.5 implicit rejection substitutes for an
 # unusable padding block (`openszigno-core`'s `decrypt/keytrans.rs`).
-hmac = "0.12.1"
+hmac = "0.13.0"
 p256 = { version = "0.13.2", default-features = false, features = ["ecdsa", "std", "pkcs8"] }
 p384 = { version = "0.13.1", default-features = false, features = ["ecdsa", "std", "pkcs8"] }
 p521 = { version = "0.13.3", default-features = false, features = ["ecdsa", "std", "pkcs8"] }
