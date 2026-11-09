@@ -74,7 +74,7 @@ unicode-normalization = "0.1"
 ureq = { version = "3.4.1", default-features = false, features = ["rustls"] }
 x509-cert = "0.2.5"
 zeroize = "1.8.1"
-zip = { version = "8.1.0", default-features = false, features = ["deflate"] }
+zip = { version = "9.0.5", default-features = false, features = ["deflate"] }
 
 # Test-only RSA key generation is bignum arithmetic, which is roughly fifty
 # times slower unoptimized. Optimizing just these two dependencies keeps the
