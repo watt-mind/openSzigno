@@ -518,7 +518,7 @@ pub fn with_urls(
 ) -> (Pki, PathBuf, PathBuf, Fixture) {
     let (listener, address) = reserved();
     let url = |path: &str| format!("http://{address}{path}");
-    let pki = pki(crl_path.map(&url).as_deref(), ocsp_path.map(url).as_deref());
+    let pki = pki(crl_path.map(url).as_deref(), ocsp_path.map(url).as_deref());
     let routes = routes(&pki);
     let server = serve_on(listener, address, routes);
 
