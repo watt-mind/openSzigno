@@ -58,6 +58,30 @@ ignore = [
   # 0.2`/`cms 0.2` versions this workspace is on. Adopting it now would pull
   # pre-release crate versions into `Cargo.lock`. Revisit once `rsa` 0.10 is
   # a stable release and `x509-cert`/`cms` have compatible releases too.
+  # RUSTSEC-2026-0367, -0368, -0369, -0429 (`zip` < 9): all four are in
+  # `ZipArchive::extract` / `ZipStreamReader::extract` (SUID/SGID bits kept,
+  # symlink targets and permissions applied outside the destination, abort on
+  # a large symlink entry). Nothing in this workspace calls either: a ZIP
+  # payload is read as exactly one regular member through `by_index`, symlink
+  # members are refused as `unsafe_zip_member`, and `extract` writes the
+  # decoded bytes itself under the extraction policy. `zip` 9 is the fix but
+  # changes reader behaviour the stable error-code contract depends on (an
+  # unsupported compression method surfaces on read, and a member larger than
+  # its declared size fails inside the reader); revisit when adopting it.
+  { id = "RUSTSEC-2026-0367", reason = "ZipArchive::extract only; never called -- see the comment above" },
+  { id = "RUSTSEC-2026-0368", reason = "ZipArchive::extract only; never called -- see the comment above" },
+  { id = "RUSTSEC-2026-0369", reason = "ZipArchive/ZipStreamReader::extract only; never called -- see the comment above" },
+  { id = "RUSTSEC-2026-0429", reason = "ZipArchive::extract only; never called -- see the comment above" },
+  # RUSTSEC-2026-0387 (`crypto-bigint` < 0.7.6, constant-time violations):
+  # reached through `elliptic-curve` 0.13 under `p256`/`p384`/`p521`. Those
+  # versions pin `crypto-bigint` 0.5, which has no patched release; the fix
+  # is the RustCrypto 0.14 stack (`p256` 0.14 with `der` 0.8 / `pkcs8` 0.11),
+  # which is incompatible with the `x509-cert` 0.2 / `cms` 0.2 versions this
+  # workspace is on (the same blocker as `rsa` 0.10 below). `verify` only
+  # runs public-key ECDSA verification, which handles no secret. The one
+  # secret-key path is `sign` with a local P-256 key, a one-shot operation on
+  # the signer's own machine, not a service an attacker can time repeatedly.
+  { id = "RUSTSEC-2026-0387", reason = "crypto-bigint 0.5 via elliptic-curve 0.13 has no fix; verify does public-key ops only and local P-256 signing is one-shot -- see the comment above" },
   { id = "RUSTSEC-2023-0071", reason = "no signing; extract --decrypt-key rejects PKCS#1 v1.5 implicitly (constant-time unpad, synthetic key on failure, no early return before the content cipher), which removes the control-flow, error-surface and coarse-timing oracle; what remains is rsa 0.9's non-constant-time private exponentiation, masked by blinding and fixed only by rsa 0.10 -- see the comment above and SECURITY.md" },
 ]
 
