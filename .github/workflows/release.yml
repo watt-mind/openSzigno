@@ -70,6 +70,9 @@ jobs:
       - name: Cache dist
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
+          # NOT AS GENERATED: one-day retention (see docs/releasing.md,
+          # "Artifact retention"). Reapply after `dist generate`.
+          retention-days: 1
           name: cargo-dist-cache
           path: ~/.cargo/bin/dist
       # sure would be cool if github gave us proper conditionals...
@@ -86,6 +89,9 @@ jobs:
       - name: "Upload dist-manifest.json"
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
+          # NOT AS GENERATED: one-day retention (see docs/releasing.md,
+          # "Artifact retention"). Reapply after `dist generate`.
+          retention-days: 1
           name: artifacts-plan-dist-manifest
           path: plan-dist-manifest.json
 
@@ -167,6 +173,9 @@ jobs:
       - name: "Upload artifacts"
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
+          # NOT AS GENERATED: one-day retention (see docs/releasing.md,
+          # "Artifact retention"). Reapply after `dist generate`.
+          retention-days: 1
           name: artifacts-build-local-${{ join(matrix.targets, '_') }}
           path: |
             ${{ steps.cargo-dist.outputs.paths }}
@@ -214,6 +223,9 @@ jobs:
       - name: "Upload artifacts"
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
+          # NOT AS GENERATED: one-day retention (see docs/releasing.md,
+          # "Artifact retention"). Reapply after `dist generate`.
+          retention-days: 1
           name: artifacts-build-global
           path: |
             ${{ steps.cargo-dist.outputs.paths }}
@@ -270,6 +282,9 @@ jobs:
       - name: "Upload dist-manifest.json"
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
+          # NOT AS GENERATED: one-day retention (see docs/releasing.md,
+          # "Artifact retention"). Reapply after `dist generate`.
+          retention-days: 1
           # Overwrite the previous copy
           name: artifacts-dist-manifest
           path: dist-manifest.json

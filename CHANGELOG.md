@@ -12,6 +12,12 @@ While the project is pre-1.0, the JSON envelope is versioned separately by its
 
 ### Changed
 
+- The five `actions/upload-artifact` steps in the release workflow keep their
+  artifacts for one day instead of the repository default of ninety; they
+  only hand build outputs between jobs of one run. The fuzzing (90 days) and
+  mutation-testing (14 days) artifacts keep their longer retention as the
+  documented exception. See
+  [Artifact retention](docs/releasing.md#artifact-retention).
 - `AGENTS.md` now agrees with the implemented command set. Its scope
   sentence, its verification boundary and its CLI ownership map name
   `timestamp` and `csc login`, the author crate row names the timestamp and
