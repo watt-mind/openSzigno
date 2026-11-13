@@ -109,7 +109,7 @@ jobs:
         if: always()
         with:
           name: mutants-openszigno-core
-          retention-days: 14
+          retention-days: 2
           path: |
             mutants-core/mutants.out
             mutants-core-gate-summary.md
@@ -198,7 +198,7 @@ jobs:
         if: always()
         with:
           name: mutants-openszigno-verify
-          retention-days: 14
+          retention-days: 2
           path: |
             mutants-verify/mutants.out
             mutants-verify-gate-summary.md
